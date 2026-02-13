@@ -1,0 +1,16 @@
+{
+  "package_id": "uk.wintermute.epubreader",
+  "edition": "202601",
+  "name": "epub-reader",
+  "version": "0.5.0",
+  "min_app_version": "0.1.0",
+  "tagline": "Read EPUB books on your Even G2 glasses",
+  "description": "A simple EPUB reader for Even Realities G2 smart glasses. Upload an EPUB file via the web UI, then read page-by-page using touchpad gestures.",
+  "author": "Your Name <you@example.com>",
+  "entrypoint": "index.html",
+  "permissions": {
+    "network": [
+      "evenhub.evenrealities.com"
+    ]
+  }
+}

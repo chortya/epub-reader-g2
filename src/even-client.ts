@@ -1,0 +1,433 @@
+import {
+  CreateStartUpPageContainer,
+  DeviceConnectType,
+  OsEventTypeList,
+  RebuildPageContainer,
+  TextContainerProperty,
+  waitForEvenAppBridge,
+  type EvenHubEvent,
+} from '@evenrealities/even_hub_sdk';
+import type { Book, ReadingPosition, ViewState } from './types';
+import { paginateText } from './paginator';
+import {
+  DISPLAY_HEIGHT,
+  DISPLAY_WIDTH,
+  STORAGE_KEY_BOOK_TITLE,
+  STORAGE_KEY_POSITION,
+  SWIPE_COOLDOWN_MS,
+} from './constants';
+import { appendEventLog, clamp, setStatus, truncateForList } from './utils';
+
+type Bridge = Awaited<ReturnType<typeof waitForEvenAppBridge>>;
+
+const ITEMS_PER_PAGE = 4;
+const ROW_HEIGHT = Math.floor(DISPLAY_HEIGHT / ITEMS_PER_PAGE); // 72px
+
+const BAR_HEIGHT = 18;
+const TEXT_HEIGHT = DISPLAY_HEIGHT - BAR_HEIGHT; // 270px for reading text
+
+export class EvenEpubClient {
+  private view: ViewState = 'library';
+  private book: Book | null = null;
+  private chapterPages: string[][] = [];
+  private chapterIndex = 0;
+  private pageIndex = 0;
+  private librarySelectedIndex = 0;
+  private isInitializedUi = false;
+  private lastSwipeTime = 0;
+
+  constructor(private bridge: Bridge) {}
+
+  async init(): Promise<void> {
+    this.bridge.onDeviceStatusChanged((status) => {
+      appendEventLog(`Device status: ${status.connectType}`);
+      if (status.connectType === DeviceConnectType.Connected) {
+        this.refreshCurrentView();
+      }
+    });
+
+    this.bridge.onEvenHubEvent((event) => {
+      this.onEvenHubEvent(event);
+    });
+
+    await this.ensureStartupUi();
+    await this.showWelcome();
+  }
+
+  async loadBook(book: Book): Promise<void> {
+    this.book = book;
+    this.chapterPages = book.chapters.map((ch) => paginateText(ch.text));
+
+    const restored = await this.restorePosition(book.title);
+    if (restored) {
+      this.chapterIndex = restored.chapterIndex;
+      this.pageIndex = restored.pageIndex;
+    } else {
+      this.chapterIndex = 0;
+      this.pageIndex = 0;
+    }
+
+    this.librarySelectedIndex = 0;
+    setStatus(`Loaded: ${book.title} (${book.chapters.length} chapters)`);
+    await this.showChapterList();
+  }
+
+  // --- UI Setup ---
+
+  private async ensureStartupUi(): Promise<void> {
+    if (this.isInitializedUi) return;
+
+    // Always create exactly 3 containers at startup (proven to work).
+    // rebuildPageContainer can change the count later.
+    const STARTUP_SLOTS = 3;
+    const startupHeight = Math.floor(DISPLAY_HEIGHT / STARTUP_SLOTS);
+    const textContainers: TextContainerProperty[] = [];
+    for (let i = 0; i < STARTUP_SLOTS; i++) {
+      textContainers.push(
+        new TextContainerProperty({
+          xPosition: 0,
+          yPosition: i * startupHeight,
+          width: DISPLAY_WIDTH,
+          height: startupHeight,
+          borderWidth: 0,
+          borderColor: 5,
+          paddingLength: 2,
+          containerID: i + 1,
+          containerName: `slot-${i}`,
+          content: i === 0 ? 'EPUB Reader\nUpload a book to begin.' : '',
+          isEventCapture: i === 0 ? 1 : 0,
+        }),
+      );
+    }
+
+    await this.bridge.createStartUpPageContainer(
+      new CreateStartUpPageContainer({
+        containerTotalNum: STARTUP_SLOTS,
+        textObject: textContainers,
+      }),
+    );
+
+    this.isInitializedUi = true;
+  }
+
+  // --- Views ---
+
+  private async showWelcome(): Promise<void> {
+    this.view = 'library';
+
+    const W = 58;
+    const pad = (s: string) => s.padEnd(W);
+    const logo = [
+      pad(''),
+      pad('              /   \\'),
+      pad('              | | |'),
+      pad('              | | |'),
+      pad('              \\ \\ /'),
+      pad(''),
+      pad('           E P U B  R E A D'),
+      pad(''),
+      pad('        Upload book via web UI'),
+    ].join('\n');
+
+    const textContainer = new TextContainerProperty({
+      xPosition: 0,
+      yPosition: 0,
+      width: DISPLAY_WIDTH,
+      height: DISPLAY_HEIGHT,
+      borderWidth: 0,
+      borderColor: 5,
+      paddingLength: 4,
+      containerID: 1,
+      containerName: 'welcome',
+      content: logo,
+      isEventCapture: 1,
+    });
+
+    await this.bridge.rebuildPageContainer(
+      new RebuildPageContainer({
+        containerTotalNum: 1,
+        textObject: [textContainer],
+      }),
+    );
+  }
+
+  private async showChapterList(): Promise<void> {
+    if (!this.book) return;
+    this.view = 'library';
+
+    const total = this.book.chapters.length;
+    const pageStart =
+      Math.floor(this.librarySelectedIndex / ITEMS_PER_PAGE) * ITEMS_PER_PAGE;
+    const selectedSlot = this.librarySelectedIndex - pageStart;
+
+    const labels: string[] = [];
+    for (let i = 0; i < ITEMS_PER_PAGE; i++) {
+      const idx = pageStart + i;
+      if (idx < total) {
+        const ch = this.book.chapters[idx];
+        labels.push(truncateForList(`${idx + 1}. ${ch.title}`, 42));
+      } else {
+        labels.push('');
+      }
+    }
+
+    await this.rebuildSlots(labels, selectedSlot);
+
+    setStatus(
+      `Chapters: ${this.librarySelectedIndex + 1}/${total}. Swipe=browse, Tap=read, DblTap=resume`,
+    );
+    appendEventLog(`Chapter list page ${pageStart + 1}-${Math.min(pageStart + ITEMS_PER_PAGE, total)}`);
+  }
+
+  private async showPage(): Promise<void> {
+    if (!this.book || this.chapterPages.length === 0) return;
+    this.view = 'reading';
+
+    const pages = this.chapterPages[this.chapterIndex];
+    const page = pages[this.pageIndex];
+    const chapter = this.book.chapters[this.chapterIndex];
+    const totalPages = pages.length;
+    const progress = totalPages > 1 ? (this.pageIndex + 1) / totalPages : 1;
+
+    // Thin Unicode progress bar: ━ filled, ─ empty
+    const barLen = 36;
+    const filled = Math.round(barLen * progress);
+    const label = '\u2501'.repeat(filled) + '\u2500'.repeat(barLen - filled);
+
+    // Text container: top area for page content
+    const textContainer = new TextContainerProperty({
+      xPosition: 0,
+      yPosition: 0,
+      width: DISPLAY_WIDTH,
+      height: TEXT_HEIGHT,
+      borderWidth: 0,
+      borderColor: 5,
+      paddingLength: 6,
+      containerID: 1,
+      containerName: 'text',
+      content: page,
+      isEventCapture: 1,
+    });
+
+    // Footer container: thin bottom strip for progress
+    const footerContainer = new TextContainerProperty({
+      xPosition: 0,
+      yPosition: TEXT_HEIGHT,
+      width: DISPLAY_WIDTH,
+      height: BAR_HEIGHT,
+      borderWidth: 0,
+      borderColor: 5,
+      paddingLength: 0,
+      containerID: 2,
+      containerName: 'footer',
+      content: label,
+      isEventCapture: 0,
+    });
+
+    await this.bridge.rebuildPageContainer(
+      new RebuildPageContainer({
+        containerTotalNum: 2,
+        textObject: [textContainer, footerContainer],
+      }),
+    );
+
+    await this.savePosition();
+
+    setStatus(
+      `Ch ${this.chapterIndex + 1}/${this.book.chapters.length}: ${chapter.title} | Page ${this.pageIndex + 1}/${totalPages}`,
+    );
+  }
+
+  private async rebuildSlots(labels: string[], selectedSlot: number): Promise<void> {
+    const textContainers: TextContainerProperty[] = [];
+
+    for (let i = 0; i < ITEMS_PER_PAGE; i++) {
+      const isSelected = i === selectedSlot;
+      textContainers.push(
+        new TextContainerProperty({
+          xPosition: 0,
+          yPosition: i * ROW_HEIGHT,
+          width: DISPLAY_WIDTH,
+          height: ROW_HEIGHT,
+          borderWidth: isSelected ? 1 : 0,
+          borderColor: 5,
+          borderRdaius: 8,
+          paddingLength: 2,
+          containerID: i + 1,
+          containerName: `slot-${i}`,
+          content: labels[i] ?? '',
+          isEventCapture: isSelected ? 1 : (selectedSlot < 0 && i === 0 ? 1 : 0),
+        }),
+      );
+    }
+
+    await this.bridge.rebuildPageContainer(
+      new RebuildPageContainer({
+        containerTotalNum: ITEMS_PER_PAGE,
+        textObject: textContainers,
+      }),
+    );
+  }
+
+  // --- Navigation ---
+
+  private async nextPage(): Promise<void> {
+    if (!this.book) return;
+    const pages = this.chapterPages[this.chapterIndex];
+
+    if (this.pageIndex < pages.length - 1) {
+      this.pageIndex++;
+    } else if (this.chapterIndex < this.book.chapters.length - 1) {
+      this.chapterIndex++;
+      this.pageIndex = 0;
+    } else {
+      appendEventLog('End of book');
+      return;
+    }
+
+    await this.showPage();
+  }
+
+  private async prevPage(): Promise<void> {
+    if (!this.book) return;
+
+    if (this.pageIndex > 0) {
+      this.pageIndex--;
+    } else if (this.chapterIndex > 0) {
+      this.chapterIndex--;
+      this.pageIndex = this.chapterPages[this.chapterIndex].length - 1;
+    } else {
+      appendEventLog('Beginning of book');
+      return;
+    }
+
+    await this.showPage();
+  }
+
+  private async nextChapterInList(): Promise<void> {
+    if (!this.book) return;
+    if (this.librarySelectedIndex < this.book.chapters.length - 1) {
+      this.librarySelectedIndex++;
+      await this.showChapterList();
+    }
+  }
+
+  private async prevChapterInList(): Promise<void> {
+    if (this.librarySelectedIndex > 0) {
+      this.librarySelectedIndex--;
+      await this.showChapterList();
+    }
+  }
+
+  private async selectCurrentChapter(): Promise<void> {
+    if (!this.book) return;
+    this.chapterIndex = this.librarySelectedIndex;
+    this.pageIndex = 0;
+    await this.showPage();
+  }
+
+  private async refreshCurrentView(): Promise<void> {
+    if (this.view === 'reading') {
+      await this.showPage();
+    } else if (this.book) {
+      await this.showChapterList();
+    } else {
+      await this.showWelcome();
+    }
+  }
+
+  // --- Event Handling ---
+
+  private swipeThrottleOk(): boolean {
+    const now = Date.now();
+    if (now - this.lastSwipeTime < SWIPE_COOLDOWN_MS) return false;
+    this.lastSwipeTime = now;
+    return true;
+  }
+
+  private async onEvenHubEvent(event: EvenHubEvent): Promise<void> {
+    appendEventLog(`Event: ${JSON.stringify(event)}`);
+
+    const te = event?.textEvent ?? event?.sysEvent;
+    if (!te) return;
+
+    const eventType = te.eventType;
+
+    if (eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
+      if (!this.swipeThrottleOk()) return;
+      if (this.view === 'reading') {
+        await this.nextPage();
+      } else if (this.view === 'library') {
+        await this.nextChapterInList();
+      }
+      return;
+    }
+
+    if (eventType === OsEventTypeList.SCROLL_TOP_EVENT) {
+      if (!this.swipeThrottleOk()) return;
+      if (this.view === 'reading') {
+        await this.prevPage();
+      } else if (this.view === 'library') {
+        await this.prevChapterInList();
+      }
+      return;
+    }
+
+    if (eventType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
+      if (this.view === 'reading' && this.book) {
+        appendEventLog('Double tap -> chapter list');
+        this.librarySelectedIndex = this.chapterIndex;
+        await this.showChapterList();
+      }
+      return;
+    }
+
+    // CLICK_EVENT = 0, which fromJson may normalize to undefined
+    if (eventType === OsEventTypeList.CLICK_EVENT || eventType === undefined) {
+      if (this.view === 'library' && this.book) {
+        appendEventLog(`Opening chapter ${this.librarySelectedIndex + 1}`);
+        await this.selectCurrentChapter();
+      }
+      return;
+    }
+  }
+
+  // --- Persistence ---
+
+  private async savePosition(): Promise<void> {
+    if (!this.book) return;
+    try {
+      const pos: ReadingPosition = {
+        chapterIndex: this.chapterIndex,
+        pageIndex: this.pageIndex,
+      };
+      await this.bridge.setLocalStorage(STORAGE_KEY_POSITION, JSON.stringify(pos));
+      await this.bridge.setLocalStorage(STORAGE_KEY_BOOK_TITLE, this.book.title);
+    } catch {
+      // Silently ignore storage failures
+    }
+  }
+
+  private async restorePosition(bookTitle: string): Promise<ReadingPosition | null> {
+    try {
+      const savedTitle = await this.bridge.getLocalStorage(STORAGE_KEY_BOOK_TITLE);
+      if (savedTitle !== bookTitle) return null;
+
+      const raw = await this.bridge.getLocalStorage(STORAGE_KEY_POSITION);
+      if (!raw) return null;
+
+      const pos: ReadingPosition = JSON.parse(raw);
+      if (
+        pos.chapterIndex >= 0 &&
+        pos.chapterIndex < this.chapterPages.length &&
+        pos.pageIndex >= 0 &&
+        pos.pageIndex < this.chapterPages[pos.chapterIndex].length
+      ) {
+        return pos;
+      }
+    } catch {
+      // Ignore parse/storage errors
+    }
+    return null;
+  }
+}
