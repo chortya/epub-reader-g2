@@ -1,6 +1,8 @@
 import {
   CreateStartUpPageContainer,
   DeviceConnectType,
+  ImageContainerProperty,
+  ImageRawDataUpdate,
   OsEventTypeList,
   RebuildPageContainer,
   TextContainerProperty,
@@ -9,6 +11,7 @@ import {
 } from '@evenrealities/even_hub_sdk';
 import type { Book, ReadingPosition, ViewState } from './types';
 import { paginateText } from './paginator';
+import { generateLogoBuffer, LOGO_HEIGHT, LOGO_WIDTH } from './logo_image';
 import {
   DISPLAY_HEIGHT,
   DISPLAY_WIDTH,
@@ -36,7 +39,7 @@ export class EvenEpubClient {
   private isInitializedUi = false;
   private lastSwipeTime = 0;
 
-  constructor(private bridge: Bridge) {}
+  constructor(private bridge: Bridge) { }
 
   async init(): Promise<void> {
     this.bridge.onDeviceStatusChanged((status) => {
@@ -115,38 +118,45 @@ export class EvenEpubClient {
   private async showWelcome(): Promise<void> {
     this.view = 'library';
 
-    const W = 58;
-    const pad = (s: string) => s.padEnd(W);
-    const logo = [
-      pad(''),
-      pad('              /   \\'),
-      pad('              | | |'),
-      pad('              | | |'),
-      pad('              \\ \\ /'),
-      pad(''),
-      pad('           E P U B  R E A D'),
-      pad(''),
-      pad('        Upload book via web UI'),
-    ].join('\n');
+    // Title Text
+    const title = "G2 ePub Reader";
+    const titlePadding = Math.floor((55 - title.length) / 2); // 55 chars max width approx? 
+    // Actually, let's just rely on centered xPosition? 
+    // TextContainerProperty doesn't auto-center text horizontally AFAIK, usually left aligned.
+    // So padding is needed. " " * padding.
+    const centeredTitle = ' '.repeat(Math.max(0, titlePadding)) + title;
 
-    const textContainer = new TextContainerProperty({
+    const titleContainer = new TextContainerProperty({
       xPosition: 0,
-      yPosition: 0,
+      yPosition: Math.floor(DISPLAY_HEIGHT / 2) - 40, // Center-ish
       width: DISPLAY_WIDTH,
-      height: DISPLAY_HEIGHT,
-      borderWidth: 0,
-      borderColor: 5,
-      paddingLength: 4,
-      containerID: 1,
-      containerName: 'welcome',
-      content: logo,
+      height: 40,
+      containerID: 100,
+      containerName: 'title',
+      content: centeredTitle,
+      isEventCapture: 0,
+    });
+
+    // Text instructions below
+    const instruction = 'Upload book via web UI';
+    const padLeft = Math.floor((55 - instruction.length) / 2);
+    const centeredInstruction = ' '.repeat(Math.max(0, padLeft)) + instruction;
+
+    const instructionContainer = new TextContainerProperty({
+      xPosition: 0,
+      yPosition: Math.floor(DISPLAY_HEIGHT / 2) + 10,
+      width: DISPLAY_WIDTH,
+      height: 40,
+      containerID: 101,
+      containerName: 'instruction',
+      content: centeredInstruction,
       isEventCapture: 1,
     });
 
     await this.bridge.rebuildPageContainer(
       new RebuildPageContainer({
-        containerTotalNum: 1,
-        textObject: [textContainer],
+        containerTotalNum: 2,
+        textObject: [titleContainer, instructionContainer],
       }),
     );
   }
@@ -403,8 +413,9 @@ export class EvenEpubClient {
       };
       await this.bridge.setLocalStorage(STORAGE_KEY_POSITION, JSON.stringify(pos));
       await this.bridge.setLocalStorage(STORAGE_KEY_BOOK_TITLE, this.book.title);
-    } catch {
-      // Silently ignore storage failures
+    } catch (e) {
+      console.warn('Failed to save position:', e);
+      appendEventLog('Warning: Could not save reading position');
     }
   }
 
@@ -423,10 +434,12 @@ export class EvenEpubClient {
         pos.pageIndex >= 0 &&
         pos.pageIndex < this.chapterPages[pos.chapterIndex].length
       ) {
+        appendEventLog(`Restored position: Ch ${pos.chapterIndex + 1}, Pg ${pos.pageIndex + 1}`);
         return pos;
       }
-    } catch {
-      // Ignore parse/storage errors
+    } catch (e) {
+      console.warn('Failed to restore position:', e);
+      appendEventLog('Warning: Could not restore reading position');
     }
     return null;
   }

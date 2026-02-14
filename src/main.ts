@@ -2,26 +2,49 @@ import { waitForEvenAppBridge } from '@evenrealities/even_hub_sdk';
 import { setStatus, appendEventLog, withTimeout } from './utils';
 import { parseEpub } from './epub-parser';
 import { EvenEpubClient } from './even-client';
+import { APP_LOGO } from './logo';
+
+import { MockBridge } from './mock-bridge';
 
 async function main() {
-  setStatus('Waiting for Even bridge\u2026');
+  setStatus(APP_LOGO + '\n\nWaiting for Even bridge\u2026');
+
+  // Check for force simulator mode
+  const urlParams = new URLSearchParams(window.location.search);
+  const forceSimulator = urlParams.get('simulator') === 'true';
 
   let bridge = null;
-  try {
-    bridge = await withTimeout(waitForEvenAppBridge(), 2500, 'waitForEvenAppBridge');
-  } catch (e) {
-    console.warn('Bridge not available, switching to browser mode', e);
+  if (!forceSimulator) {
+    try {
+      bridge = await withTimeout(waitForEvenAppBridge(), 2500, 'waitForEvenAppBridge');
+    } catch (e) {
+      console.warn('Bridge not available, switching to browser mode', e);
+    }
+  }
+
+  // Fallback to MockBridge if real bridge is missing or forced
+  if (!bridge || forceSimulator) {
+    console.log('Using MockBridge');
+    bridge = MockBridge.getInstance();
+    setStatus('Simulator Mode');
   }
 
   let client: EvenEpubClient | null = null;
 
   if (bridge) {
-    client = new EvenEpubClient(bridge);
+    // Force cast because MockBridge is compatible enough for our usage
+    client = new EvenEpubClient(bridge as any);
     await client.init();
-    setStatus('Connected. Upload an EPUB file to begin reading.');
-    appendEventLog('Bridge connected');
+    if (bridge instanceof MockBridge) {
+      setStatus(APP_LOGO + '\n\nSimulator Ready. Upload an EPUB file to test.');
+      appendEventLog('MockBridge connected');
+    } else {
+      setStatus(APP_LOGO + '\n\nConnected. Upload an EPUB file to begin reading.');
+      appendEventLog('Bridge connected');
+    }
   } else {
-    setStatus('Bridge not available (browser mode). Upload an EPUB to test parsing.');
+    // Should not happen with MockBridge
+    setStatus('Error: Could not initialize bridge.');
   }
 
   // Wire up file upload

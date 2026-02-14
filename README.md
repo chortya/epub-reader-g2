@@ -56,7 +56,15 @@ npm run qr
 
 ## Display Specs
 
-Optimized for the Even G2 display: 576×288 px, 58 characters per line, 9 lines per page.
+## Display Specs
+
+Optimized for the Even G2 display: **576×288 px**, using native text rendering.
+- **Layout**: ~55 characters per line, 9 lines per page.
+- **Hyphenation**: English, German, Russian, Ukrainian.
+
+## Startup Screen
+
+Displays "G2 ePub Reader" using native text widgets for reliable rendering on the glasses.
 
 ## Tech Stack
 

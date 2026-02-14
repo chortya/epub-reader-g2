@@ -179,8 +179,11 @@ function walkNode(node: Node | null, parts: string[]): void {
   for (let child = node.firstChild; child; child = child.nextSibling) {
     if (child.nodeType === Node.TEXT_NODE) {
       const t = child.textContent ?? '';
-      if (t.trim().length > 0) {
-        parts.push(t);
+      // Replace all whitespace (newlines, tabs) with single spaces
+      // This duplicates clear logic but ensures we don't pass source \n to output
+      const normalized = t.replace(/\s+/g, ' ');
+      if (normalized.length > 0) {
+        parts.push(normalized);
       }
     } else if (child.nodeType === Node.ELEMENT_NODE) {
       const el = child as Element;

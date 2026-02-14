@@ -1,11 +1,13 @@
-export const DISPLAY_WIDTH = 576;
-export const DISPLAY_HEIGHT = 288;
+export const DISPLAY_WIDTH = 640;
+export const DISPLAY_HEIGHT = 350;
 
 // Characters per line for word-wrapping
-export const CHARS_PER_LINE = 58;
+// Updated to 55 to safely fit 18px font in 640px width (avoiding edge truncation)
+export const CHARS_PER_LINE = 55;
 
-// Lines per page (fits 270px text area without scrolling)
-export const LINES_PER_PAGE = 9;
+// Lines per page (fits ~330px text area without scrolling)
+// Verified 10 lines is safe for real hardware (15 caused scrolling)
+export const LINES_PER_PAGE = 10;
 
 export const SWIPE_COOLDOWN_MS = 300;
 
