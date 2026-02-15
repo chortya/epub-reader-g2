@@ -99,17 +99,32 @@ export class MockBridge {
         const screen = document.getElementById('sim-screen');
         if (screen && data.containerID) {
             const imgDiv = screen.querySelector(`#img-${data.containerID}`);
-            const canvas = imgDiv?.querySelector('canvas');
+            const canvas = imgDiv?.querySelector('canvas') as HTMLCanvasElement | null;
             if (canvas && data.imageData) {
                 const ctx = canvas.getContext('2d');
                 if (ctx) {
                     const width = canvas.width;
                     const height = canvas.height;
-                    // Assuming data is standard array of 0/255 for simulator
-                    const pixels = data.imageData as number[];
+
+                    // Handle raw bytes (Uint8Array) or number[]
+                    let pixels: Uint8Array | number[];
+                    if (data.imageData instanceof Uint8Array) {
+                        pixels = data.imageData;
+                    } else if (Array.isArray(data.imageData)) {
+                        pixels = data.imageData;
+                    } else {
+                        // Fallback
+                        pixels = new Uint8Array(data.imageData as any);
+                    }
+
                     const imgData = ctx.createImageData(width, height);
-                    for (let i = 0; i < pixels.length; i++) {
-                        const val = pixels[i]; // 0 or 255
+
+                    // SAFETY: Don't overflow imgData.data (which is width * height * 4)
+                    // and don't overflow pixels array.
+                    const maxPixels = Math.min(pixels.length, width * height);
+
+                    for (let i = 0; i < maxPixels; i++) {
+                        const val = pixels[i];
                         const offset = i * 4;
                         imgData.data[offset] = 0;   // R
                         imgData.data[offset + 1] = val; // G (Green phosphor)

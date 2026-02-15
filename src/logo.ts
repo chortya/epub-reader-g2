@@ -1,13 +1,7 @@
 export const APP_LOGO = `
- __________________________________________________
-|                                                  |
-|  G 2   E P U B   R E A D E R                     |
-|__________________________________________________|
-|                                                  |
-|  [ Upload EPUB to Start ]                        |
-|                                                  |
-|  v1.0.0                                          |
-|__________________________________________________|
+G2 ePUB Reader
+
+Upload ePub file via WebUI to start reading
 `;
 
 export const START_SCREEN = `

@@ -1,18 +1,18 @@
+
 import {
   CreateStartUpPageContainer,
   DeviceConnectType,
-  ImageContainerProperty,
-  ImageRawDataUpdate,
   OsEventTypeList,
   RebuildPageContainer,
   TextContainerProperty,
+  TextContainerUpgrade,
   waitForEvenAppBridge,
   type EvenHubEvent,
 } from '@evenrealities/even_hub_sdk';
 import type { Book, ReadingPosition, ViewState } from './types';
 import { paginateText } from './paginator';
-import { generateLogoBuffer, LOGO_HEIGHT, LOGO_WIDTH } from './logo_image';
 import {
+  CHARS_PER_LINE,
   DISPLAY_HEIGHT,
   DISPLAY_WIDTH,
   STORAGE_KEY_BOOK_TITLE,
@@ -26,8 +26,8 @@ type Bridge = Awaited<ReturnType<typeof waitForEvenAppBridge>>;
 const ITEMS_PER_PAGE = 4;
 const ROW_HEIGHT = Math.floor(DISPLAY_HEIGHT / ITEMS_PER_PAGE); // 72px
 
-const BAR_HEIGHT = 18;
-const TEXT_HEIGHT = DISPLAY_HEIGHT - BAR_HEIGHT; // 270px for reading text
+const BAR_HEIGHT = 30;
+const TEXT_HEIGHT = 256; // Text area (with BAR_HEIGHT=30, total = 286px)
 
 export class EvenEpubClient {
   private view: ViewState = 'library';
@@ -42,9 +42,10 @@ export class EvenEpubClient {
   constructor(private bridge: Bridge) { }
 
   async init(): Promise<void> {
-    this.bridge.onDeviceStatusChanged((status) => {
-      appendEventLog(`Device status: ${status.connectType}`);
+    this.bridge.onDeviceStatusChanged(async (status) => {
+      appendEventLog(`Device status: ${status.connectType} `);
       if (status.connectType === DeviceConnectType.Connected) {
+        await this.ensureStartupUi();
         this.refreshCurrentView();
       }
     });
@@ -53,8 +54,14 @@ export class EvenEpubClient {
       this.onEvenHubEvent(event);
     });
 
-    await this.ensureStartupUi();
-    await this.showWelcome();
+    // Initial check: Only create UI if already connected
+    const device = await this.bridge.getDeviceInfo();
+    if (device?.status?.connectType === DeviceConnectType.Connected) {
+      await this.ensureStartupUi();
+      await this.showWelcome();
+    } else {
+      appendEventLog('Waiting for device connection to initialize UI...');
+    }
   }
 
   async loadBook(book: Book): Promise<void> {
@@ -80,37 +87,48 @@ export class EvenEpubClient {
   private async ensureStartupUi(): Promise<void> {
     if (this.isInitializedUi) return;
 
-    // Always create exactly 3 containers at startup (proven to work).
-    // rebuildPageContainer can change the count later.
-    const STARTUP_SLOTS = 3;
-    const startupHeight = Math.floor(DISPLAY_HEIGHT / STARTUP_SLOTS);
-    const textContainers: TextContainerProperty[] = [];
-    for (let i = 0; i < STARTUP_SLOTS; i++) {
-      textContainers.push(
-        new TextContainerProperty({
-          xPosition: 0,
-          yPosition: i * startupHeight,
-          width: DISPLAY_WIDTH,
-          height: startupHeight,
-          borderWidth: 0,
-          borderColor: 5,
-          paddingLength: 2,
-          containerID: i + 1,
-          containerName: `slot-${i}`,
-          content: i === 0 ? 'EPUB Reader\nUpload a book to begin.' : '',
-          isEventCapture: i === 0 ? 1 : 0,
-        }),
-      );
-    }
+    const title = 'G2 ePUB Reader';
+    const titlePad = Math.floor((CHARS_PER_LINE - title.length) / 2);
+    const centeredTitle = ' '.repeat(Math.max(0, titlePad)) + title;
 
-    await this.bridge.createStartUpPageContainer(
+    const titleContainer = new TextContainerProperty({
+      xPosition: 0,
+      yPosition: 80,
+      width: DISPLAY_WIDTH,
+      height: 40,
+      containerID: 1,
+      containerName: 'title',
+      content: centeredTitle,
+      isEventCapture: 0,
+    });
+
+    const instruction = 'Upload ePub file via WebUI to start reading';
+    const instrPad = Math.floor((CHARS_PER_LINE - instruction.length) / 2);
+    const centeredInstruction = ' '.repeat(Math.max(0, instrPad)) + instruction;
+
+    const instructionContainer = new TextContainerProperty({
+      xPosition: 0,
+      yPosition: 170,
+      width: DISPLAY_WIDTH,
+      height: 40,
+      containerID: 2,
+      containerName: 'instruction',
+      content: centeredInstruction,
+      isEventCapture: 1,
+    });
+
+    const result = await this.bridge.createStartUpPageContainer(
       new CreateStartUpPageContainer({
-        containerTotalNum: STARTUP_SLOTS,
-        textObject: textContainers,
+        containerTotalNum: 2,
+        textObject: [titleContainer, instructionContainer],
       }),
     );
 
-    this.isInitializedUi = true;
+    if (result === 0) {
+      this.isInitializedUi = true;
+    } else {
+      console.error('Failed to create startup page:', result);
+    }
   }
 
   // --- Views ---
@@ -118,36 +136,32 @@ export class EvenEpubClient {
   private async showWelcome(): Promise<void> {
     this.view = 'library';
 
-    // Title Text
-    const title = "G2 ePub Reader";
-    const titlePadding = Math.floor((55 - title.length) / 2); // 55 chars max width approx? 
-    // Actually, let's just rely on centered xPosition? 
-    // TextContainerProperty doesn't auto-center text horizontally AFAIK, usually left aligned.
-    // So padding is needed. " " * padding.
-    const centeredTitle = ' '.repeat(Math.max(0, titlePadding)) + title;
+    // Rebuild the startup UI (Title + Instruction)
+    const title = 'G2 ePUB Reader';
+    const titlePad = Math.floor((CHARS_PER_LINE - title.length) / 2);
+    const centeredTitle = ' '.repeat(Math.max(0, titlePad)) + title;
 
     const titleContainer = new TextContainerProperty({
       xPosition: 0,
-      yPosition: Math.floor(DISPLAY_HEIGHT / 2) - 40, // Center-ish
+      yPosition: 80,
       width: DISPLAY_WIDTH,
       height: 40,
-      containerID: 100,
+      containerID: 1,
       containerName: 'title',
       content: centeredTitle,
       isEventCapture: 0,
     });
 
-    // Text instructions below
-    const instruction = 'Upload book via web UI';
-    const padLeft = Math.floor((55 - instruction.length) / 2);
-    const centeredInstruction = ' '.repeat(Math.max(0, padLeft)) + instruction;
+    const instruction = 'Upload ePub file via WebUI to start reading';
+    const instrPad = Math.floor((CHARS_PER_LINE - instruction.length) / 2);
+    const centeredInstruction = ' '.repeat(Math.max(0, instrPad)) + instruction;
 
     const instructionContainer = new TextContainerProperty({
       xPosition: 0,
-      yPosition: Math.floor(DISPLAY_HEIGHT / 2) + 10,
+      yPosition: 170,
       width: DISPLAY_WIDTH,
       height: 40,
-      containerID: 101,
+      containerID: 2,
       containerName: 'instruction',
       content: centeredInstruction,
       isEventCapture: 1,
@@ -159,6 +173,8 @@ export class EvenEpubClient {
         textObject: [titleContainer, instructionContainer],
       }),
     );
+
+    setStatus('Ready. Upload an EPUB file.');
   }
 
   private async showChapterList(): Promise<void> {
@@ -175,7 +191,7 @@ export class EvenEpubClient {
       const idx = pageStart + i;
       if (idx < total) {
         const ch = this.book.chapters[idx];
-        labels.push(truncateForList(`${idx + 1}. ${ch.title}`, 42));
+        labels.push(truncateForList(`${idx + 1}. ${ch.title} `, 42));
       } else {
         labels.push('');
       }
@@ -199,10 +215,10 @@ export class EvenEpubClient {
     const totalPages = pages.length;
     const progress = totalPages > 1 ? (this.pageIndex + 1) / totalPages : 1;
 
-    // Thin Unicode progress bar: ━ filled, ─ empty
-    const barLen = 36;
+    // Unicode progress bar: ━ filled, ─ empty
+    const barLen = 30;
     const filled = Math.round(barLen * progress);
-    const label = '\u2501'.repeat(filled) + '\u2500'.repeat(barLen - filled);
+    const label = '━'.repeat(filled) + '─'.repeat(barLen - filled);
 
     // Text container: top area for page content
     const textContainer = new TextContainerProperty({
@@ -244,7 +260,8 @@ export class EvenEpubClient {
     await this.savePosition();
 
     setStatus(
-      `Ch ${this.chapterIndex + 1}/${this.book.chapters.length}: ${chapter.title} | Page ${this.pageIndex + 1}/${totalPages}`,
+      `Ch ${this.chapterIndex + 1
+      } / ${this.book.chapters.length}: ${chapter.title} | Page ${this.pageIndex + 1}/${totalPages}`,
     );
   }
 
@@ -356,7 +373,8 @@ export class EvenEpubClient {
   }
 
   private async onEvenHubEvent(event: EvenHubEvent): Promise<void> {
-    appendEventLog(`Event: ${JSON.stringify(event)}`);
+    appendEventLog(`Event: ${JSON.stringify(event)
+      }`);
 
     const te = event?.textEvent ?? event?.sysEvent;
     if (!te) return;
@@ -388,6 +406,10 @@ export class EvenEpubClient {
         appendEventLog('Double tap -> chapter list');
         this.librarySelectedIndex = this.chapterIndex;
         await this.showChapterList();
+      } else if (this.view === 'library' && this.book) {
+        appendEventLog('Double tap -> exit book');
+        this.book = null;
+        await this.showWelcome();
       }
       return;
     }
@@ -395,7 +417,7 @@ export class EvenEpubClient {
     // CLICK_EVENT = 0, which fromJson may normalize to undefined
     if (eventType === OsEventTypeList.CLICK_EVENT || eventType === undefined) {
       if (this.view === 'library' && this.book) {
-        appendEventLog(`Opening chapter ${this.librarySelectedIndex + 1}`);
+        appendEventLog(`Opening chapter ${this.librarySelectedIndex + 1} `);
         await this.selectCurrentChapter();
       }
       return;
@@ -434,7 +456,7 @@ export class EvenEpubClient {
         pos.pageIndex >= 0 &&
         pos.pageIndex < this.chapterPages[pos.chapterIndex].length
       ) {
-        appendEventLog(`Restored position: Ch ${pos.chapterIndex + 1}, Pg ${pos.pageIndex + 1}`);
+        appendEventLog(`Restored position: Ch ${pos.chapterIndex + 1}, Pg ${pos.pageIndex + 1} `);
         return pos;
       }
     } catch (e) {

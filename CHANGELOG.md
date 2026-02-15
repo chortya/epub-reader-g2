@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.7.0] - 2026-02-15
+
+### Added
+- **Text-Only Logo**: Replaced the image-based logo with a stable "G2 ePUB Reader" text title on the startup screen (centered, max 60 chars).
+- **Connection Gating**: Implemented strict startup logic that waits for `DeviceConnectType.Connected` before creating any UI. This resolves issues where the start screen would not appear on the physical device.
+- **Improved Centering**: Dynamic text centering based on a 60-character line limit.
+
+### Fixed
+- **Startup Visibility**: Fixed a critical race condition where startup commands were sent before the device connection handshake was complete.
+- **Double Click Navigation**: Restored the ability to double-click in the Chapter List to return to the main "Upload ePub" screen.
+- **Text Overflow**: Reduced `CHARS_PER_LINE` from 61 to 60 to prevent text wrapping issues on certain EPUBs.
+
+### Removed
+- **Image Handling**: Removed all legacy image processing code (BMP conversion, 1-bit packing) to ensure maximum stability and SDK compliance.
+
 ## [0.6.0] - 2026-02-14
 
 ### Added
