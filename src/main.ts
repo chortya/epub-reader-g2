@@ -56,30 +56,26 @@ async function main() {
 
   // Setup Settings UI
   const charsInput = document.getElementById('setting-chars') as HTMLInputElement | null;
-  const linesInput = document.getElementById('setting-lines') as HTMLInputElement | null;
   const hyphenConfig = document.getElementById('setting-hyphenation') as HTMLInputElement | null;
   const statusBarConfig = document.getElementById('setting-statusbar') as HTMLInputElement | null;
   const saveBtn = document.getElementById('save-settings-btn') as HTMLButtonElement | null;
 
-  if (charsInput && linesInput && hyphenConfig && statusBarConfig && saveBtn) {
+  if (charsInput && hyphenConfig && statusBarConfig && saveBtn) {
     charsInput.value = config.charsPerLine.toString();
-    linesInput.value = config.linesPerPage.toString();
     hyphenConfig.checked = config.hyphenation;
     statusBarConfig.checked = config.showStatusBar;
 
     saveBtn.addEventListener('click', async () => {
       const chars = parseInt(charsInput.value, 10);
-      const lines = parseInt(linesInput.value, 10);
       const hyph = hyphenConfig.checked;
       const showStatus = statusBarConfig.checked;
 
       if (!isNaN(chars) && chars >= 20 && chars <= 100) config.charsPerLine = chars;
-      if (!isNaN(lines) && lines >= 3 && lines <= 20) config.linesPerPage = lines;
       config.hyphenation = hyph;
       config.showStatusBar = showStatus;
 
       saveSettings();
-      appendEventLog(`Settings saved: ${config.charsPerLine} chars, ${config.linesPerPage} lines, status bar: ${config.showStatusBar}`);
+      appendEventLog(`Settings saved: ${config.charsPerLine} chars, hyphenation: ${config.hyphenation}, status bar: ${config.showStatusBar}`);
 
       if (client) {
         setStatus('Applying new settings...');

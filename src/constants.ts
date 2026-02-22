@@ -16,7 +16,6 @@ export const SETTINGS_KEY = 'epub-reader-settings';
 
 export const config = {
     charsPerLine: 59,
-    linesPerPage: 9,
     hyphenation: true,
     showStatusBar: true,
 };
@@ -26,7 +25,6 @@ try {
     if (saved) {
         const parsed = JSON.parse(saved);
         if (parsed.charsPerLine !== undefined) config.charsPerLine = parsed.charsPerLine;
-        if (parsed.linesPerPage !== undefined) config.linesPerPage = parsed.linesPerPage;
         if (parsed.hyphenation !== undefined) config.hyphenation = parsed.hyphenation;
         if (parsed.showStatusBar !== undefined) config.showStatusBar = parsed.showStatusBar;
     }
