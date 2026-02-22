@@ -4,7 +4,7 @@ export interface GutenbergBook {
 }
 
 export async function fetchTopGutenbergBooks(): Promise<GutenbergBook[]> {
-    const url = 'https://corsproxy.io/?' + encodeURIComponent('https://www.gutenberg.org/browse/scores/top');
+    const url = 'https://api.allorigins.win/raw?url=' + encodeURIComponent('https://www.gutenberg.org/browse/scores/top');
     const response = await fetch(url);
     if (!response.ok) {
         throw new Error('Failed to fetch from Project Gutenberg');
@@ -41,11 +41,14 @@ export async function fetchTopGutenbergBooks(): Promise<GutenbergBook[]> {
 export async function downloadGutenbergEpub(id: string): Promise<ArrayBuffer> {
     const epubUrls = [
         `https://www.gutenberg.org/ebooks/${id}.epub.noimages`,
-        `https://www.gutenberg.org/ebooks/${id}.epub.images`
+        `https://www.gutenberg.org/ebooks/${id}.epub.images`,
+        `https://www.gutenberg.org/files/${id}/${id}-h.zip`, // fallback if they're weird
+        `https://www.gutenberg.org/cache/epub/${id}/pg${id}-images.epub`,
+        `https://www.gutenberg.org/cache/epub/${id}/pg${id}.epub`
     ];
 
     for (const directUrl of epubUrls) {
-        const url = 'https://corsproxy.io/?' + encodeURIComponent(directUrl);
+        const url = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(directUrl);
         const res = await fetch(url);
         if (res.ok) {
             return res.arrayBuffer();
