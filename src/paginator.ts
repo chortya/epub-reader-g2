@@ -72,7 +72,7 @@ function wrapParagraph(text: string, maxChars: number, lines: string[]): void {
     }
 
     // Word doesn't fit. Try hyphenation on current line.
-    if (hyphenator && word.length >= 5) {
+    if (config.hyphenation && hyphenator && word.length >= 5) {
       const remaining = maxChars - currentLine.length;
       const hyphenated = tryHyphenate(word, remaining);
       if (hyphenated) {
@@ -92,7 +92,7 @@ function wrapParagraph(text: string, maxChars: number, lines: string[]): void {
     if (word.length > maxChars) {
       let rest = word;
       while (rest.length > maxChars) {
-        if (hyphenator) {
+        if (config.hyphenation && hyphenator) {
           const hyp = tryHyphenate(rest, maxChars);
           if (hyp) {
             lines.push(hyp.head + '-');

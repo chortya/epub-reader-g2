@@ -91,6 +91,11 @@
       border-radius: 4px;
     }
 
+    .settings-panel input[type=checkbox] {
+      margin-left: 0.5rem;
+    }
+
+
     .settings-panel button,
     .action-btn {
       background: #444;
@@ -162,6 +167,10 @@
       <label>
         Lines per page:
         <input type="number" id="setting-lines" min="3" max="20" />
+      </label>
+      <label>
+        Enable hyphenation:
+        <input type="checkbox" id="setting-hyphenation" />
       </label>
       <button id="save-settings-btn" class="action-btn">Apply Settings</button>
     </div>

@@ -52,19 +52,25 @@ async function main() {
   // Setup Settings UI
   const charsInput = document.getElementById('setting-chars') as HTMLInputElement | null;
   const linesInput = document.getElementById('setting-lines') as HTMLInputElement | null;
+  const hyphenConfig = document.getElementById('setting-hyphenation') as HTMLInputElement | null;
   const saveBtn = document.getElementById('save-settings-btn') as HTMLButtonElement | null;
 
-  if (charsInput && linesInput && saveBtn) {
+  if (charsInput && linesInput && hyphenConfig && saveBtn) {
     charsInput.value = config.charsPerLine.toString();
     linesInput.value = config.linesPerPage.toString();
+    hyphenConfig.checked = config.hyphenation;
 
     saveBtn.addEventListener('click', async () => {
       const chars = parseInt(charsInput.value, 10);
       const lines = parseInt(linesInput.value, 10);
+      const hyph = hyphenConfig.checked;
+
       if (!isNaN(chars) && chars >= 20 && chars <= 100) config.charsPerLine = chars;
       if (!isNaN(lines) && lines >= 3 && lines <= 20) config.linesPerPage = lines;
+      config.hyphenation = hyph;
+
       saveSettings();
-      appendEventLog(`Settings saved: ${config.charsPerLine} chars, ${config.linesPerPage} lines`);
+      appendEventLog(`Settings saved: ${config.charsPerLine} chars, ${config.linesPerPage} lines, hyphenation: ${config.hyphenation}`);
 
       if (client) {
         setStatus('Applying new settings...');
