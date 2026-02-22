@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "npm run dev:serve & sleep 1 && npm run qr && wait",
     "dev:serve": "vite --host 0.0.0.0 --strictPort",
-    "dev:sim": "npm run dev:serve:sim & sleep 1 && npm run qr:sim && wait",
+    "dev:sim": "npm run dev:serve & sleep 1 && evenhub-simulator http://localhost:5173/ && wait",
     "dev:serve:sim": "vite --host 0.0.0.0 --strictPort --open '/?simulator=true'",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0 --strictPort",
