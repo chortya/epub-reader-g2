@@ -107,7 +107,8 @@ export class EvenEpubClient {
 
   private getWelcomeContainers(): TextContainerProperty[] {
     const title = 'G2 ePUB Reader';
-    const titlePad = Math.floor((config.charsPerLine - title.length) / 2);
+    const maxChars = config.statusBarPosition === 'right' ? 58 : 59;
+    const titlePad = Math.floor((maxChars - title.length) / 2);
     const centeredTitle = ' '.repeat(Math.max(0, titlePad)) + title;
 
     const titleContainer = new TextContainerProperty({
@@ -122,7 +123,7 @@ export class EvenEpubClient {
     });
 
     const instruction = 'Upload ePub file via WebUI to start reading';
-    const instrPad = Math.floor((config.charsPerLine - instruction.length) / 2);
+    const instrPad = Math.floor((maxChars - instruction.length) / 2);
     const centeredInstruction = ' '.repeat(Math.max(0, instrPad)) + instruction;
 
     const instructionContainer = new TextContainerProperty({
@@ -227,21 +228,27 @@ export class EvenEpubClient {
 
     // Calculate the remaining space for the progress bar.
     // Unicode line-drawing characters (━) are significantly wider than standard text in this font (~1.6x).
-    const remainingStandardChars = config.charsPerLine - infoText.length;
+    const maxChars = config.statusBarPosition === 'right' ? 58 : 59;
+    const remainingStandardChars = maxChars - infoText.length;
     let targetBarLen = Math.floor(remainingStandardChars / 1.6) - 2;
     targetBarLen = Math.max(5, Math.min(20, targetBarLen)); // Cap it so it doesn't look ridiculous
     const filled = Math.round(targetBarLen * progress);
     const bar = '━'.repeat(filled) + '─'.repeat(targetBarLen - filled);
     const label = `${infoText}[${bar}]`;
 
-    const barHeight = config.showStatusBar ? 30 : 0;
+    const hasBottomBar = config.statusBarPosition === 'bottom';
+    const hasRightBar = config.statusBarPosition === 'right';
+
+    const barHeight = hasBottomBar ? 30 : 0;
+    const rightBarWidth = hasRightBar ? 26 : 0;
     const textHeight = DISPLAY_HEIGHT - barHeight;
+    const textWidth = DISPLAY_WIDTH - rightBarWidth;
 
     // Text container: top area for page content
     const textContainer = new TextContainerProperty({
       xPosition: 0,
       yPosition: 0,
-      width: DISPLAY_WIDTH,
+      width: textWidth,
       height: textHeight,
       borderWidth: 0,
       borderColor: 5,
@@ -254,7 +261,7 @@ export class EvenEpubClient {
 
     const textObjects = [textContainer];
 
-    if (config.showStatusBar) {
+    if (hasBottomBar) {
       // Footer container: thin bottom strip for progress
       const footerContainer = new TextContainerProperty({
         xPosition: 0,
@@ -270,6 +277,27 @@ export class EvenEpubClient {
         isEventCapture: 0,
       });
       textObjects.push(footerContainer);
+    } else if (hasRightBar) {
+      const verticalBarLines = 8;
+      const verticalFilled = Math.round(verticalBarLines * progress);
+      const verticalBar = '█'.repeat(verticalFilled) + '│'.repeat(verticalBarLines - verticalFilled);
+      // Construct a vertical text by splitting characters with newlines
+      const verticalContent = verticalBar.split('').join('\n');
+
+      const sideContainer = new TextContainerProperty({
+        xPosition: textWidth,
+        yPosition: 0,
+        width: rightBarWidth,
+        height: DISPLAY_HEIGHT,
+        borderWidth: 0,
+        borderColor: 5,
+        paddingLength: 0,
+        containerID: 2,
+        containerName: 'sidebar',
+        content: verticalContent,
+        isEventCapture: 0,
+      });
+      textObjects.push(sideContainer);
     }
 
     await this.bridge.rebuildPageContainer(

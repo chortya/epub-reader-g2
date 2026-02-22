@@ -55,27 +55,23 @@ async function main() {
   }
 
   // Setup Settings UI
-  const charsInput = document.getElementById('setting-chars') as HTMLInputElement | null;
   const hyphenConfig = document.getElementById('setting-hyphenation') as HTMLInputElement | null;
-  const statusBarConfig = document.getElementById('setting-statusbar') as HTMLInputElement | null;
+  const statusBarConfig = document.getElementById('setting-statusbar') as HTMLSelectElement | null;
   const saveBtn = document.getElementById('save-settings-btn') as HTMLButtonElement | null;
 
-  if (charsInput && hyphenConfig && statusBarConfig && saveBtn) {
-    charsInput.value = config.charsPerLine.toString();
+  if (hyphenConfig && statusBarConfig && saveBtn) {
     hyphenConfig.checked = config.hyphenation;
-    statusBarConfig.checked = config.showStatusBar;
+    statusBarConfig.value = config.statusBarPosition;
 
     saveBtn.addEventListener('click', async () => {
-      const chars = parseInt(charsInput.value, 10);
       const hyph = hyphenConfig.checked;
-      const showStatus = statusBarConfig.checked;
+      const showStatus = statusBarConfig.value as 'none' | 'bottom' | 'right';
 
-      if (!isNaN(chars) && chars >= 20 && chars <= 100) config.charsPerLine = chars;
       config.hyphenation = hyph;
-      config.showStatusBar = showStatus;
+      config.statusBarPosition = showStatus;
 
       saveSettings();
-      appendEventLog(`Settings saved: ${config.charsPerLine} chars, hyphenation: ${config.hyphenation}, status bar: ${config.showStatusBar}`);
+      appendEventLog(`Settings saved - hyphenation: ${config.hyphenation}, status bar: ${config.statusBarPosition}`);
 
       if (client) {
         setStatus('Applying new settings...');

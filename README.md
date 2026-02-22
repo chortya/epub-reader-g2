@@ -1,13 +1,15 @@
-# EPUB Reader for Even Realities G2
+# Even G2 ePub Reader
 
-Read EPUB books on your Even Realities G2 smart glasses. Upload an EPUB file via the web UI, then read page-by-page using touchpad gestures on the glasses display.
+Read EPUB books directly on your Even Realities G2 smart glasses. Upload an EPUB file via the web UI or download one of the Top 100 public domain titles from Project Gutenberg, then read page-by-page using touchpad gestures on the glasses display.
 
 ## Features
 
 - **EPUB parsing** — extracts chapters and metadata from standard EPUB files
+- **Project Gutenberg integration** — discover and download the Top 100 free books directly from the reader UI
 - **Smart text layout** — word wrapping with language-aware hyphenation (English, German, Russian, Ukrainian)
 - **Touchpad navigation** — swipe up/down for pages, tap to select chapters, double-tap for chapter list
-- **Reading progress** — visual progress bar and automatic position saving across sessions
+- **Customizable Layout** — configure the visual layout with horizontal (bottom) or vertical (right) progress bars
+- **Reading progress** — visual progress indicators and automatic position saving across sessions
 - **Chapter browser** — paginated chapter list for quick navigation
 - **Browser testing mode** — develop and test in a web browser without glasses connected
 

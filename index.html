@@ -172,8 +172,10 @@
 
 <body>
   <div id="app">
-    <h1>EPUB Reader</h1>
-    <p>Upload an EPUB file to read on your Even G2 glasses.</p>
+    <div style="text-align: center; margin-bottom: 2rem;">
+      <h1>Even G2 ePub Reader</h1>
+      <p>Select ePub file on from device or load Top100 books from Project Gutenberg</p>
+    </div>
 
     <!-- Simulator Container -->
     <div id="simulator-container" style="margin: 20px 0;"></div>
@@ -185,17 +187,19 @@
 
     <div class="settings-panel">
       <h3>Reader Settings</h3>
-      <label>
-        Characters per line:
-        <input type="number" id="setting-chars" min="20" max="100" />
-      </label>
+
       <label>
         Enable hyphenation:
         <input type="checkbox" id="setting-hyphenation" />
       </label>
       <label>
-        Show status bar:
-        <input type="checkbox" id="setting-statusbar" />
+        Status bar position:
+        <select id="setting-statusbar"
+          style="margin-left: 0.5rem; background: #333; color: white; border: 1px solid #444; padding: 4px; border-radius: 4px;">
+          <option value="none">Hidden</option>
+          <option value="bottom">Bottom (Horizontal)</option>
+          <option value="right">Right (Vertical)</option>
+        </select>
       </label>
       <button id="save-settings-btn" class="action-btn">Apply Settings</button>
 

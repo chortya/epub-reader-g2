@@ -14,8 +14,8 @@ export function setHyphenator(h: Hypher): void {
  */
 export function paginateText(
   text: string,
-  maxChars = config.charsPerLine,
-  maxLines = config.showStatusBar ? 9 : 10,
+  maxChars = config.statusBarPosition === 'right' ? 58 : 59,
+  maxLines = config.statusBarPosition === 'bottom' ? 9 : 10,
 ): string[] {
   if (!text || text.trim().length === 0) return ['(empty)'];
 

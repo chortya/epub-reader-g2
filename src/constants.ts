@@ -15,18 +15,21 @@ export const DISPLAY_HEIGHT = 288; // SDK maximum Y range
 export const SETTINGS_KEY = 'epub-reader-settings';
 
 export const config = {
-    charsPerLine: 59,
     hyphenation: true,
-    showStatusBar: true,
+    statusBarPosition: 'bottom' as 'bottom' | 'right' | 'none',
 };
 
 try {
     const saved = localStorage.getItem(SETTINGS_KEY);
     if (saved) {
         const parsed = JSON.parse(saved);
-        if (parsed.charsPerLine !== undefined) config.charsPerLine = parsed.charsPerLine;
         if (parsed.hyphenation !== undefined) config.hyphenation = parsed.hyphenation;
-        if (parsed.showStatusBar !== undefined) config.showStatusBar = parsed.showStatusBar;
+
+        if (parsed.statusBarPosition !== undefined) {
+            config.statusBarPosition = parsed.statusBarPosition;
+        } else if (parsed.showStatusBar !== undefined) {
+            config.statusBarPosition = parsed.showStatusBar ? 'bottom' : 'none';
+        }
     }
 } catch (e) {
     // ignore
