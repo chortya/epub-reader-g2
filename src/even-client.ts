@@ -210,15 +210,16 @@ export class EvenEpubClient {
     const chapter = this.book.chapters[this.chapterIndex];
     const totalPages = pages.length;
     const progress = totalPages > 1 ? (this.pageIndex + 1) / totalPages : 1;
-
-    // Unicode progress bar with chapter and page info
+    // Progress info text and bar
     const totalChapters = this.book.chapters.length;
-    const infoText = ` Ch ${this.chapterIndex + 1}/${totalChapters} Pg ${this.pageIndex + 1}/${totalPages}`;
-    const targetBarLen = config.charsPerLine - infoText.length - 2;
-    const barLen = Math.max(5, targetBarLen);
-    const filled = Math.round(barLen * progress);
-    const bar = '━'.repeat(filled) + '─'.repeat(barLen - filled);
-    const label = `[${bar}]${infoText}`;
+    const infoText = `Ch ${this.chapterIndex + 1}/${totalChapters} Pg ${this.pageIndex + 1}/${totalPages} `;
+    // Reduce effective chars per line since line drawing characters can be wider than standard font
+    const effectiveChars = Math.floor(config.charsPerLine * 0.85);
+    const targetBarLen = Math.max(5, effectiveChars - infoText.length - 2);
+
+    const filled = Math.round(targetBarLen * progress);
+    const bar = '━'.repeat(filled) + '─'.repeat(targetBarLen - filled);
+    const label = `${infoText}[${bar}]`;
 
     // Text container: top area for page content
     const textContainer = new TextContainerProperty({
