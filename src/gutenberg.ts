@@ -15,7 +15,7 @@ export async function fetchTopGutenbergBooks(): Promise<GutenbergBook[]> {
     const doc = parser.parseFromString(text, 'text/html');
 
     const headers = Array.from(doc.querySelectorAll('h2'));
-    const targetHeader = headers.find(h => h.textContent && h.textContent.includes('Top 100 EBooks today'));
+    const targetHeader = headers.find(h => h.id === 'books-last1' || (h.textContent && h.textContent.includes('Top 100 EBooks yesterday')));
 
     if (!targetHeader) return [];
 
