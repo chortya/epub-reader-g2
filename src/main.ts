@@ -209,7 +209,7 @@ async function main() {
           try {
             setStatus(`Restoring: ${item.title}...`);
             const book = await parseEpub(item.buffer);
-            await clientToUse.loadBook(book);
+            await clientToUse.loadBook(book, true);
             await saveEpubBufferToDB(item.buffer, item.filename, book.title);
             await renderBookmarks(clientToUse);
           } catch (e) {

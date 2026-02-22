@@ -66,7 +66,7 @@ export class EvenEpubClient {
     }
   }
 
-  async loadBook(book: Book): Promise<void> {
+  async loadBook(book: Book, resume: boolean = false): Promise<void> {
     this.book = book;
     this.chapterPages = book.chapters.map((ch) => paginateText(ch.text));
 
@@ -79,9 +79,14 @@ export class EvenEpubClient {
       this.pageIndex = 0;
     }
 
-    this.librarySelectedIndex = 0;
+    this.librarySelectedIndex = restored ? restored.chapterIndex : 0;
     setStatus(`Loaded: ${book.title} (${book.chapters.length} chapters)`);
-    await this.showChapterList();
+
+    if (resume && restored) {
+      await this.showPage();
+    } else {
+      await this.showChapterList();
+    }
   }
 
   async applySettings(): Promise<void> {
