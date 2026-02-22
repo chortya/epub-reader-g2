@@ -12,10 +12,27 @@ export const DISPLAY_HEIGHT = 288; // SDK maximum Y range
 
 // Characters per line for word-wrapping
 // Updated to 60 to prevent overflows in some EPUBs
-export const CHARS_PER_LINE = 60;
+export const SETTINGS_KEY = 'epub-reader-settings';
 
-// Lines per page (9 lines to fit with progress bar in 288px)
-export const LINES_PER_PAGE = 9;
+export const config = {
+    charsPerLine: 60,
+    linesPerPage: 9,
+};
+
+try {
+    const saved = localStorage.getItem(SETTINGS_KEY);
+    if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed.charsPerLine) config.charsPerLine = parsed.charsPerLine;
+        if (parsed.linesPerPage) config.linesPerPage = parsed.linesPerPage;
+    }
+} catch (e) {
+    // ignore
+}
+
+export function saveSettings() {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(config));
+}
 
 export const SWIPE_COOLDOWN_MS = 300;
 

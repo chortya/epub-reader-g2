@@ -16,7 +16,7 @@ export async function parseEpub(data: ArrayBuffer): Promise<Book> {
 
   // 2. Parse the OPF to get spine order and manifest
   const opfXml = await readZipFile(zip, opfPath);
-  const opfDir = opfPath.includes('/') ? opfPath.substring(0, opfPath.lastIndexOf('/') + 1) : '';
+  const opfDir = dirnameZipPath(opfPath);
   const { title, spineItems } = parseOpf(opfXml, opfDir);
 
   // 3. Extract text from each spine item
@@ -54,11 +54,12 @@ export async function parseEpub(data: ArrayBuffer): Promise<Book> {
 }
 
 async function readZipFile(zip: JSZip, path: string): Promise<string> {
-  let file = zip.file(path);
+  const candidates = buildZipPathCandidates(path);
+  let file = candidates.map((candidate) => zip.file(candidate)).find(Boolean) ?? null;
   if (!file) {
-    const lowerPath = path.toLowerCase();
+    const lowerCandidates = new Set(candidates.map((candidate) => candidate.toLowerCase()));
     zip.forEach((relativePath, entry) => {
-      if (relativePath.toLowerCase() === lowerPath && !file) {
+      if (lowerCandidates.has(relativePath.toLowerCase()) && !file) {
         file = entry;
       }
     });
@@ -77,7 +78,7 @@ function parseContainerXml(xml: string): string {
   if (!fullPath) {
     throw new Error('Could not find OPF path in container.xml');
   }
-  return fullPath;
+  return normalizeZipPath(safeDecodeUriPath(fullPath));
 }
 
 type SpineItem = { href: string; title: string };
@@ -96,7 +97,10 @@ function parseOpf(xml: string, opfDir: string): { title: string; spineItems: Spi
     const href = item.getAttribute('href');
     const mediaType = item.getAttribute('media-type') ?? '';
     if (id && href && mediaType.includes('html')) {
-      manifestMap.set(id, opfDir + href);
+      const resolvedHref = resolveZipPath(opfDir, href);
+      if (resolvedHref) {
+        manifestMap.set(id, resolvedHref);
+      }
     }
   });
 
@@ -124,12 +128,64 @@ function tryExtractTitlesFromToc(
   // We fall back to "Chapter N" naming, which is set in parseEpub().
 }
 
+function dirnameZipPath(path: string): string {
+  const normalized = normalizeZipPath(path);
+  const lastSlash = normalized.lastIndexOf('/');
+  return lastSlash >= 0 ? normalized.slice(0, lastSlash + 1) : '';
+}
+
+function resolveZipPath(baseDir: string, href: string): string | null {
+  const decodedHref = safeDecodeUriPath(href);
+  if (/^[a-z][a-z0-9+.-]*:/i.test(decodedHref)) {
+    return null;
+  }
+  const joined = decodedHref.startsWith('/') ? decodedHref : `${baseDir}${decodedHref}`;
+  return normalizeZipPath(joined);
+}
+
+function buildZipPathCandidates(path: string): string[] {
+  const raw = path.trim();
+  const decoded = safeDecodeUriPath(raw);
+  const normalizedRaw = normalizeZipPath(raw);
+  const normalizedDecoded = normalizeZipPath(decoded);
+  const encodedDecoded = encodeURI(normalizedDecoded);
+
+  return Array.from(
+    new Set([raw, decoded, normalizedRaw, normalizedDecoded, encodedDecoded].filter(Boolean)),
+  );
+}
+
+function safeDecodeUriPath(path: string): string {
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    return path;
+  }
+}
+
+function normalizeZipPath(path: string): string {
+  const withoutFragment = path.replace(/\\/g, '/').split('#')[0].split('?')[0];
+  const segments = withoutFragment.split('/');
+  const normalized: string[] = [];
+
+  for (const segment of segments) {
+    if (!segment || segment === '.') continue;
+    if (segment === '..') {
+      if (normalized.length > 0) normalized.pop();
+      continue;
+    }
+    normalized.push(segment);
+  }
+
+  return normalized.join('/');
+}
+
 /**
  * Add paragraph indentation: each line after a \n gets a small indent.
  * First line of the chapter has no indent.
  */
 function formatText(text: string): string {
-  const INDENT = '   '; // 3-space indent for paragraph starts
+  const INDENT = '  '; // 2-space indent for paragraph starts
   const lines = text.split('\n');
   return lines
     .map((line, i) => (i > 0 && line.length > 0 ? INDENT + line : line))
@@ -165,7 +221,7 @@ function stripHtmlToText(html: string): string {
   // Normalize Unicode quotes and dashes for consistent display
   text = text.replace(/[\u2018\u2019\u201A]/g, "'");  // smart single quotes
   text = text.replace(/[\u201C\u201D\u201E]/g, '"');   // smart double quotes
-  text = text.replace(/[\u2013\u2014]/g, ' - ');       // en/em dash to spaced hyphen
+  text = text.replace(/[\u2013\u2014]/g, '-');         // en/em dash to compact hyphen
   text = text.replace(/\u2026/g, '...');               // ellipsis
 
   text = text.trim();

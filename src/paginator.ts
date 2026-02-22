@@ -1,4 +1,4 @@
-import { CHARS_PER_LINE, LINES_PER_PAGE } from './constants';
+import { config } from './constants';
 import type Hypher from 'hypher';
 
 let hyphenator: Hypher | null = null;
@@ -14,8 +14,8 @@ export function setHyphenator(h: Hypher): void {
  */
 export function paginateText(
   text: string,
-  maxChars = CHARS_PER_LINE,
-  maxLines = LINES_PER_PAGE,
+  maxChars = config.charsPerLine,
+  maxLines = config.linesPerPage,
 ): string[] {
   if (!text || text.trim().length === 0) return ['(empty)'];
 

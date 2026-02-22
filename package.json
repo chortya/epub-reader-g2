@@ -4,10 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --host 0.0.0.0 --strictPort",
+    "dev": "npm run dev:serve & sleep 1 && npm run qr && wait",
+    "dev:serve": "vite --host 0.0.0.0 --strictPort",
+    "dev:sim": "npm run dev:serve:sim & sleep 1 && npm run qr:sim && wait",
+    "dev:serve:sim": "vite --host 0.0.0.0 --strictPort --open '/?simulator=true'",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0 --strictPort",
     "qr": "evenhub qr --port 5173 --path / -e",
+    "qr:sim": "evenhub qr --port 5173 --path '/?simulator=true' -e",
     "init:evenhub": "evenhub init --output app.json",
     "pack": "npm run build && evenhub pack app.json ./dist --output epub-reader.ehpk",
     "pack:check": "evenhub pack app.json ./dist --check"

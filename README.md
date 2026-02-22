@@ -27,9 +27,11 @@ npm install
 
 ```bash
 npm run dev
+npm run dev:sim
 ```
 
-Starts a Vite dev server at `http://0.0.0.0:5173`.
+`npm run dev` starts the Vite dev server and auto-generates a QR for `/`.
+`npm run dev:sim` starts the dev server in simulator mode (`/?simulator=true`) and auto-generates a QR for that path.
 
 ### Build & Package
 
@@ -39,10 +41,11 @@ npm run pack        # Build + package as epub-reader.ehpk
 npm run pack:check  # Validate package without output
 ```
 
-### QR Code (for linking to glasses)
+### QR Code (manual)
 
 ```bash
 npm run qr
+npm run qr:sim
 ```
 
 ## Controls

@@ -12,7 +12,7 @@ import {
 import type { Book, ReadingPosition, ViewState } from './types';
 import { paginateText } from './paginator';
 import {
-  CHARS_PER_LINE,
+  config,
   DISPLAY_HEIGHT,
   DISPLAY_WIDTH,
   STORAGE_KEY_BOOK_TITLE,
@@ -27,7 +27,7 @@ const ITEMS_PER_PAGE = 4;
 const ROW_HEIGHT = Math.floor(DISPLAY_HEIGHT / ITEMS_PER_PAGE); // 72px
 
 const BAR_HEIGHT = 30;
-const TEXT_HEIGHT = 256; // Text area (with BAR_HEIGHT=30, total = 286px)
+const TEXT_HEIGHT = DISPLAY_HEIGHT - BAR_HEIGHT; // Fill the full display height
 
 export class EvenEpubClient {
   private view: ViewState = 'library';
@@ -82,13 +82,25 @@ export class EvenEpubClient {
     await this.showChapterList();
   }
 
+  async applySettings(): Promise<void> {
+    if (this.book && this.chapterPages.length > 0) {
+      const oldTotalPages = this.chapterPages[this.chapterIndex]?.length || 1;
+      const progress = this.pageIndex / oldTotalPages;
+      this.chapterPages = this.book.chapters.map((ch) => paginateText(ch.text));
+      const newTotalPages = this.chapterPages[this.chapterIndex]?.length || 1;
+      this.pageIndex = Math.max(0, Math.min(Math.floor(progress * newTotalPages), newTotalPages - 1));
+      await this.savePosition();
+      await this.refreshCurrentView();
+    } else if (this.view === 'library' && !this.book) {
+      await this.showWelcome();
+    }
+  }
+
   // --- UI Setup ---
 
-  private async ensureStartupUi(): Promise<void> {
-    if (this.isInitializedUi) return;
-
+  private getWelcomeContainers(): TextContainerProperty[] {
     const title = 'G2 ePUB Reader';
-    const titlePad = Math.floor((CHARS_PER_LINE - title.length) / 2);
+    const titlePad = Math.floor((config.charsPerLine - title.length) / 2);
     const centeredTitle = ' '.repeat(Math.max(0, titlePad)) + title;
 
     const titleContainer = new TextContainerProperty({
@@ -103,7 +115,7 @@ export class EvenEpubClient {
     });
 
     const instruction = 'Upload ePub file via WebUI to start reading';
-    const instrPad = Math.floor((CHARS_PER_LINE - instruction.length) / 2);
+    const instrPad = Math.floor((config.charsPerLine - instruction.length) / 2);
     const centeredInstruction = ' '.repeat(Math.max(0, instrPad)) + instruction;
 
     const instructionContainer = new TextContainerProperty({
@@ -117,10 +129,16 @@ export class EvenEpubClient {
       isEventCapture: 1,
     });
 
+    return [titleContainer, instructionContainer];
+  }
+
+  private async ensureStartupUi(): Promise<void> {
+    if (this.isInitializedUi) return;
+
     const result = await this.bridge.createStartUpPageContainer(
       new CreateStartUpPageContainer({
         containerTotalNum: 2,
-        textObject: [titleContainer, instructionContainer],
+        textObject: this.getWelcomeContainers(),
       }),
     );
 
@@ -128,6 +146,7 @@ export class EvenEpubClient {
       this.isInitializedUi = true;
     } else {
       console.error('Failed to create startup page:', result);
+      appendEventLog(`Error: Failed to create startup page (${result})`);
     }
   }
 
@@ -136,45 +155,14 @@ export class EvenEpubClient {
   private async showWelcome(): Promise<void> {
     this.view = 'library';
 
-    // Rebuild the startup UI (Title + Instruction)
-    const title = 'G2 ePUB Reader';
-    const titlePad = Math.floor((CHARS_PER_LINE - title.length) / 2);
-    const centeredTitle = ' '.repeat(Math.max(0, titlePad)) + title;
-
-    const titleContainer = new TextContainerProperty({
-      xPosition: 0,
-      yPosition: 80,
-      width: DISPLAY_WIDTH,
-      height: 40,
-      containerID: 1,
-      containerName: 'title',
-      content: centeredTitle,
-      isEventCapture: 0,
-    });
-
-    const instruction = 'Upload ePub file via WebUI to start reading';
-    const instrPad = Math.floor((CHARS_PER_LINE - instruction.length) / 2);
-    const centeredInstruction = ' '.repeat(Math.max(0, instrPad)) + instruction;
-
-    const instructionContainer = new TextContainerProperty({
-      xPosition: 0,
-      yPosition: 170,
-      width: DISPLAY_WIDTH,
-      height: 40,
-      containerID: 2,
-      containerName: 'instruction',
-      content: centeredInstruction,
-      isEventCapture: 1,
-    });
-
     await this.bridge.rebuildPageContainer(
       new RebuildPageContainer({
         containerTotalNum: 2,
-        textObject: [titleContainer, instructionContainer],
+        textObject: this.getWelcomeContainers(),
       }),
     );
 
-    setStatus('Ready. Upload an EPUB file.');
+    setStatus('Ready. Upload an EPUB file or download from Gutenberg.');
   }
 
   private async showChapterList(): Promise<void> {
