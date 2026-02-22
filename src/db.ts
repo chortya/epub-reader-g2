@@ -3,6 +3,7 @@ export const STORE_NAME = 'books';
 
 export interface StoredBook {
     filename: string;
+    title: string;
     buffer: ArrayBuffer;
     timestamp: number;
 }
@@ -23,12 +24,12 @@ function getDB(): Promise<IDBDatabase> {
     });
 }
 
-export async function saveEpubBufferToDB(buffer: ArrayBuffer, filename: string): Promise<void> {
+export async function saveEpubBufferToDB(buffer: ArrayBuffer, filename: string, title: string): Promise<void> {
     const db = await getDB();
     return new Promise((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, 'readwrite');
         const store = tx.objectStore(STORE_NAME);
-        const data: StoredBook = { filename, buffer, timestamp: Date.now() };
+        const data: StoredBook = { filename, title, buffer, timestamp: Date.now() };
 
         const putRequest = store.put(data);
         putRequest.onsuccess = () => {

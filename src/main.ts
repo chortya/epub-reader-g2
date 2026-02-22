@@ -48,6 +48,7 @@ async function main() {
 
     // Load Bookmarks
     await renderBookmarks(client);
+    client.onViewChanged = () => renderBookmarks(client as EvenEpubClient);
   } else {
     // Should not happen with MockBridge
     setStatus('Error: Could not initialize bridge.');
@@ -100,8 +101,8 @@ async function main() {
 
       try {
         const data = await file.arrayBuffer();
-        await saveEpubBufferToDB(data, file.name);
         const book = await parseEpub(data);
+        await saveEpubBufferToDB(data, file.name, book.title);
 
         appendEventLog(
           `Parsed: "${book.title}" with ${book.chapters.length} chapters`,
@@ -154,9 +155,9 @@ async function main() {
               setStatus(`Downloading: ${b.title}...`);
               appendEventLog(`Downloading Gutenberg book: ${b.id}`);
               const arrayBuffer = await downloadGutenbergEpub(b.id);
-              await saveEpubBufferToDB(arrayBuffer, b.title + '.epub');
               setStatus(`Parsing: ${b.title}...`);
               const book = await parseEpub(arrayBuffer);
+              await saveEpubBufferToDB(arrayBuffer, b.title + '.epub', book.title);
               if (client) {
                 await client.loadBook(book);
                 await renderBookmarks(client);
@@ -196,15 +197,20 @@ async function main() {
       for (const item of recent) {
         const btn = document.createElement('button');
         btn.className = 'bookmark-btn';
-        btn.textContent = item.filename.replace('.epub', '');
+
+        let posText = '';
+        const savedPos = await clientToUse.getSavedPosition(item.title);
+        if (savedPos) {
+          posText = ` <span style="color:#888; font-size: 0.8em;">(Ch ${savedPos.chapterIndex + 1}, Pg ${savedPos.pageIndex + 1})</span>`;
+        }
+
+        btn.innerHTML = `${item.title}${posText}`;
         btn.onclick = async () => {
           try {
-            setStatus(`Restoring: ${item.filename}...`);
+            setStatus(`Restoring: ${item.title}...`);
             const book = await parseEpub(item.buffer);
             await clientToUse.loadBook(book);
-            // Re-render to bump it to the top since saveEpubBufferToDB is not called here,
-            // wait actually we should update timestamp so it jumps to top.
-            await saveEpubBufferToDB(item.buffer, item.filename);
+            await saveEpubBufferToDB(item.buffer, item.filename, book.title);
             await renderBookmarks(clientToUse);
           } catch (e) {
             console.error(e);

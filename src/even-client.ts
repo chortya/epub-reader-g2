@@ -39,6 +39,8 @@ export class EvenEpubClient {
   private isInitializedUi = false;
   private lastSwipeTime = 0;
 
+  public onViewChanged?: () => void;
+
   constructor(private bridge: Bridge) { }
 
   async init(): Promise<void> {
@@ -163,6 +165,7 @@ export class EvenEpubClient {
     );
 
     setStatus('Ready. Upload an EPUB file or download from Gutenberg.');
+    this.onViewChanged?.();
   }
 
   private async showChapterList(): Promise<void> {
@@ -426,6 +429,18 @@ export class EvenEpubClient {
     } catch (e) {
       console.warn('Failed to save position:', e);
       appendEventLog('Warning: Could not save reading position');
+    }
+  }
+
+  public async getSavedPosition(bookTitle: string): Promise<ReadingPosition | null> {
+    try {
+      const raw = await this.bridge.getLocalStorage(`${STORAGE_KEY_POSITION}-${bookTitle}`);
+      if (!raw) return null;
+
+      const pos: ReadingPosition = JSON.parse(raw);
+      return pos;
+    } catch (e) {
+      return null;
     }
   }
 
