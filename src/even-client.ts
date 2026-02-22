@@ -209,7 +209,18 @@ export class EvenEpubClient {
     const page = pages[this.pageIndex];
     const chapter = this.book.chapters[this.chapterIndex];
     const totalPages = pages.length;
-    const progress = totalPages > 1 ? (this.pageIndex + 1) / totalPages : 1;
+
+    let totalBookPages = 0;
+    let currentAbsolutePage = 0;
+    for (let i = 0; i < this.chapterPages.length; i++) {
+      if (i < this.chapterIndex) {
+        currentAbsolutePage += this.chapterPages[i].length;
+      } else if (i === this.chapterIndex) {
+        currentAbsolutePage += this.pageIndex + 1;
+      }
+      totalBookPages += this.chapterPages[i].length;
+    }
+    const progress = totalBookPages > 1 ? currentAbsolutePage / totalBookPages : 1;
     // Progress info text and bar
     const totalChapters = this.book.chapters.length;
     const infoText = `Ch ${this.chapterIndex + 1}/${totalChapters} Pg ${this.pageIndex + 1}/${totalPages} `;
