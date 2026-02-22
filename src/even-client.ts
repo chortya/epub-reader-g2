@@ -213,10 +213,12 @@ export class EvenEpubClient {
     // Progress info text and bar
     const totalChapters = this.book.chapters.length;
     const infoText = `Ch ${this.chapterIndex + 1}/${totalChapters} Pg ${this.pageIndex + 1}/${totalPages} `;
-    // Reduce effective chars per line since line drawing characters can be wider than standard font
-    const effectiveChars = Math.floor(config.charsPerLine * 0.85);
-    const targetBarLen = Math.max(5, effectiveChars - infoText.length - 2);
 
+    // Calculate the remaining space for the progress bar.
+    // Unicode line-drawing characters (━) are significantly wider than standard text in this font (~1.6x).
+    const remainingStandardChars = config.charsPerLine - infoText.length;
+    let targetBarLen = Math.floor(remainingStandardChars / 1.6) - 2;
+    targetBarLen = Math.max(5, Math.min(20, targetBarLen)); // Cap it so it doesn't look ridiculous
     const filled = Math.round(targetBarLen * progress);
     const bar = '━'.repeat(filled) + '─'.repeat(targetBarLen - filled);
     const label = `${infoText}[${bar}]`;
