@@ -3,6 +3,7 @@ import { setStatus, appendEventLog, withTimeout } from './utils';
 import { parseEpub } from './epub-parser';
 import { EvenEpubClient } from './even-client';
 import { fetchTopGutenbergBooks, downloadGutenbergEpub } from './gutenberg';
+import { loadSavedEpubBufferFromDB, saveEpubBufferToDB } from './db';
 import { config, saveSettings } from './constants';
 import { APP_LOGO } from './logo';
 
@@ -43,6 +44,18 @@ async function main() {
     } else {
       setStatus(APP_LOGO + '\n\nConnected. Upload an EPUB file to begin reading.');
       appendEventLog('Bridge connected');
+    }
+
+    // Auto-restore last opened book
+    try {
+      const stored = await loadSavedEpubBufferFromDB();
+      if (stored) {
+        setStatus(`Restoring: ${stored.filename}...`);
+        const book = await parseEpub(stored.buffer);
+        await client.loadBook(book);
+      }
+    } catch (e) {
+      console.warn('Could not restore previous book', e);
     }
   } else {
     // Should not happen with MockBridge
@@ -96,6 +109,7 @@ async function main() {
 
       try {
         const data = await file.arrayBuffer();
+        await saveEpubBufferToDB(data, file.name);
         const book = await parseEpub(data);
 
         appendEventLog(
@@ -148,6 +162,7 @@ async function main() {
               setStatus(`Downloading: ${b.title}...`);
               appendEventLog(`Downloading Gutenberg book: ${b.id}`);
               const arrayBuffer = await downloadGutenbergEpub(b.id);
+              await saveEpubBufferToDB(arrayBuffer, b.title + '.epub');
               setStatus(`Parsing: ${b.title}...`);
               const book = await parseEpub(arrayBuffer);
               if (client) {
