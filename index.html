@@ -142,6 +142,31 @@
     .gutenberg-item:last-child {
       border-bottom: none;
     }
+
+    .bookmarks-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      margin-top: 1rem;
+    }
+
+    .bookmark-btn {
+      background: #2a2a2a;
+      color: #0f0;
+      border: 1px solid #444;
+      padding: 0.5rem 1rem;
+      border-radius: 4px;
+      cursor: pointer;
+      text-align: left;
+      font-family: inherit;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .bookmark-btn:hover {
+      background: #333;
+    }
   </style>
 </head>
 
@@ -173,6 +198,12 @@
         <input type="checkbox" id="setting-hyphenation" />
       </label>
       <button id="save-settings-btn" class="action-btn">Apply Settings</button>
+
+      <h3 style="margin-top: 1.5rem; margin-bottom: 0.5rem; border-top: 1px solid #333; padding-top: 1rem;">Bookmarks
+      </h3>
+      <div id="bookmarks-container" class="bookmarks-list">
+        <!-- Bookmark buttons populated by JS -->
+      </div>
     </div>
 
     <div class="gutenberg-panel">

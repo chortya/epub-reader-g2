@@ -421,7 +421,7 @@ export class EvenEpubClient {
         chapterIndex: this.chapterIndex,
         pageIndex: this.pageIndex,
       };
-      await this.bridge.setLocalStorage(STORAGE_KEY_POSITION, JSON.stringify(pos));
+      await this.bridge.setLocalStorage(`${STORAGE_KEY_POSITION}-${this.book.title}`, JSON.stringify(pos));
       await this.bridge.setLocalStorage(STORAGE_KEY_BOOK_TITLE, this.book.title);
     } catch (e) {
       console.warn('Failed to save position:', e);
@@ -431,10 +431,7 @@ export class EvenEpubClient {
 
   private async restorePosition(bookTitle: string): Promise<ReadingPosition | null> {
     try {
-      const savedTitle = await this.bridge.getLocalStorage(STORAGE_KEY_BOOK_TITLE);
-      if (savedTitle !== bookTitle) return null;
-
-      const raw = await this.bridge.getLocalStorage(STORAGE_KEY_POSITION);
+      const raw = await this.bridge.getLocalStorage(`${STORAGE_KEY_POSITION}-${bookTitle}`);
       if (!raw) return null;
 
       const pos: ReadingPosition = JSON.parse(raw);

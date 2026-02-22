@@ -3,7 +3,7 @@ import { setStatus, appendEventLog, withTimeout } from './utils';
 import { parseEpub } from './epub-parser';
 import { EvenEpubClient } from './even-client';
 import { fetchTopGutenbergBooks, downloadGutenbergEpub } from './gutenberg';
-import { loadSavedEpubBufferFromDB, saveEpubBufferToDB } from './db';
+import { getRecentBooksFromDB, saveEpubBufferToDB } from './db';
 import { config, saveSettings } from './constants';
 import { APP_LOGO } from './logo';
 
@@ -46,17 +46,8 @@ async function main() {
       appendEventLog('Bridge connected');
     }
 
-    // Auto-restore last opened book
-    try {
-      const stored = await loadSavedEpubBufferFromDB();
-      if (stored) {
-        setStatus(`Restoring: ${stored.filename}...`);
-        const book = await parseEpub(stored.buffer);
-        await client.loadBook(book);
-      }
-    } catch (e) {
-      console.warn('Could not restore previous book', e);
-    }
+    // Load Bookmarks
+    await renderBookmarks(client);
   } else {
     // Should not happen with MockBridge
     setStatus('Error: Could not initialize bridge.');
@@ -118,6 +109,7 @@ async function main() {
 
         if (client) {
           await client.loadBook(book);
+          await renderBookmarks(client);
         } else {
           // Browser-only mode: just show parse results
           const summary = book.chapters
@@ -167,6 +159,7 @@ async function main() {
               const book = await parseEpub(arrayBuffer);
               if (client) {
                 await client.loadBook(book);
+                await renderBookmarks(client);
               } else {
                 setStatus(`Parsed: ${book.title}. (No glasses connected)`);
               }
@@ -185,6 +178,44 @@ async function main() {
         setStatus(`Failed to fetch Gutenberg list: ${msg}`);
       }
     });
+  }
+  // Helper to render bookmarks
+  async function renderBookmarks(clientToUse: EvenEpubClient) {
+    const container = document.getElementById('bookmarks-container');
+    if (!container) return;
+
+    try {
+      const recent = await getRecentBooksFromDB();
+      container.innerHTML = '';
+
+      if (recent.length === 0) {
+        container.innerHTML = '<span style="color: #666; font-size: 0.9em;">No saved books yet.</span>';
+        return;
+      }
+
+      for (const item of recent) {
+        const btn = document.createElement('button');
+        btn.className = 'bookmark-btn';
+        btn.textContent = item.filename.replace('.epub', '');
+        btn.onclick = async () => {
+          try {
+            setStatus(`Restoring: ${item.filename}...`);
+            const book = await parseEpub(item.buffer);
+            await clientToUse.loadBook(book);
+            // Re-render to bump it to the top since saveEpubBufferToDB is not called here,
+            // wait actually we should update timestamp so it jumps to top.
+            await saveEpubBufferToDB(item.buffer, item.filename);
+            await renderBookmarks(clientToUse);
+          } catch (e) {
+            console.error(e);
+            setStatus('Failed to load bookmark.');
+          }
+        };
+        container.appendChild(btn);
+      }
+    } catch (e) {
+      console.error("Error loading bookmarks:", e);
+    }
   }
 }
 
