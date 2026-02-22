@@ -234,12 +234,15 @@ export class EvenEpubClient {
     const bar = '━'.repeat(filled) + '─'.repeat(targetBarLen - filled);
     const label = `${infoText}[${bar}]`;
 
+    const barHeight = config.showStatusBar ? 30 : 0;
+    const textHeight = DISPLAY_HEIGHT - barHeight;
+
     // Text container: top area for page content
     const textContainer = new TextContainerProperty({
       xPosition: 0,
       yPosition: 0,
       width: DISPLAY_WIDTH,
-      height: TEXT_HEIGHT,
+      height: textHeight,
       borderWidth: 0,
       borderColor: 5,
       paddingLength: 6,
@@ -249,25 +252,30 @@ export class EvenEpubClient {
       isEventCapture: 1,
     });
 
-    // Footer container: thin bottom strip for progress
-    const footerContainer = new TextContainerProperty({
-      xPosition: 0,
-      yPosition: TEXT_HEIGHT,
-      width: DISPLAY_WIDTH,
-      height: BAR_HEIGHT,
-      borderWidth: 0,
-      borderColor: 5,
-      paddingLength: 0,
-      containerID: 2,
-      containerName: 'footer',
-      content: label,
-      isEventCapture: 0,
-    });
+    const textObjects = [textContainer];
+
+    if (config.showStatusBar) {
+      // Footer container: thin bottom strip for progress
+      const footerContainer = new TextContainerProperty({
+        xPosition: 0,
+        yPosition: textHeight,
+        width: DISPLAY_WIDTH,
+        height: barHeight,
+        borderWidth: 0,
+        borderColor: 5,
+        paddingLength: 0,
+        containerID: 2,
+        containerName: 'footer',
+        content: label,
+        isEventCapture: 0,
+      });
+      textObjects.push(footerContainer);
+    }
 
     await this.bridge.rebuildPageContainer(
       new RebuildPageContainer({
-        containerTotalNum: 2,
-        textObject: [textContainer, footerContainer],
+        containerTotalNum: textObjects.length,
+        textObject: textObjects,
       }),
     );
 

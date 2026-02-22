@@ -18,6 +18,7 @@ export const config = {
     charsPerLine: 59,
     linesPerPage: 9,
     hyphenation: true,
+    showStatusBar: true,
 };
 
 try {
@@ -27,6 +28,7 @@ try {
         if (parsed.charsPerLine !== undefined) config.charsPerLine = parsed.charsPerLine;
         if (parsed.linesPerPage !== undefined) config.linesPerPage = parsed.linesPerPage;
         if (parsed.hyphenation !== undefined) config.hyphenation = parsed.hyphenation;
+        if (parsed.showStatusBar !== undefined) config.showStatusBar = parsed.showStatusBar;
     }
 } catch (e) {
     // ignore
