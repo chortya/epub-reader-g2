@@ -211,10 +211,14 @@ export class EvenEpubClient {
     const totalPages = pages.length;
     const progress = totalPages > 1 ? (this.pageIndex + 1) / totalPages : 1;
 
-    // Unicode progress bar: ━ filled, ─ empty
-    const barLen = 30;
+    // Unicode progress bar with chapter and page info
+    const totalChapters = this.book.chapters.length;
+    const infoText = ` Ch ${this.chapterIndex + 1}/${totalChapters} Pg ${this.pageIndex + 1}/${totalPages}`;
+    const targetBarLen = config.charsPerLine - infoText.length - 2;
+    const barLen = Math.max(5, targetBarLen);
     const filled = Math.round(barLen * progress);
-    const label = '━'.repeat(filled) + '─'.repeat(barLen - filled);
+    const bar = '━'.repeat(filled) + '─'.repeat(barLen - filled);
+    const label = `[${bar}]${infoText}`;
 
     // Text container: top area for page content
     const textContainer = new TextContainerProperty({
