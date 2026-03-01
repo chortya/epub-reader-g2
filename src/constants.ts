@@ -17,6 +17,8 @@ export const SETTINGS_KEY = 'epub-reader-settings';
 export const config = {
     hyphenation: true,
     statusBarPosition: 'bottom' as 'bottom' | 'right' | 'none',
+    readingMode: 'paged' as 'paged' | 'flow',
+    flowSpeedWpm: 240,
 };
 
 try {
@@ -30,6 +32,13 @@ try {
         } else if (parsed.showStatusBar !== undefined) {
             config.statusBarPosition = parsed.showStatusBar ? 'bottom' : 'none';
         }
+
+        if (parsed.readingMode === 'paged' || parsed.readingMode === 'flow') {
+            config.readingMode = parsed.readingMode;
+        }
+        if (typeof parsed.flowSpeedWpm === 'number' && Number.isFinite(parsed.flowSpeedWpm)) {
+            config.flowSpeedWpm = Math.max(120, Math.min(600, Math.floor(parsed.flowSpeedWpm)));
+        }
     }
 } catch (e) {
     // ignore
@@ -40,6 +49,9 @@ export function saveSettings() {
 }
 
 export const SWIPE_COOLDOWN_MS = 300;
+export const FLOW_MIN_WPM = 120;
+export const FLOW_MAX_WPM = 600;
 
 export const STORAGE_KEY_POSITION = 'epub-reading-position';
+export const STORAGE_KEY_FLOW_POSITION = 'epub-flow-position';
 export const STORAGE_KEY_BOOK_TITLE = 'epub-book-title';

@@ -201,6 +201,18 @@
           <option value="right">Right (Vertical)</option>
         </select>
       </label>
+      <label>
+        Reading mode:
+        <select id="setting-reading-mode"
+          style="margin-left: 0.5rem; background: #333; color: white; border: 1px solid #444; padding: 4px; border-radius: 4px;">
+          <option value="paged">Paged</option>
+          <option value="flow">Flow (word-by-word)</option>
+        </select>
+      </label>
+      <label>
+        Flow speed (WPM):
+        <input type="number" id="setting-flow-speed" min="120" max="600" step="10" />
+      </label>
       <button id="save-settings-btn" class="action-btn">Apply Settings</button>
 
       <h3 style="margin-top: 1.5rem; margin-bottom: 0.5rem; border-top: 1px solid #333; padding-top: 1rem;">Bookmarks

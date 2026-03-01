@@ -7,7 +7,8 @@ Read EPUB books directly on your Even Realities G2 smart glasses. Upload an EPUB
 - **EPUB parsing** — extracts chapters and metadata from standard EPUB files
 - **Project Gutenberg integration** — discover and download the Top 100 free books directly from the reader UI
 - **Smart text layout** — word wrapping with language-aware hyphenation (English, German, Russian, Ukrainian)
-- **Touchpad navigation** — swipe up/down for pages, tap to select chapters, double-tap for chapter list
+- **Touchpad navigation** — swipe up/down for pages, tap to select chapters, with mode-specific tap/double-tap actions while reading
+- **Flow reading mode** — optional word-by-word page stream with adjustable speed and single-tap start/pause
 - **Customizable Layout** — configure the visual layout with horizontal (bottom) or vertical (right) progress bars
 - **Reading progress** — visual progress indicators and automatic position saving across sessions
 - **Chapter browser** — paginated chapter list for quick navigation
@@ -57,7 +58,9 @@ npm run qr:sim
 | Swipe down | Next page / next chapter |
 | Swipe up | Previous page / previous chapter |
 | Tap | Select chapter |
-| Double-tap | Return to chapter list |
+| Double-tap (Paged mode) | Return to chapter list |
+| Tap (Flow mode) | Start/Pause flow |
+| Double-tap (Flow mode, paused) | Return to chapter list |
 
 ## Display Specs
 

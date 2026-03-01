@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.9.0] - 2026-03-01
+
+### Added
+- **Flow Reading Mode**: Added an optional reading mode where text appears progressively word-by-word as an alternative to page-by-page reading.
+- **Flow Controls in Settings**: Added `Reading mode` (`paged` or `flow`) and configurable `Flow speed (WPM)` in the web UI settings panel.
+- **Flow Progress Persistence**: Added separate saved position for flow mode (chapter, page, and word index) so flow sessions resume accurately.
+- **Contributor Guide**: Added `AGENTS.md` with repository-specific contributor guidelines and workflows.
+
+### Changed
+- **Flow Rendering Behavior**: Flow now reveals text within the current page and only advances after completing that page, preserving bottom-line visibility.
+- **Flow Gesture Mapping**:
+  - Single click toggles flow start/pause while in flow mode.
+  - Double click exits to chapter list only when flow is paused.
+- **Release Metadata**: Bumped package version to `0.9.0`.
+
+### Notes
+- Existing page-by-page reading behavior remains available and unchanged as the default mode.
+
 ## [v0.7.0] - 2026-02-15
 
 ### Added

@@ -8,9 +8,10 @@ export type Book = {
   chapters: Chapter[];
 };
 
-export type ViewState = 'library' | 'reading';
+export type ViewState = 'library' | 'reading' | 'flowReading';
 
 export type ReadingPosition = {
   chapterIndex: number;
   pageIndex: number;
+  wordIndex?: number;
 };

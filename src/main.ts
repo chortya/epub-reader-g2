@@ -4,7 +4,7 @@ import { parseEpub } from './epub-parser';
 import { EvenEpubClient } from './even-client';
 import { fetchTopGutenbergBooks, downloadGutenbergEpub } from './gutenberg';
 import { getRecentBooksFromDB, saveEpubBufferToDB } from './db';
-import { config, saveSettings } from './constants';
+import { config, FLOW_MAX_WPM, FLOW_MIN_WPM, saveSettings } from './constants';
 import { APP_LOGO } from './logo';
 
 import { MockBridge } from './mock-bridge';
@@ -57,21 +57,37 @@ async function main() {
   // Setup Settings UI
   const hyphenConfig = document.getElementById('setting-hyphenation') as HTMLInputElement | null;
   const statusBarConfig = document.getElementById('setting-statusbar') as HTMLSelectElement | null;
+  const readingModeConfig = document.getElementById('setting-reading-mode') as HTMLSelectElement | null;
+  const flowSpeedConfig = document.getElementById('setting-flow-speed') as HTMLInputElement | null;
   const saveBtn = document.getElementById('save-settings-btn') as HTMLButtonElement | null;
 
-  if (hyphenConfig && statusBarConfig && saveBtn) {
+  if (hyphenConfig && statusBarConfig && readingModeConfig && flowSpeedConfig && saveBtn) {
     hyphenConfig.checked = config.hyphenation;
     statusBarConfig.value = config.statusBarPosition;
+    readingModeConfig.value = config.readingMode;
+    flowSpeedConfig.value = String(config.flowSpeedWpm);
+    flowSpeedConfig.min = String(FLOW_MIN_WPM);
+    flowSpeedConfig.max = String(FLOW_MAX_WPM);
 
     saveBtn.addEventListener('click', async () => {
       const hyph = hyphenConfig.checked;
       const showStatus = statusBarConfig.value as 'none' | 'bottom' | 'right';
+      const readingMode = readingModeConfig.value === 'flow' ? 'flow' : 'paged';
+      const parsedSpeed = Number.parseInt(flowSpeedConfig.value, 10);
+      const flowSpeedWpm = Number.isFinite(parsedSpeed)
+        ? Math.max(FLOW_MIN_WPM, Math.min(FLOW_MAX_WPM, parsedSpeed))
+        : config.flowSpeedWpm;
 
       config.hyphenation = hyph;
       config.statusBarPosition = showStatus;
+      config.readingMode = readingMode;
+      config.flowSpeedWpm = flowSpeedWpm;
+      flowSpeedConfig.value = String(flowSpeedWpm);
 
       saveSettings();
-      appendEventLog(`Settings saved - hyphenation: ${config.hyphenation}, status bar: ${config.statusBarPosition}`);
+      appendEventLog(
+        `Settings saved - hyphenation: ${config.hyphenation}, status bar: ${config.statusBarPosition}, mode: ${config.readingMode}, flowSpeedWpm: ${config.flowSpeedWpm}`,
+      );
 
       if (client) {
         setStatus('Applying new settings...');
