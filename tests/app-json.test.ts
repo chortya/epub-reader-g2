@@ -29,24 +29,35 @@ test('app.json entrypoint file exists', () => {
   );
 });
 
-test('app.json supported_languages matches hyphenation imports in epub-parser', () => {
+test('app.json supported_languages only claims languages epub-parser actually hyphenates', () => {
   const app = readJson('app.json');
   const supported: string[] = app.supported_languages ?? [];
   const parserSrc = readFileSync(join(repoRoot, 'src/epub-parser.ts'), 'utf8');
 
   // Extract every "case 'xx':" from loadHyphenationPatterns, plus the 'en' default.
-  const langs = new Set<string>(['en']);
+  const hyphenated = new Set<string>(['en']);
   const caseRe = /case\s+'([a-z]{2})'/g;
   let m: RegExpExecArray | null;
   while ((m = caseRe.exec(parserSrc)) !== null) {
-    langs.add(m[1]);
+    hyphenated.add(m[1]);
   }
 
-  const missing = [...langs].filter((l) => !supported.includes(l));
+  const overclaimed = supported.filter((l) => !hyphenated.has(l));
+  assert.deepEqual(
+    overclaimed,
+    [],
+    `app.json supported_languages claims [${overclaimed.join(', ')}] but epub-parser doesn't hyphenate them.`,
+  );
+
+  // Every marketplace-allowed language we *do* hyphenate should be declared, so the
+  // store doesn't under-list us. Marketplace whitelist comes from the Even Hub schema.
+  const marketplaceAllowed = new Set(['en', 'de', 'fr', 'es', 'it', 'zh', 'ja', 'ko']);
+  const shouldDeclare = [...hyphenated].filter((l) => marketplaceAllowed.has(l));
+  const missing = shouldDeclare.filter((l) => !supported.includes(l));
   assert.deepEqual(
     missing,
     [],
-    `app.json supported_languages is missing: ${missing.join(', ')}. Update app.json to declare every language epub-parser can hyphenate.`,
+    `app.json should declare [${missing.join(', ')}] — epub-parser hyphenates them and the Even Hub schema accepts them.`,
   );
 });
 
