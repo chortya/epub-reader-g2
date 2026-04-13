@@ -9,7 +9,10 @@ import {
   waitForEvenAppBridge,
   type EvenHubEvent,
 } from '@evenrealities/even_hub_sdk';
-import type { Book, ReadingPosition, ViewState } from './types';
+import { mapGlassEvent } from 'even-toolkit/action-map';
+import { notifyTextUpdate, armImmediateScroll } from 'even-toolkit/gestures';
+import { createSplash, TILE_PRESETS } from 'even-toolkit/splash';
+import type { Book, ReadingPosition, ViewState, CachedBookMeta } from './types';
 import { paginateText } from './paginator';
 import {
   config,
@@ -20,9 +23,9 @@ import {
   STORAGE_KEY_BOOK_TITLE,
   STORAGE_KEY_FLOW_POSITION,
   STORAGE_KEY_POSITION,
-  SWIPE_COOLDOWN_MS,
 } from './constants';
-import { appendEventLog, clamp, setStatus, truncateForList } from './utils';
+import { clamp, setStatus, truncateForList, appendEventLog } from './utils';
+import { createSplashBridgeAdapter } from './splash-bridge';
 
 type Bridge = Awaited<ReturnType<typeof waitForEvenAppBridge>>;
 
@@ -37,8 +40,10 @@ type FlowPageData = {
   wordCount: number;
 };
 
+const BOOK_LIST_KEY = 'epub-book-list';
+
 export class EvenEpubClient {
-  private view: ViewState = 'library';
+  private view: ViewState = 'library'; // Starts as library (welcome), transitions after init
   private book: Book | null = null;
   private chapterPages: string[][] = [];
   private flowPageData: FlowPageData[][] = [];
@@ -50,38 +55,50 @@ export class EvenEpubClient {
   private isFlowTickInFlight = false;
   private librarySelectedIndex = 0;
   private isInitializedUi = false;
-  private lastSwipeTime = 0;
+  private isStartupComplete = false;
+  private isStartupRunning = false;
+  private cachedBookList: CachedBookMeta[] = [];
+  private bookPickerSelectedIndex = 0;
+  private currentBookId: string | null = null;
 
   public onViewChanged?: () => void;
+  public onPositionChanged?: (chapterIndex: number, pageIndex: number) => void;
 
   constructor(private bridge: Bridge) { }
 
   async init(): Promise<void> {
     this.bridge.onDeviceStatusChanged(async (status) => {
-      appendEventLog(`Device status: ${status.connectType} `);
       if (status.connectType === DeviceConnectType.Connected) {
         await this.ensureStartupUi();
-        this.refreshCurrentView();
+        if (!this.isStartupComplete && !this.isStartupRunning) {
+          await this.runStartup();
+        } else if (this.isStartupComplete) {
+          await this.refreshCurrentView();
+        }
       }
     });
 
     this.bridge.onEvenHubEvent((event) => {
-      this.onEvenHubEvent(event);
+      this.onEvenHubEvent(event).catch(e => console.warn('Event handler error:', e));
     });
 
-    // Initial check: Only create UI if already connected
+    // Load cached book list from bridge storage
+    try {
+      const raw = await this.bridge.getLocalStorage(BOOK_LIST_KEY);
+      if (raw) this.cachedBookList = JSON.parse(raw);
+    } catch { /* empty */ }
+
     const device = await this.bridge.getDeviceInfo();
     if (device?.status?.connectType === DeviceConnectType.Connected) {
       await this.ensureStartupUi();
-      await this.showWelcome();
-    } else {
-      appendEventLog('Waiting for device connection to initialize UI...');
+      await this.runStartup();
     }
   }
 
-  async loadBook(book: Book, resume: boolean = false): Promise<void> {
+  async loadBook(book: Book, resume: boolean = false, bookId?: string): Promise<void> {
     this.stopFlow();
     this.book = book;
+    this.currentBookId = bookId ?? null;
     this.chapterPages = book.chapters.map((ch) => paginateText(ch.text));
     this.flowPageData = this.buildFlowPageData(this.chapterPages);
 
@@ -103,6 +120,19 @@ export class EvenEpubClient {
     }
 
     this.librarySelectedIndex = this.chapterIndex;
+
+    // Ensure this book is in the glasses-side cache (main.ts refreshes the full list right after;
+    // this is a fallback for when loadBook is invoked outside the library-refresh flow).
+    if (this.currentBookId && !this.cachedBookList.some((b) => b.bookId === this.currentBookId)) {
+      this.cachedBookList.push({
+        bookId: this.currentBookId,
+        title: book.title,
+        filename: book.title + '.epub',
+        uploadedAt: Date.now(),
+      });
+      this.bridge.setLocalStorage(BOOK_LIST_KEY, JSON.stringify(this.cachedBookList)).catch(() => {});
+    }
+
     setStatus(`Loaded: ${book.title} (${book.chapters.length} chapters)`);
 
     if (resume && (restoredPaged || restoredFlow)) {
@@ -136,6 +166,7 @@ export class EvenEpubClient {
         this.stopFlow();
         await this.showPage();
       } else {
+        this.flowLayoutReady = false;
         await this.refreshCurrentView();
       }
       if (this.view === 'flowReading' && this.isFlowRunning) {
@@ -203,6 +234,127 @@ export class EvenEpubClient {
 
   // --- Views ---
 
+  private async runStartup(): Promise<void> {
+    if (this.isStartupRunning || this.isStartupComplete) return;
+    this.isStartupRunning = true;
+    try {
+      await this.showSplashThenHome();
+    } finally {
+      this.isStartupComplete = true;
+      this.isStartupRunning = false;
+    }
+  }
+
+  private async showSplashThenHome(): Promise<void> {
+    const splash = createSplash({
+      render: (ctx, w, h) => {
+        ctx.fillStyle = '#d0d0d0';
+        // Draw open book icon
+        const cx = w / 2;
+        const cy = h / 2 - 12;
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#d0d0d0';
+        // Left page
+        ctx.beginPath();
+        ctx.moveTo(cx, cy - 15);
+        ctx.lineTo(cx - 25, cy - 12);
+        ctx.lineTo(cx - 25, cy + 15);
+        ctx.lineTo(cx, cy + 18);
+        ctx.closePath();
+        ctx.stroke();
+        // Right page
+        ctx.beginPath();
+        ctx.moveTo(cx, cy - 15);
+        ctx.lineTo(cx + 25, cy - 12);
+        ctx.lineTo(cx + 25, cy + 15);
+        ctx.lineTo(cx, cy + 18);
+        ctx.closePath();
+        ctx.stroke();
+        // Spine
+        ctx.beginPath();
+        ctx.moveTo(cx, cy - 15);
+        ctx.lineTo(cx, cy + 18);
+        ctx.stroke();
+        // Text lines on pages
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = '#999';
+        for (let i = 0; i < 3; i++) {
+          ctx.beginPath();
+          ctx.moveTo(cx - 22, cy - 6 + i * 6);
+          ctx.lineTo(cx - 5, cy - 6 + i * 6);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(cx + 5, cy - 6 + i * 6);
+          ctx.lineTo(cx + 22, cy - 6 + i * 6);
+          ctx.stroke();
+        }
+        // Title
+        ctx.fillStyle = '#e0e0e0';
+        ctx.font = 'bold 14px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('ePub Reader', cx, h - 8);
+      },
+      tiles: 1,
+      tilePositions: TILE_PRESETS.centered1,
+      minTimeMs: 2000,
+    });
+
+    try {
+      const splashBridge = createSplashBridgeAdapter(this.bridge as any);
+      await splash.show(splashBridge);
+      await Promise.race([
+        splash.waitMinTime(),
+        new Promise(resolve => setTimeout(resolve, 3000)),
+      ]);
+    } catch (e) {
+      console.warn('Splash failed, continuing:', e);
+    }
+
+    // Show book picker or welcome
+    if (this.cachedBookList.length > 0) {
+      // Pre-select the last-read book if available
+      try {
+        const lastTitle = await this.bridge.getLocalStorage(STORAGE_KEY_BOOK_TITLE);
+        if (lastTitle) {
+          const idx = this.cachedBookList.findIndex(b => b.title === lastTitle);
+          if (idx >= 0) this.bookPickerSelectedIndex = idx;
+        }
+      } catch { /* */ }
+      await this.showBookPicker();
+    } else {
+      await this.showWelcome();
+    }
+  }
+
+  private async showBookPicker(): Promise<void> {
+    this.stopFlow();
+    this.view = 'bookPicker';
+
+    const total = this.cachedBookList.length;
+    if (total === 0) {
+      await this.showWelcome();
+      return;
+    }
+
+    const pageStart =
+      Math.floor(this.bookPickerSelectedIndex / ITEMS_PER_PAGE) * ITEMS_PER_PAGE;
+    const selectedSlot = this.bookPickerSelectedIndex - pageStart;
+
+    const labels: string[] = [];
+    for (let i = 0; i < ITEMS_PER_PAGE; i++) {
+      const idx = pageStart + i;
+      if (idx < total) {
+        labels.push(truncateForList(this.cachedBookList[idx].title, 42));
+      } else {
+        labels.push('');
+      }
+    }
+
+    await this.rebuildSlots(labels, selectedSlot);
+    setStatus(`Library: ${this.bookPickerSelectedIndex + 1}/${total}. Swipe=browse, Tap=open, DblTap=exit`);
+    this.onViewChanged?.();
+  }
+
   private async showWelcome(): Promise<void> {
     this.stopFlow();
     this.view = 'library';
@@ -213,8 +365,9 @@ export class EvenEpubClient {
         textObject: this.getWelcomeContainers(),
       }),
     );
+    notifyTextUpdate();
 
-    setStatus('Ready. Upload an EPUB file or download from Gutenberg.');
+    setStatus('Ready. Upload an EPUB or browse Gutenberg.');
     this.onViewChanged?.();
   }
 
@@ -233,7 +386,8 @@ export class EvenEpubClient {
       const idx = pageStart + i;
       if (idx < total) {
         const ch = this.book.chapters[idx];
-        labels.push(truncateForList(`${idx + 1}. ${ch.title} `, 42));
+        const pgCount = this.chapterPages[idx]?.length ?? 0;
+        labels.push(truncateForList(`${idx + 1}. ${ch.title} (${pgCount}pg)`, 42));
       } else {
         labels.push('');
       }
@@ -273,17 +427,14 @@ export class EvenEpubClient {
     const infoText = `Ch ${this.chapterIndex + 1}/${totalChapters} Pg ${this.pageIndex + 1}/${totalPages} `;
 
     // Calculate the remaining space for the progress bar.
-    // Unicode line-drawing characters (━) are significantly wider than standard text in this font (~1.6x).
-    const maxChars = config.statusBarPosition === 'right' ? 58 : 59;
-    const remainingStandardChars = maxChars - infoText.length;
-    let targetBarLen = Math.floor(remainingStandardChars / 1.6) - 2;
-    targetBarLen = Math.max(5, Math.min(20, targetBarLen)); // Cap it so it doesn't look ridiculous
+    const hasBottomBar = config.statusBarPosition === 'bottom';
+    const hasRightBar = config.statusBarPosition === 'right';
+    const maxChars = hasRightBar ? 58 : 59;
+    // Reserve 2 chars for brackets, use remaining space for bar
+    const targetBarLen = Math.max(5, Math.min(20, maxChars - infoText.length - 2));
     const filled = Math.round(targetBarLen * progress);
     const bar = '━'.repeat(filled) + '─'.repeat(targetBarLen - filled);
     const label = `${infoText}[${bar}]`;
-
-    const hasBottomBar = config.statusBarPosition === 'bottom';
-    const hasRightBar = config.statusBarPosition === 'right';
 
     const barHeight = hasBottomBar ? 30 : 0;
     const rightBarWidth = hasRightBar ? 26 : 0;
@@ -324,12 +475,9 @@ export class EvenEpubClient {
       });
       textObjects.push(footerContainer);
     } else if (hasRightBar) {
-      const verticalBarLines = 8;
+      const verticalBarLines = 10;
       const verticalFilled = Math.round(verticalBarLines * progress);
-      const verticalBar = '█'.repeat(verticalFilled) + '│'.repeat(verticalBarLines - verticalFilled);
-      // Construct a vertical text by splitting characters with newlines
-      const verticalContent = verticalBar.split('').join('\n');
-
+      const verticalContent = '█'.repeat(verticalFilled) + '│'.repeat(verticalBarLines - verticalFilled);
       const sideContainer = new TextContainerProperty({
         xPosition: textWidth,
         yPosition: 0,
@@ -340,7 +488,7 @@ export class EvenEpubClient {
         paddingLength: 0,
         containerID: 2,
         containerName: 'sidebar',
-        content: verticalContent,
+        content: verticalContent.split('').join('\n'),
         isEventCapture: 0,
       });
       textObjects.push(sideContainer);
@@ -352,6 +500,7 @@ export class EvenEpubClient {
         textObject: textObjects,
       }),
     );
+    notifyTextUpdate();
 
     await this.savePagedPosition();
 
@@ -361,9 +510,12 @@ export class EvenEpubClient {
     );
   }
 
+  private flowLayoutReady = false;
+
   private async showFlowReading(autoStart: boolean): Promise<void> {
     if (!this.book || this.flowPageData.length === 0) return;
     this.view = 'flowReading';
+    this.flowLayoutReady = false; // force full rebuild on entry
     const pageData = this.getCurrentFlowPageData();
     if (!pageData) return;
     this.flowWordIndex = clamp(this.flowWordIndex, 0, Math.max(0, pageData.wordCount - 1));
@@ -403,16 +555,14 @@ export class EvenEpubClient {
     const chapterTotalPages = this.chapterPages[this.chapterIndex]?.length ?? 1;
     const infoText = `Flow ${flowState} ${config.flowSpeedWpm}wpm Ch ${this.chapterIndex + 1}/${this.book.chapters.length} Pg ${this.pageIndex + 1}/${chapterTotalPages} W ${this.flowWordIndex + 1}/${totalPageWords} `;
 
-    const maxChars = config.statusBarPosition === 'right' ? 58 : 59;
-    const remainingStandardChars = Math.max(0, maxChars - infoText.length);
-    let targetBarLen = Math.floor(remainingStandardChars / 1.6) - 2;
-    targetBarLen = Math.max(5, Math.min(20, targetBarLen));
+    const hasBottomBar = config.statusBarPosition === 'bottom';
+    const hasRightBar = config.statusBarPosition === 'right';
+    const maxChars = hasRightBar ? 58 : 59;
+    const targetBarLen = Math.max(5, Math.min(20, maxChars - infoText.length - 2));
     const filled = Math.round(targetBarLen * progress);
     const bar = '━'.repeat(filled) + '─'.repeat(targetBarLen - filled);
     const label = `${infoText}[${bar}]`;
 
-    const hasBottomBar = config.statusBarPosition === 'bottom';
-    const hasRightBar = config.statusBarPosition === 'right';
     const barHeight = hasBottomBar ? BAR_HEIGHT : 0;
     const rightBarWidth = hasRightBar ? 26 : 0;
     const textHeight = DISPLAY_HEIGHT - barHeight;
@@ -450,10 +600,9 @@ export class EvenEpubClient {
         }),
       );
     } else if (hasRightBar) {
-      const verticalBarLines = 8;
+      const verticalBarLines = 10;
       const verticalFilled = Math.round(verticalBarLines * progress);
-      const verticalBar = '█'.repeat(verticalFilled) + '│'.repeat(verticalBarLines - verticalFilled);
-      const verticalContent = verticalBar.split('').join('\n');
+      const verticalContent = '█'.repeat(verticalFilled) + '│'.repeat(verticalBarLines - verticalFilled);
       textObjects.push(
         new TextContainerProperty({
           xPosition: textWidth,
@@ -465,18 +614,53 @@ export class EvenEpubClient {
           paddingLength: 0,
           containerID: 2,
           containerName: 'flow-side',
-          content: verticalContent,
+          content: verticalContent.split('').join('\n'),
           isEventCapture: 0,
         }),
       );
     }
 
-    await this.bridge.rebuildPageContainer(
-      new RebuildPageContainer({
-        containerTotalNum: textObjects.length,
-        textObject: textObjects,
-      }),
-    );
+    if (this.flowLayoutReady) {
+      // Use textContainerUpgrade for flicker-free in-place updates (per SDK docs)
+      await this.bridge.textContainerUpgrade(
+        new TextContainerUpgrade({
+          containerID: 1,
+          containerName: 'flow-text',
+          content: content || '...',
+        }),
+      );
+      // Update status bar if present
+      if (hasBottomBar) {
+        await this.bridge.textContainerUpgrade(
+          new TextContainerUpgrade({
+            containerID: 2,
+            containerName: 'flow-footer',
+            content: label,
+          }),
+        );
+      } else if (hasRightBar) {
+        const verticalBarLines = 10;
+        const verticalFilled = Math.round(verticalBarLines * progress);
+        const verticalContent = '█'.repeat(verticalFilled) + '│'.repeat(verticalBarLines - verticalFilled);
+        await this.bridge.textContainerUpgrade(
+          new TextContainerUpgrade({
+            containerID: 2,
+            containerName: 'flow-side',
+            content: verticalContent.split('').join('\n'),
+          }),
+        );
+      }
+    } else {
+      // Full rebuild to establish container layout
+      await this.bridge.rebuildPageContainer(
+        new RebuildPageContainer({
+          containerTotalNum: textObjects.length,
+          textObject: textObjects,
+        }),
+      );
+      this.flowLayoutReady = true;
+    }
+    notifyTextUpdate();
 
     await this.saveFlowPosition();
     setStatus(
@@ -497,7 +681,7 @@ export class EvenEpubClient {
           height: ROW_HEIGHT,
           borderWidth: isSelected ? 1 : 0,
           borderColor: 5,
-          borderRdaius: 8,
+          borderRadius: 8,
           paddingLength: 2,
           containerID: i + 1,
           containerName: `slot-${i}`,
@@ -513,6 +697,7 @@ export class EvenEpubClient {
         textObject: textContainers,
       }),
     );
+    notifyTextUpdate();
   }
 
   // --- Navigation ---
@@ -700,6 +885,7 @@ export class EvenEpubClient {
 
   private async selectCurrentChapter(): Promise<void> {
     if (!this.book) return;
+    armImmediateScroll();
     this.chapterIndex = this.librarySelectedIndex;
     this.pageIndex = 0;
     this.flowWordIndex = 0;
@@ -715,6 +901,8 @@ export class EvenEpubClient {
       await this.showPage();
     } else if (this.view === 'flowReading') {
       await this.showFlowFrame();
+    } else if (this.view === 'bookPicker') {
+      await this.showBookPicker();
     } else if (this.book) {
       await this.showChapterList();
     } else {
@@ -724,79 +912,118 @@ export class EvenEpubClient {
 
   // --- Event Handling ---
 
-  private swipeThrottleOk(): boolean {
-    const now = Date.now();
-    if (now - this.lastSwipeTime < SWIPE_COOLDOWN_MS) return false;
-    this.lastSwipeTime = now;
-    return true;
-  }
-
   private async onEvenHubEvent(event: EvenHubEvent): Promise<void> {
-    appendEventLog(`Event: ${JSON.stringify(event)
-      }`);
-
-    const te = event?.textEvent ?? event?.sysEvent;
-    if (!te) return;
-
-    const eventType = te.eventType;
-
-    if (eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
-      if (!this.swipeThrottleOk()) return;
-      if (this.view === 'reading') {
-        await this.nextPage();
-      } else if (this.view === 'flowReading') {
-        await this.nextChapterInFlow();
-      } else if (this.view === 'library') {
-        await this.nextChapterInList();
-      }
+    const sysEvent = event?.sysEvent;
+    if (sysEvent?.eventType === OsEventTypeList.SYSTEM_EXIT_EVENT) {
+      await this.handleShutdown();
+      return;
+    }
+    if (sysEvent?.eventType === OsEventTypeList.FOREGROUND_EXIT_EVENT) {
+      if (this.isFlowRunning) this.stopFlow();
+      if (this.view === 'flowReading') await this.saveFlowPosition();
+      else await this.savePagedPosition();
+      return;
+    }
+    if (sysEvent?.eventType === OsEventTypeList.FOREGROUND_ENTER_EVENT) {
+      await this.refreshCurrentView();
       return;
     }
 
-    if (eventType === OsEventTypeList.SCROLL_TOP_EVENT) {
-      if (!this.swipeThrottleOk()) return;
-      if (this.view === 'reading') {
-        await this.prevPage();
-      } else if (this.view === 'flowReading') {
-        await this.prevChapterInFlow();
-      } else if (this.view === 'library') {
-        await this.prevChapterInList();
-      }
-      return;
-    }
+    const action = mapGlassEvent(event);
+    if (!action) return;
 
-    if (eventType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
-      if (this.view === 'reading' && this.book) {
-        appendEventLog('Double tap -> chapter list');
-        this.librarySelectedIndex = this.chapterIndex;
-        await this.showChapterList();
-      } else if (this.view === 'flowReading' && this.book) {
-        if (this.isFlowRunning) {
-          appendEventLog('Double tap ignored while flow is running');
+    switch (action.type) {
+      case 'HIGHLIGHT_MOVE':
+        if (action.direction === 'down') {
+          if (this.view === 'reading') await this.nextPage();
+          else if (this.view === 'flowReading') await this.nextChapterInFlow();
+          else if (this.view === 'library') await this.nextChapterInList();
+          else if (this.view === 'bookPicker') await this.nextBookInPicker();
         } else {
-          appendEventLog('Double tap -> chapter list (flow paused)');
+          if (this.view === 'reading') await this.prevPage();
+          else if (this.view === 'flowReading') await this.prevChapterInFlow();
+          else if (this.view === 'library') await this.prevChapterInList();
+          else if (this.view === 'bookPicker') await this.prevBookInPicker();
+        }
+        break;
+
+      case 'SELECT_HIGHLIGHTED':
+        if (this.view === 'flowReading' && this.book) {
+          this.toggleFlow();
+        } else if (this.view === 'library' && this.book) {
+          await this.selectCurrentChapter();
+        } else if (this.view === 'bookPicker' && this.onBookSelected) {
+          const selected = this.cachedBookList[this.bookPickerSelectedIndex];
+          if (selected) {
+            try {
+              await this.onBookSelected(selected);
+            } catch (e) {
+              console.warn('Book selection failed:', e);
+            }
+          }
+        }
+        break;
+
+      case 'GO_BACK':
+        if (this.view === 'reading' && this.book) {
           this.librarySelectedIndex = this.chapterIndex;
           await this.showChapterList();
+        } else if (this.view === 'flowReading' && this.book) {
+          if (!this.isFlowRunning) {
+            this.librarySelectedIndex = this.chapterIndex;
+            await this.showChapterList();
+          }
+        } else if (this.view === 'library' && this.book) {
+          this.book = null;
+          this.stopFlow();
+          if (this.cachedBookList.length > 0) {
+            await this.showBookPicker();
+          } else {
+            await this.showWelcome();
+          }
+        } else if (this.view === 'bookPicker' || (this.view === 'library' && !this.book)) {
+          try { await this.bridge.shutDownPageContainer(1); } catch { /* */ }
         }
-      } else if (this.view === 'library' && this.book) {
-        appendEventLog('Double tap -> exit book');
-        this.book = null;
-        this.stopFlow();
-        await this.showWelcome();
-      }
-      return;
+        break;
     }
+  }
 
-    // CLICK_EVENT = 0, which fromJson may normalize to undefined
-    if (eventType === OsEventTypeList.CLICK_EVENT || eventType === undefined) {
-      if (this.view === 'flowReading' && this.book) {
-        appendEventLog('Click -> flow start/pause');
-        this.toggleFlow();
-      } else if (this.view === 'library' && this.book) {
-        appendEventLog(`Opening chapter ${this.librarySelectedIndex + 1} `);
-        await this.selectCurrentChapter();
-      }
-      return;
+  // Book picker navigation
+  private async nextBookInPicker(): Promise<void> {
+    if (this.bookPickerSelectedIndex < this.cachedBookList.length - 1) {
+      this.bookPickerSelectedIndex++;
+      await this.showBookPicker();
     }
+  }
+
+  private async prevBookInPicker(): Promise<void> {
+    if (this.bookPickerSelectedIndex > 0) {
+      this.bookPickerSelectedIndex--;
+      await this.showBookPicker();
+    }
+  }
+
+  /** Called by main.ts when a book is selected from the picker */
+  public onBookSelected?: (book: CachedBookMeta) => void;
+
+  /** Cache the book list for glasses-side access */
+  public async cacheBookList(books: CachedBookMeta[]): Promise<void> {
+    this.cachedBookList = books;
+    try {
+      await this.bridge.setLocalStorage(BOOK_LIST_KEY, JSON.stringify(books));
+    } catch { /* */ }
+  }
+
+  /** Set the book ID for blob position sync */
+  public setCurrentBookId(id: string): void {
+    this.currentBookId = id;
+  }
+
+  private async handleShutdown(): Promise<void> {
+    this.stopFlow();
+    if (this.view === 'flowReading') await this.saveFlowPosition();
+    else await this.savePagedPosition();
+    try { await this.bridge.shutDownPageContainer(); } catch { /* */ }
   }
 
   // --- Persistence ---
@@ -808,17 +1035,40 @@ export class EvenEpubClient {
         chapterIndex: this.chapterIndex,
         pageIndex: this.pageIndex,
       };
-      await this.bridge.setLocalStorage(`${STORAGE_KEY_POSITION}-${this.book.title}`, JSON.stringify(pos));
+      const json = JSON.stringify(pos);
+      const titleKey = `${STORAGE_KEY_POSITION}-${this.book.title}`;
+      if (this.currentBookId) {
+        await this.bridge.setLocalStorage(`${STORAGE_KEY_POSITION}-${this.currentBookId}`, json);
+      }
+      await this.bridge.setLocalStorage(titleKey, json);
       await this.bridge.setLocalStorage(STORAGE_KEY_BOOK_TITLE, this.book.title);
+
+      // Also save to browser localStorage as fallback (bridge storage may not persist)
+      try { localStorage.setItem(titleKey, json); } catch { /* */ }
+      if (this.currentBookId) {
+        try { localStorage.setItem(`${STORAGE_KEY_POSITION}-${this.currentBookId}`, json); } catch { /* */ }
+      }
+
+      this.onPositionChanged?.(this.chapterIndex, this.pageIndex);
     } catch (e) {
       console.warn('Failed to save position:', e);
-      appendEventLog('Warning: Could not save reading position');
     }
   }
 
-  public async getSavedPosition(bookTitle: string): Promise<ReadingPosition | null> {
+  public async getSavedPosition(bookTitle: string, bookId?: string): Promise<ReadingPosition | null> {
     try {
-      const raw = await this.bridge.getLocalStorage(`${STORAGE_KEY_POSITION}-${bookTitle}`);
+      // Try bridge storage first, then browser localStorage fallback
+      let raw = '';
+      if (bookId) {
+        raw = await this.bridge.getLocalStorage(`${STORAGE_KEY_POSITION}-${bookId}`);
+        if (!raw) try { raw = localStorage.getItem(`${STORAGE_KEY_POSITION}-${bookId}`) || ''; } catch { /* */ }
+      }
+      if (!raw) {
+        raw = await this.bridge.getLocalStorage(`${STORAGE_KEY_POSITION}-${bookTitle}`);
+      }
+      if (!raw) {
+        try { raw = localStorage.getItem(`${STORAGE_KEY_POSITION}-${bookTitle}`) || ''; } catch { /* */ }
+      }
       if (!raw) return null;
 
       const pos: ReadingPosition = JSON.parse(raw);
@@ -830,31 +1080,30 @@ export class EvenEpubClient {
       ) {
         return pos;
       }
-      return null;
-    } catch (e) {
-      return null;
-    }
+    } catch { /* no saved position */ }
+
+    return null;
   }
 
   private async restorePagedPosition(bookTitle: string): Promise<ReadingPosition | null> {
-    try {
-      const raw = await this.bridge.getLocalStorage(`${STORAGE_KEY_POSITION}-${bookTitle}`);
-      if (!raw) return null;
+    const keys = [];
+    if (this.currentBookId) keys.push(`${STORAGE_KEY_POSITION}-${this.currentBookId}`);
+    keys.push(`${STORAGE_KEY_POSITION}-${bookTitle}`);
 
-      const pos: ReadingPosition = JSON.parse(raw);
-      if (
-        pos.chapterIndex >= 0 &&
-        pos.chapterIndex < this.chapterPages.length &&
-        pos.pageIndex >= 0 &&
-        pos.pageIndex < this.chapterPages[pos.chapterIndex].length
-      ) {
-        appendEventLog(`Restored position: Ch ${pos.chapterIndex + 1}, Pg ${pos.pageIndex + 1} `);
-        return pos;
-      }
-    } catch (e) {
-      console.warn('Failed to restore position:', e);
-      appendEventLog('Warning: Could not restore reading position');
+    for (const key of keys) {
+      try {
+        let raw = await this.bridge.getLocalStorage(key);
+        if (!raw) try { raw = localStorage.getItem(key) || ''; } catch { /* */ }
+        if (!raw) continue;
+
+        const pos: ReadingPosition = JSON.parse(raw);
+        if (pos.chapterIndex >= 0 && pos.chapterIndex < this.chapterPages.length && pos.pageIndex >= 0) {
+          pos.pageIndex = Math.min(pos.pageIndex, Math.max(0, (this.chapterPages[pos.chapterIndex]?.length ?? 1) - 1));
+          return pos;
+        }
+      } catch { /* try next key */ }
     }
+
     return null;
   }
 
@@ -866,42 +1115,53 @@ export class EvenEpubClient {
         pageIndex: this.pageIndex,
         wordIndex: this.flowWordIndex,
       };
-      await this.bridge.setLocalStorage(`${STORAGE_KEY_FLOW_POSITION}-${this.book.title}`, JSON.stringify(pos));
+      const json = JSON.stringify(pos);
+      if (this.currentBookId) {
+        await this.bridge.setLocalStorage(`${STORAGE_KEY_FLOW_POSITION}-${this.currentBookId}`, json);
+      }
+      await this.bridge.setLocalStorage(`${STORAGE_KEY_FLOW_POSITION}-${this.book.title}`, json);
       await this.bridge.setLocalStorage(STORAGE_KEY_BOOK_TITLE, this.book.title);
+      // Browser localStorage fallback
+      try {
+        localStorage.setItem(`${STORAGE_KEY_FLOW_POSITION}-${this.book.title}`, json);
+        if (this.currentBookId) localStorage.setItem(`${STORAGE_KEY_FLOW_POSITION}-${this.currentBookId}`, json);
+      } catch { /* */ }
+      this.onPositionChanged?.(this.chapterIndex, this.pageIndex);
     } catch (e) {
       console.warn('Failed to save flow position:', e);
-      appendEventLog('Warning: Could not save flow position');
     }
   }
 
   private async restoreFlowPosition(bookTitle: string): Promise<ReadingPosition | null> {
-    try {
-      const raw = await this.bridge.getLocalStorage(`${STORAGE_KEY_FLOW_POSITION}-${bookTitle}`);
-      if (!raw) return null;
+    const keys = [];
+    if (this.currentBookId) keys.push(`${STORAGE_KEY_FLOW_POSITION}-${this.currentBookId}`);
+    keys.push(`${STORAGE_KEY_FLOW_POSITION}-${bookTitle}`);
 
-      const pos: ReadingPosition = JSON.parse(raw);
-      const pageIndex = pos.pageIndex ?? 0;
-      const wordIndex = pos.wordIndex ?? 0;
-      const chapterPages = this.flowPageData[pos.chapterIndex];
-      if (
-        pos.chapterIndex >= 0 &&
-        pos.chapterIndex < this.flowPageData.length &&
-        pageIndex >= 0 &&
-        pageIndex < (chapterPages?.length ?? 0) &&
-        wordIndex >= 0 &&
-        wordIndex < Math.max(1, chapterPages[pageIndex].wordCount)
-      ) {
-        appendEventLog(`Restored flow position: Ch ${pos.chapterIndex + 1}, Pg ${pageIndex + 1}, Word ${wordIndex + 1}`);
-        return {
-          chapterIndex: pos.chapterIndex,
-          pageIndex,
-          wordIndex,
-        };
-      }
-    } catch (e) {
-      console.warn('Failed to restore flow position:', e);
-      appendEventLog('Warning: Could not restore flow position');
+    for (const key of keys) {
+      try {
+        let raw = await this.bridge.getLocalStorage(key);
+        if (!raw) try { raw = localStorage.getItem(key) || ''; } catch { /* */ }
+        if (!raw) continue;
+
+        const pos: ReadingPosition = JSON.parse(raw);
+        const pageIndex = pos.pageIndex ?? 0;
+        const wordIndex = pos.wordIndex ?? 0;
+        const chapterPages = this.flowPageData[pos.chapterIndex];
+        if (
+          pos.chapterIndex >= 0 &&
+          pos.chapterIndex < this.flowPageData.length &&
+          pageIndex >= 0 &&
+          pageIndex < (chapterPages?.length ?? 0)
+        ) {
+          return {
+            chapterIndex: pos.chapterIndex,
+            pageIndex,
+            wordIndex: Math.min(wordIndex, Math.max(0, (chapterPages[pageIndex]?.wordCount ?? 1) - 1)),
+          };
+        }
+      } catch { /* try next key */ }
     }
+
     return null;
   }
 }

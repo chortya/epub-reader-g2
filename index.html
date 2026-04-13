@@ -3,235 +3,306 @@
 
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>EPUB Reader - G2</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>ePub Reader — G2</title>
   <style>
+    :root {
+      --color-text: #232323;
+      --color-text-dim: #7B7B7B;
+      --color-text-muted: #7B7B7B;
+      --color-bg: #EEEEEE;
+      --color-surface: #FFFFFF;
+      --color-surface-light: #F6F6F6;
+      --color-surface-lighter: #E4E4E4;
+      --color-border: #E4E4E4;
+      --color-border-light: #EEEEEE;
+      --color-accent: #232323;
+      --color-accent-alpha: rgba(35, 35, 35, 0.08);
+      --color-positive: #4BB956;
+      --color-negative: #FF453A;
+      --color-negative-alpha: rgba(255, 69, 58, 0.12);
+      --color-input-bg: #F6F6F6;
+      --radius: 6px;
+      --gap-sm: 6px;
+      --gap: 12px;
+      --gap-lg: 24px;
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --font-mono: "SF Mono", "Cascadia Code", "Fira Code", monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
     body {
-      font-family: system-ui, sans-serif;
-      max-width: 600px;
-      margin: 2rem auto;
-      padding: 0 1rem;
-      background: #1a1a1a;
-      color: #e0e0e0;
+      font-family: var(--font);
+      background: var(--color-bg);
+      color: var(--color-text);
+      max-width: 480px;
+      margin: 0 auto;
+      padding: 16px;
+      font-size: 15px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
     }
 
-    h1 {
-      margin-bottom: 0.5rem;
-    }
-
-    #status {
-      background: #0a0a0a;
-      color: #0f0;
-      padding: 1rem;
-      border-radius: 6px;
-      white-space: pre-wrap;
-      font-size: 0.85rem;
-      min-height: 3rem;
-    }
-
-    .upload-area {
-      margin: 1rem 0;
-      padding: 1.5rem;
-      border: 2px dashed #444;
-      border-radius: 8px;
-      text-align: center;
-    }
-
-    .upload-area input {
-      margin-top: 0.5rem;
-    }
-
-    #event-log {
-      background: #0a0a0a;
-      color: #0f0;
-      padding: 0.5rem;
-      border-radius: 6px;
-      font-size: 0.75rem;
-      max-height: 300px;
-      overflow-y: auto;
-      margin-top: 1rem;
-      white-space: pre-wrap;
-    }
-
-    .settings-panel {
-      margin: 1rem 0;
-      padding: 1rem;
-      background: #222;
-      border-radius: 8px;
-      font-size: 0.9rem;
-    }
-
-    .settings-panel label {
-      display: block;
-      margin-bottom: 0.5rem;
-    }
-
-    .settings-panel input[type=number] {
-      width: 60px;
-      margin-left: 0.5rem;
-      background: #333;
-      color: white;
-      border: 1px solid #444;
-      padding: 4px;
-      border-radius: 4px;
-    }
-
-    .settings-panel label {
-      display: block;
-      margin-bottom: 0.5rem;
-    }
-
-    .settings-panel input[type=number] {
-      width: 60px;
-      margin-left: 0.5rem;
-      background: #333;
-      color: white;
-      border: 1px solid #444;
-      padding: 4px;
-      border-radius: 4px;
-    }
-
-    .settings-panel input[type=checkbox] {
-      margin-left: 0.5rem;
-    }
-
-
-    .settings-panel button,
-    .action-btn {
-      background: #444;
-      color: white;
-      border: none;
-      padding: 0.5rem 1rem;
-      border-radius: 4px;
-      cursor: pointer;
-      margin-top: 0.5rem;
-    }
-
-    .settings-panel button:hover,
-    .action-btn:hover {
-      background: #555;
-    }
-
-    .gutenberg-panel {
-      margin: 1rem 0;
-      padding: 1rem;
-      background: #2a2a2a;
-      border-radius: 8px;
-    }
-
-    .gutenberg-list {
-      max-height: 250px;
-      overflow-y: auto;
-      margin-top: 1rem;
-      display: none;
-    }
-
-    .gutenberg-item {
-      padding: 0.5rem;
-      border-bottom: 1px solid #444;
-      cursor: pointer;
+    /* Header */
+    .header {
       display: flex;
-      justify-content: space-between;
       align-items: center;
+      justify-content: space-between;
+      margin-bottom: var(--gap-lg);
     }
-
-    .gutenberg-item:hover {
-      background: #333;
+    .header h1 { font-size: 20px; font-weight: 500; }
+    .header button {
+      background: none; border: none; color: var(--color-text-dim);
+      font-size: 20px; cursor: pointer; padding: 4px 8px; border-radius: var(--radius);
     }
+    .header button:hover { background: var(--color-accent-alpha); }
 
-    .gutenberg-item:last-child {
-      border-bottom: none;
-    }
+    /* Simulator — show above content, don't overlap */
+    #simulator-container { margin-bottom: var(--gap-lg); }
+    #simulator-container:empty { display: none; }
 
-    .bookmarks-list {
-      display: flex;
-      flex-direction: column;
-      gap: 0.5rem;
-      margin-top: 1rem;
-    }
-
-    .bookmark-btn {
-      background: #2a2a2a;
-      color: #0f0;
-      border: 1px solid #444;
-      padding: 0.5rem 1rem;
-      border-radius: 4px;
+    /* Upload */
+    .upload-card {
+      display: block;
+      background: var(--color-surface);
+      border: 2px dashed var(--color-border);
+      border-radius: var(--radius);
+      padding: var(--gap-lg) var(--gap);
+      text-align: center;
       cursor: pointer;
-      text-align: left;
-      font-family: inherit;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      margin-bottom: var(--gap-lg);
+      transition: border-color 0.15s;
+    }
+    .upload-card:hover { border-color: var(--color-text-dim); }
+    .upload-card .icon { font-size: 24px; margin-bottom: var(--gap-sm); }
+    .upload-card .label { font-size: 15px; font-weight: 500; }
+    .upload-card .hint { font-size: 13px; color: var(--color-text-dim); margin-top: 2px; }
+    .upload-card input { display: none; }
+
+    /* Section */
+    .section-title {
+      font-size: 13px; font-weight: 500; color: var(--color-text-dim);
+      text-transform: uppercase; letter-spacing: 0.5px;
+      margin-bottom: var(--gap-sm); padding-left: 2px;
     }
 
-    .bookmark-btn:hover {
-      background: #333;
+    /* Library */
+    .library { margin-bottom: var(--gap-lg); }
+    .lib-item {
+      display: flex; align-items: center;
+      background: var(--color-surface);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius);
+      padding: var(--gap);
+      margin-bottom: var(--gap-sm);
+      cursor: pointer;
+      transition: background 0.15s;
     }
+    .lib-item:hover { background: var(--color-surface-light); }
+    .lib-item .info { flex: 1; min-width: 0; }
+    .lib-item .title {
+      font-size: 15px; font-weight: 400;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .lib-item .title-row {
+      display: flex; align-items: center; gap: 8px; min-width: 0;
+    }
+    .lib-item .title-row .title { flex: 1; min-width: 0; }
+    .lib-item .meta { font-size: 11px; color: var(--color-text-dim); margin-top: 1px; }
+    .lib-item .del {
+      background: none; border: none; color: var(--color-text-muted);
+      font-size: 18px; cursor: pointer; padding: 4px 8px; border-radius: var(--radius);
+      flex-shrink: 0; margin-left: var(--gap-sm);
+    }
+    .lib-item .del:hover { color: var(--color-negative); background: var(--color-negative-alpha); }
+    .lib-empty {
+      text-align: center; padding: var(--gap-lg);
+      color: var(--color-text-muted); font-size: 13px;
+    }
+
+    /* Collapsible */
+    .collapse-head {
+      display: flex; align-items: center; justify-content: space-between;
+      background: var(--color-surface); border: 1px solid var(--color-border);
+      border-radius: var(--radius); padding: var(--gap);
+      cursor: pointer; margin-bottom: var(--gap-sm); user-select: none;
+      font-size: 15px;
+    }
+    .collapse-head:hover { background: var(--color-surface-light); }
+    .collapse-head .chev {
+      color: var(--color-text-dim); font-size: 10px;
+      transition: transform 0.2s;
+    }
+    .collapse-head.open .chev { transform: rotate(90deg); }
+    .collapse-body {
+      display: none; background: var(--color-surface);
+      border: 1px solid var(--color-border); border-top: none;
+      border-radius: 0 0 var(--radius) var(--radius);
+      padding: var(--gap); margin-top: -6px; margin-bottom: var(--gap);
+    }
+    .collapse-body.open { display: block; }
+
+    /* Settings */
+    .s-row {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 0; min-height: 44px;
+    }
+    .s-row + .s-row { border-top: 1px solid var(--color-border-light); }
+    .s-row label { font-size: 15px; font-weight: 400; color: var(--color-text); }
+
+    .s-row select {
+      appearance: none; -webkit-appearance: none;
+      background: var(--color-surface-light) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%237B7B7B'/%3E%3C/svg%3E") no-repeat right 10px center;
+      color: var(--color-text);
+      border: 1px solid var(--color-border);
+      padding: 8px 28px 8px 12px;
+      border-radius: var(--radius);
+      font-family: var(--font); font-size: 14px;
+      cursor: pointer; min-width: 120px;
+      transition: border-color 0.15s;
+    }
+    .s-row select:focus {
+      outline: none; border-color: var(--color-accent);
+    }
+    .s-row select:hover { border-color: var(--color-text-dim); }
+
+    .s-row input[type="number"] {
+      appearance: textfield; -moz-appearance: textfield;
+      background: var(--color-surface-light); color: var(--color-text);
+      border: 1px solid var(--color-border);
+      padding: 8px 12px; width: 80px; text-align: center;
+      border-radius: var(--radius);
+      font-family: var(--font); font-size: 14px;
+      transition: border-color 0.15s;
+    }
+    .s-row input[type="number"]:focus { outline: none; border-color: var(--color-accent); }
+    .s-row input[type="number"]::-webkit-inner-spin-button,
+    .s-row input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+
+    /* Toggle switch (replaces checkbox) */
+    .toggle {
+      position: relative; width: 44px; height: 24px;
+      background: var(--color-border); border-radius: 12px;
+      cursor: pointer; transition: background 0.2s;
+      flex-shrink: 0;
+    }
+    .toggle::after {
+      content: ''; position: absolute;
+      top: 2px; left: 2px;
+      width: 20px; height: 20px;
+      background: #fff; border-radius: 50%;
+      transition: transform 0.2s;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+    }
+    .toggle.on { background: var(--color-positive); }
+    .toggle.on::after { transform: translateX(20px); }
+    input[type="checkbox"] { display: none; }
+
+    /* Buttons */
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      background: var(--color-accent); color: #fff;
+      border: none; padding: 10px 16px; border-radius: var(--radius);
+      font-family: var(--font); font-size: 14px; font-weight: 500;
+      cursor: pointer; width: 100%; margin-top: var(--gap);
+    }
+    .btn:hover { opacity: 0.85; }
+    .btn-ghost { background: var(--color-accent-alpha); color: var(--color-text); }
+    .btn-sm { padding: 6px 12px; font-size: 12px; width: auto; margin-top: 0; }
+
+    /* Gutenberg list */
+    .gut-list { max-height: 300px; overflow-y: auto; display: none; margin-top: var(--gap); }
+    .gut-item {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: var(--gap-sm) 0; border-bottom: 1px solid var(--color-border-light);
+      font-size: 13px;
+    }
+    .gut-item:last-child { border-bottom: none; }
+    .gut-item span {
+      flex: 1; min-width: 0; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap; margin-right: var(--gap-sm);
+    }
+
+    /* Status */
+    #status {
+      font-family: var(--font-mono); font-size: 11px;
+      color: var(--color-text-muted); padding: var(--gap) 2px;
+      margin-top: var(--gap); white-space: pre-wrap; word-break: break-word;
+    }
+
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 2px; }
   </style>
 </head>
 
 <body>
-  <div id="app">
-    <div style="text-align: center; margin-bottom: 2rem;">
-      <h1>Even G2 ePub Reader</h1>
-      <p>Select ePub file on from device or load Top100 books from Project Gutenberg</p>
-    </div>
+  <header class="header">
+    <h1>ePub Reader <span style="font-size:11px; font-weight:400; color:var(--color-text-dim);">v1.1.0</span></h1>
+    <button id="toggle-settings" title="Settings">&#9881;</button>
+  </header>
 
-    <!-- Simulator Container -->
-    <div id="simulator-container" style="margin: 20px 0;"></div>
+  <div id="simulator-container"></div>
 
-    <div class="upload-area">
-      <label for="epub-file">Choose an EPUB file:</label><br />
-      <input type="file" id="epub-file" accept=".epub" />
-    </div>
+  <label class="upload-card" for="epub-file">
+    <div class="icon">&#128214;</div>
+    <div class="label">Upload EPUB</div>
+    <div class="hint">Tap to select file from device</div>
+    <input type="file" id="epub-file" accept=".epub" />
+  </label>
 
-    <div class="settings-panel">
-      <h3>Reader Settings</h3>
-
-      <label>
-        Enable hyphenation:
-        <input type="checkbox" id="setting-hyphenation" />
-      </label>
-      <label>
-        Status bar position:
-        <select id="setting-statusbar"
-          style="margin-left: 0.5rem; background: #333; color: white; border: 1px solid #444; padding: 4px; border-radius: 4px;">
-          <option value="none">Hidden</option>
-          <option value="bottom">Bottom (Horizontal)</option>
-          <option value="right">Right (Vertical)</option>
-        </select>
-      </label>
-      <label>
-        Reading mode:
-        <select id="setting-reading-mode"
-          style="margin-left: 0.5rem; background: #333; color: white; border: 1px solid #444; padding: 4px; border-radius: 4px;">
-          <option value="paged">Paged</option>
-          <option value="flow">Flow (word-by-word)</option>
-        </select>
-      </label>
-      <label>
-        Flow speed (WPM):
-        <input type="number" id="setting-flow-speed" min="120" max="600" step="10" />
-      </label>
-      <button id="save-settings-btn" class="action-btn">Apply Settings</button>
-
-      <h3 style="margin-top: 1.5rem; margin-bottom: 0.5rem; border-top: 1px solid #333; padding-top: 1rem;">Bookmarks
-      </h3>
-      <div id="bookmarks-container" class="bookmarks-list">
-        <!-- Bookmark buttons populated by JS -->
-      </div>
-    </div>
-
-    <div class="gutenberg-panel">
-      <h3>Project Gutenberg (Top 100)</h3>
-      <p style="font-size: 0.85rem; color: #aaa;">Download public domain books directly.</p>
-      <button id="fetch-gutenberg-btn" class="action-btn">Fetch Top Books</button>
-      <div id="gutenberg-list" class="gutenberg-list"></div>
-    </div>
-
-    <pre id="status">Booting...</pre>
-    <div id="event-log"></div>
+  <div class="section-title">Library</div>
+  <div id="library-container" class="library">
+    <div class="lib-empty">No books yet. Upload an EPUB or browse Gutenberg.</div>
   </div>
+
+  <div class="collapse-head" id="gut-toggle">
+    <span>Gutenberg Top 100</span>
+    <span class="chev">&#9654;</span>
+  </div>
+  <div class="collapse-body" id="gut-body">
+    <p style="font-size:13px; color:var(--color-text-dim); margin-bottom:var(--gap);">
+      Download public domain books directly.
+    </p>
+    <button id="fetch-gutenberg-btn" class="btn btn-ghost">Fetch Top Books</button>
+    <div id="gutenberg-list" class="gut-list"></div>
+  </div>
+
+  <div class="collapse-head" id="settings-toggle" style="margin-top:var(--gap-sm);">
+    <span>Settings</span>
+    <span class="chev">&#9654;</span>
+  </div>
+  <div class="collapse-body" id="settings-body">
+    <div class="s-row">
+      <label>Hyphenation</label>
+      <div class="toggle" id="setting-hyphenation-toggle"></div>
+      <input type="checkbox" id="setting-hyphenation" />
+    </div>
+    <div class="s-row">
+      <label for="setting-statusbar">Status bar</label>
+      <select id="setting-statusbar">
+        <option value="none">Hidden</option>
+        <option value="bottom">Bottom</option>
+        <option value="right">Right</option>
+      </select>
+    </div>
+    <div class="s-row">
+      <label for="setting-reading-mode">Reading mode</label>
+      <select id="setting-reading-mode">
+        <option value="paged">Paged</option>
+        <option value="flow">Flow</option>
+      </select>
+    </div>
+    <div class="s-row">
+      <label for="setting-flow-speed">Flow speed (WPM)</label>
+      <input type="number" id="setting-flow-speed" min="120" max="600" step="10" />
+    </div>
+    <button id="save-settings-btn" class="btn">Apply Settings</button>
+  </div>
+
+  <div id="status"></div>
+
   <script type="module" src="/src/main.ts"></script>
 </body>
 

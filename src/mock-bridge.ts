@@ -143,6 +143,20 @@ export class MockBridge {
         container: TextContainerUpgrade,
     ): Promise<boolean> {
         console.log('[MockBridge] textContainerUpgrade', container);
+        // Update matching container in the simulator display in-place
+        const screen = document.getElementById('sim-screen');
+        if (screen && container.containerID != null) {
+            const divs = screen.querySelectorAll<HTMLDivElement>('[data-container-id]');
+            for (const div of divs) {
+                if (div.dataset.containerId === String(container.containerID)
+                    && div.dataset.containerName === container.containerName) {
+                    if (container.content != null) {
+                        div.textContent = container.content;
+                    }
+                    break;
+                }
+            }
+        }
         return true;
     }
 
@@ -245,6 +259,8 @@ export class MockBridge {
                 div.textContent = obj.content || '';
                 div.style.padding = '4px';
                 div.style.boxSizing = 'border-box';
+                div.dataset.containerId = String(obj.containerID ?? '');
+                div.dataset.containerName = obj.containerName ?? '';
 
                 if (obj.isEventCapture) {
                     div.style.backgroundColor = 'rgba(0, 255, 0, 0.1)';
@@ -319,6 +335,17 @@ export class MockBridge {
     async audioControl(isOpen: boolean): Promise<boolean> {
         console.log(`[MockBridge] audioControl: ${isOpen}`);
         return true;
+    }
+
+    async imuControl(isOpen: boolean, reportFrq?: number): Promise<boolean> {
+        console.log(`[MockBridge] imuControl: ${isOpen}, reportFrq=${reportFrq}`);
+        return true;
+    }
+
+    onLaunchSource(callback: (source: 'appMenu' | 'glassesMenu') => void): () => void {
+        // Simulate app menu launch
+        setTimeout(() => callback('appMenu'), 50);
+        return () => {};
     }
 
 }

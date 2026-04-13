@@ -1,13 +1,27 @@
 import JSZip from 'jszip';
 import Hypher from 'hypher';
-import enUs from 'hyphenation.en-us';
-import de from 'hyphenation.de';
-import ru from 'hyphenation.ru';
-import uk from 'hyphenation.uk';
-import type { Book, Chapter } from './types';
-import { setHyphenator } from './paginator';
+import { pickChapterTitle, normalizeChapterTitle } from './chapter-title';
 
-export async function parseEpub(data: ArrayBuffer): Promise<Book> {
+/**
+ * Extended cleanForG2 that preserves Cyrillic characters (U+0400–U+04FF).
+ * The upstream cleanForG2 only allows ASCII + Latin-1 Supplement, stripping Cyrillic.
+ */
+function cleanForG2(text: string): string {
+  // First let the toolkit strip emojis, then apply our own unsupported-char filter
+  // that additionally allows Cyrillic
+  const EMOJI_RE = /[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{200D}\u{20E3}\u{E0020}-\u{E007F}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{2702}-\u{27B0}\u{231A}-\u{231B}\u{23E9}-\u{23F3}\u{23F8}-\u{23FA}\u{25AA}-\u{25AB}\u{25B6}\u{25C0}\u{25FB}-\u{25FE}\u{2614}-\u{2615}\u{2648}-\u{2653}\u{267F}\u{2693}\u{26A1}\u{26AA}-\u{26AB}\u{26BD}-\u{26BE}\u{26C4}-\u{26C5}\u{26CE}\u{26D4}\u{26EA}\u{26F2}-\u{26F3}\u{26F5}\u{26FA}\u{26FD}\u{2934}-\u{2935}\u{2B05}-\u{2B07}\u{2B1B}-\u{2B1C}\u{2B50}\u{2B55}\u{3030}\u{303D}\u{3297}\u{3299}]/gu;
+  const UNSUPPORTED_RE = /[^\x20-\x7E\u00A0-\u017F\u0400-\u04FF\u2010-\u2027\u2030-\u205E\u2190-\u21FF\u2500-\u257F]/g;
+  return text
+    .replace(EMOJI_RE, '')
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, ' ')
+    .replace(UNSUPPORTED_RE, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+import type { Book, Chapter } from './types';
+import { setHyphenator, setWideGlyphs } from './paginator';
+
+export async function parseEpub(data: ArrayBuffer, filenameHint?: string): Promise<Book> {
   const zip = await JSZip.loadAsync(data);
 
   // 1. Find the OPF file path from META-INF/container.xml
@@ -25,11 +39,12 @@ export async function parseEpub(data: ArrayBuffer): Promise<Book> {
     const xhtml = await readZipFile(zip, item.href);
     if (!xhtml) continue;
 
-    const text = stripHtmlToText(xhtml);
+    const chapterMeta = extractChapterMetadata(xhtml);
+    const text = chapterMeta.text;
     if (text.trim().length < 10) continue;
 
     rawChapters.push({
-      title: item.title || `Chapter ${rawChapters.length + 1}`,
+      title: pickChapterTitle(item.title, chapterMeta.heading, chapterMeta.documentTitle, rawChapters.length + 1),
       text: text.trim(),
     });
   }
@@ -41,8 +56,8 @@ export async function parseEpub(data: ArrayBuffer): Promise<Book> {
   // Detect language and set up hyphenator
   const sampleText = rawChapters.slice(0, 3).map((c) => c.text).join(' ');
   const lang = detectLang(sampleText);
-  const patterns: Record<string, typeof enUs> = { en: enUs, de, ru, uk };
-  setHyphenator(new Hypher(patterns[lang]));
+  setHyphenator(new Hypher(await loadHyphenationPatterns(lang)));
+  setWideGlyphs(lang === 'ru' || lang === 'uk');
 
   // Apply paragraph formatting
   const chapters: Chapter[] = rawChapters.map((ch) => ({
@@ -50,7 +65,39 @@ export async function parseEpub(data: ArrayBuffer): Promise<Book> {
     text: formatText(ch.text),
   }));
 
-  return { title: title || 'Untitled', chapters };
+  // Use OPF title unless it looks like a placeholder (too short, numeric, or generic)
+  let bookTitle = title;
+  if (!bookTitle || bookTitle.length < 3 || /^\d+$/.test(bookTitle) || /^(untitled|unknown|chapter|section)/i.test(bookTitle)) {
+    if (filenameHint) {
+      bookTitle = filenameHint.replace(/\.epub$/i, '').replace(/[_]/g, ' ').trim();
+    }
+  }
+
+  return { title: bookTitle || 'Untitled', chapters };
+}
+
+async function loadHyphenationPatterns(lang: string): Promise<ConstructorParameters<typeof Hypher>[0]> {
+  switch (lang) {
+    case 'de':
+      return (await import('hyphenation.de')).default;
+    case 'es':
+      return (await import('hyphenation.es')).default;
+    case 'fr':
+      return (await import('hyphenation.fr')).default;
+    case 'nl':
+      return (await import('hyphenation.nl')).default;
+    case 'pl':
+      return (await import('hyphenation.pl')).default;
+    case 'pt':
+      return (await import('hyphenation.pt')).default;
+    case 'ru':
+      return (await import('hyphenation.ru')).default;
+    case 'uk':
+      return (await import('hyphenation.uk')).default;
+    case 'en':
+    default:
+      return (await import('hyphenation.en-us')).default;
+  }
 }
 
 async function readZipFile(zip: JSZip, path: string): Promise<string> {
@@ -200,33 +247,36 @@ const BLOCK_TAGS = new Set([
   'TR', 'TH', 'TD',
 ]);
 
-function stripHtmlToText(html: string): string {
+function extractChapterMetadata(html: string): {
+  text: string;
+  heading: string;
+  documentTitle: string;
+} {
   const parser = new DOMParser();
   const doc = parser.parseFromString(html, 'text/html');
 
-  // Remove script and style elements
+  const heading = normalizeChapterTitle(
+    doc.querySelector('h1, h2, h3, h4, h5, h6')?.textContent ?? '',
+  );
+  const documentTitle = normalizeChapterTitle(doc.querySelector('title')?.textContent ?? '');
+
   doc.querySelectorAll('script, style').forEach((el) => el.remove());
 
-  // Walk the DOM and extract text with proper paragraph breaks
   const parts: string[] = [];
   walkNode(doc.body, parts);
 
   let text = parts.join('');
-
-  // Normalize whitespace
-  text = text.replace(/[ \t]+/g, ' ');         // collapse horizontal whitespace
-  text = text.replace(/ ?\n ?/g, '\n');         // trim spaces around newlines
-  text = text.replace(/\n{2,}/g, '\n');         // single newline between paragraphs
-
-  // Normalize Unicode quotes and dashes for consistent display
-  text = text.replace(/[\u2018\u2019\u201A]/g, "'");  // smart single quotes
-  text = text.replace(/[\u201C\u201D\u201E]/g, '"');   // smart double quotes
-  text = text.replace(/[\u2013\u2014]/g, '-');         // en/em dash to compact hyphen
-  text = text.replace(/\u2026/g, '...');               // ellipsis
-
+  text = text.replace(/[ \t]+/g, ' ');
+  text = text.replace(/ ?\n ?/g, '\n');
+  text = text.replace(/\n{2,}/g, '\n');
+  text = text.replace(/[\u2018\u2019\u201A]/g, "'");
+  text = text.replace(/[\u201C\u201D\u201E]/g, '"');
+  text = text.replace(/[\u2013\u2014]/g, '-');
+  text = text.replace(/\u2026/g, '...');
+  text = text.split('\n').map(line => cleanForG2(line)).join('\n');
   text = text.trim();
 
-  return text;
+  return { text, heading, documentTitle };
 }
 
 function walkNode(node: Node | null, parts: string[]): void {
@@ -262,7 +312,18 @@ function walkNode(node: Node | null, parts: string[]): void {
         }
       }
 
+      const beforeLen = parts.length;
       walkNode(el, parts);
+
+      // Ensure inline elements don't fuse with surrounding text.
+      // E.g. <em>word1</em><em>word2</em> must not become "word1word2".
+      if (!isBlock && parts.length > beforeLen) {
+        const first = parts[beforeLen];
+        const prev = beforeLen > 0 ? parts[beforeLen - 1] : '';
+        if (prev.length > 0 && !/\s$/.test(prev) && !/^\s/.test(first)) {
+          parts.splice(beforeLen, 0, ' ');
+        }
+      }
 
       if (isBlock && parts.length > 0) {
         const last = parts[parts.length - 1];
@@ -275,19 +336,49 @@ function walkNode(node: Node | null, parts: string[]): void {
 }
 
 function detectLang(text: string): string {
-  const sample = text.slice(0, 2000);
+  // Sample from middle of text to avoid Gutenberg/copyright boilerplate at start
+  const mid = Math.max(0, Math.floor(text.length / 2) - 1000);
+  const sample = text.slice(mid, mid + 2000);
 
   // Cyrillic → Russian or Ukrainian
   const cyrillicCount = (sample.match(/[\u0400-\u04FF]/g) || []).length;
   if (cyrillicCount > sample.length * 0.2) {
-    // Ukrainian-specific letters: Є, І, Ї, Ґ and lowercase
     const ukChars = (sample.match(/[\u0404\u0406\u0407\u0490\u0491\u0454\u0456\u0457]/g) || []).length;
     return ukChars > 3 ? 'uk' : 'ru';
   }
 
-  // German-specific: ä, ö, ü, ß, Ä, Ö, Ü
-  const deChars = (sample.match(/[\u00E4\u00F6\u00FC\u00DF\u00C4\u00D6\u00DC]/g) || []).length;
-  if (deChars > 3) return 'de';
+  // --- Unique character detection (most reliable, check first) ---
+
+  // Polish: ą, ć, ę, ł, ń, ś, ź, ż (Latin Extended-A, unique to Polish)
+  const plChars = (sample.match(/[\u0104\u0105\u0106\u0107\u0118\u0119\u0141\u0142\u0143\u0144\u015A\u015B\u0179\u017A\u017B\u017C]/g) || []).length;
+  if (plChars > 2) return 'pl';
+
+  // Portuguese: ã, õ (unique among Latin-script languages)
+  const ptChars = (sample.match(/[\u00E3\u00F5\u00C3\u00D5]/g) || []).length;
+  if (ptChars > 1) return 'pt';
+
+  // Spanish: ñ, ¡, ¿ (unique to Spanish)
+  const esChars = (sample.match(/[\u00F1\u00D1\u00A1\u00BF]/g) || []).length;
+  if (esChars > 1) return 'es';
+
+  // German: ü, ß are unique; ä, ö shared with Nordic languages
+  const deUmlaut = (sample.match(/[\u00E4\u00F6\u00FC\u00DF\u00C4\u00D6\u00DC]/g) || []).length;
+  const deUnique = (sample.match(/[\u00FC\u00DC\u00DF]/g) || []).length;
+  if (deUnique > 1 || deUmlaut > 5) return 'de';
+
+  // French: ç, œ, ù, û (not in Italian)
+  const frUnique = (sample.match(/[\u00E7\u00C7\u0153\u0152\u00F9\u00D9\u00FB\u00DB]/g) || []).length;
+  if (frUnique > 1) return 'fr';
+
+  // --- Word-pattern detection (for languages without unique characters) ---
+
+  // Dutch: Dutch-specific function words
+  const nlWords = (sample.match(/\b(het|niet|zijn|wordt|deze|maar|ook|nog|wel|geen|naar|zeer)\b/gi) || []).length;
+  if (nlWords > 8) return 'nl';
+
+  // French fallback: high count of accented vowels (é, è, ê, à, â)
+  const frAccents = (sample.match(/[\u00E9\u00E8\u00EA\u00EB\u00E0\u00E2]/g) || []).length;
+  if (frAccents > 5) return 'fr';
 
   return 'en';
 }

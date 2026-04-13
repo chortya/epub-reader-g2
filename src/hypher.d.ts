@@ -32,3 +32,28 @@ declare module 'hyphenation.uk' {
   const pattern: import('hypher').HyphenationPattern;
   export default pattern;
 }
+
+declare module 'hyphenation.es' {
+  const pattern: import('hypher').HyphenationPattern;
+  export default pattern;
+}
+
+declare module 'hyphenation.fr' {
+  const pattern: import('hypher').HyphenationPattern;
+  export default pattern;
+}
+
+declare module 'hyphenation.nl' {
+  const pattern: import('hypher').HyphenationPattern;
+  export default pattern;
+}
+
+declare module 'hyphenation.pl' {
+  const pattern: import('hypher').HyphenationPattern;
+  export default pattern;
+}
+
+declare module 'hyphenation.pt' {
+  const pattern: import('hypher').HyphenationPattern;
+  export default pattern;
+}

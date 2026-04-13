@@ -1,16 +1,34 @@
 {
-  "package_id": "uk.wintermute.epubreader",
+  "package_id": "me.proton.evendev.epubreader",
   "edition": "202601",
   "name": "epub-reader",
-  "version": "0.5.0",
+  "version": "1.1.0",
   "min_app_version": "0.1.0",
+  "min_sdk_version": "0.0.9",
   "tagline": "Read EPUB books on your Even G2 glasses",
-  "description": "A simple EPUB reader for Even Realities G2 smart glasses. Upload an EPUB file via the web UI, then read page-by-page using touchpad gestures.",
-  "author": "Your Name <you@example.com>",
+  "description": "Read EPUB books directly on your Even Realities G2 smart glasses. Upload books from your phone or browse the Project Gutenberg Top 100 catalog, then read hands-free on the glasses.\n\nFeatures:\n- Local library: recent books cached on-device for offline reading\n- Two reading modes: Paged (swipe to turn pages) and Flow (word-by-word speed reading, 120-600 WPM)\n- Automatic hyphenation in 9 languages: English, German, Spanish, French, Dutch, Polish, Portuguese, Russian, Ukrainian\n- Splash screen with ePub Reader logo on startup\n- Book picker on glasses: browse and resume books without the phone app\n- Configurable status bar with reading progress\n- Automatic position saving across app restarts\n- Project Gutenberg integration\n\nControls:\n- Swipe down/up: Next/previous page or browse chapters/books\n- Tap: Select chapter/book or play/pause flow mode\n- Double tap: Return to chapter list, book picker, or exit app",
+  "author": "Andriy Chortkivskyy <evendev@proton.me>",
   "entrypoint": "index.html",
-  "permissions": {
-    "network": [
-      "evenhub.evenrealities.com"
-    ]
-  }
+  "supported_languages": [
+    "en",
+    "de",
+    "es",
+    "fr",
+    "nl",
+    "pl",
+    "pt",
+    "ru",
+    "uk"
+  ],
+  "permissions": [
+    {
+      "name": "network",
+      "desc": "Internet access for downloading books from Project Gutenberg and Even Hub.",
+      "whitelist": [
+        "https://www.gutenberg.org",
+        "https://api.codetabs.com",
+        "https://evenhub.evenrealities.com"
+      ]
+    }
+  ]
 }

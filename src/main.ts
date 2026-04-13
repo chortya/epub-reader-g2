@@ -1,18 +1,28 @@
 import { waitForEvenAppBridge } from '@evenrealities/even_hub_sdk';
-import { setStatus, appendEventLog, withTimeout } from './utils';
+import { activateKeepAlive } from 'even-toolkit/keep-alive';
+import { setStatus, withTimeout } from './utils';
 import { parseEpub } from './epub-parser';
 import { EvenEpubClient } from './even-client';
 import { fetchTopGutenbergBooks, downloadGutenbergEpub } from './gutenberg';
-import { getRecentBooksFromDB, saveEpubBufferToDB } from './db';
-import { config, FLOW_MAX_WPM, FLOW_MIN_WPM, saveSettings } from './constants';
-import { APP_LOGO } from './logo';
+import { getRecentBooksFromDB, saveEpubBufferToDB, deleteFromDB, type StoredBook } from './db';
+import { config, FLOW_MAX_WPM, FLOW_MIN_WPM, saveSettings, STORAGE_KEY_BOOK_TITLE } from './constants';
+import type { CachedBookMeta } from './types';
+import { makeBookId } from './book-id';
 
 import { MockBridge } from './mock-bridge';
 
-async function main() {
-  setStatus(APP_LOGO + '\n\nWaiting for Even bridge\u2026');
+function toCachedBookMeta(book: Pick<StoredBook, 'filename' | 'title' | 'timestamp'>): CachedBookMeta {
+  return {
+    bookId: makeBookId(book.filename, book.title),
+    title: book.title,
+    filename: book.filename,
+    uploadedAt: book.timestamp,
+  };
+}
 
-  // Check for force simulator mode
+async function main() {
+  setStatus('Connecting...');
+
   const urlParams = new URLSearchParams(window.location.search);
   const forceSimulator = urlParams.get('simulator') === 'true';
 
@@ -25,44 +35,128 @@ async function main() {
     }
   }
 
-  // Fallback to MockBridge if real bridge is missing or forced
   if (!bridge || forceSimulator) {
     console.log('Using MockBridge');
     bridge = MockBridge.getInstance();
-    setStatus('Simulator Mode');
+    setStatus('Simulator mode');
   }
 
   let client: EvenEpubClient | null = null;
 
   if (bridge) {
-    // Force cast because MockBridge is compatible enough for our usage
+    activateKeepAlive();
+
     client = new EvenEpubClient(bridge as any);
-    await client.init();
-    if (bridge instanceof MockBridge) {
-      setStatus(APP_LOGO + '\n\nSimulator Ready. Upload an EPUB file to test.');
-      appendEventLog('MockBridge connected');
-    } else {
-      setStatus(APP_LOGO + '\n\nConnected. Upload an EPUB file to begin reading.');
-      appendEventLog('Bridge connected');
+
+    // Wire up book selection from glasses-side picker
+    client.onBookSelected = async (meta: CachedBookMeta) => {
+      try {
+        setStatus(`Loading: ${meta.title}...`);
+        const recent = await getRecentBooksFromDB(bridge as any);
+        const cached = recent.find((r) =>
+          r.title === meta.title ||
+          r.filename === meta.filename ||
+          makeBookId(r.filename, r.title) === meta.bookId,
+        );
+        if (!cached) {
+          setStatus(`Book not available locally: ${meta.title}`);
+          return;
+        }
+        const book = await parseEpub(cached.buffer, cached.filename);
+        await client!.loadBook(book, true, makeBookId(cached.filename, cached.title));
+        await renderLibrary(client!, bridge as any);
+      } catch (e) {
+        console.error('Failed to load book from picker:', e);
+        setStatus('Failed to load book.');
+      }
+    };
+
+    // Populate book cache BEFORE init so glasses-side can show book picker.
+    try {
+      const localBooks = await getRecentBooksFromDB(bridge as any);
+      if (localBooks.length > 0) {
+        await client.cacheBookList(localBooks.map(toCachedBookMeta));
+      }
+    } catch (e) {
+      console.warn('Failed to preload local book list:', e);
     }
 
-    // Load Bookmarks
-    await renderBookmarks(client);
-    client.onViewChanged = () => renderBookmarks(client as EvenEpubClient);
+    await client.init();
+    if (bridge instanceof MockBridge) {
+      setStatus('Simulator ready');
+    } else {
+      setStatus('Connected');
+    }
+
+    // Auto-resume last book when launched from glasses menu
+    if ('onLaunchSource' in bridge) {
+      (bridge as any).onLaunchSource(async (source: string) => {
+        if (source === 'glassesMenu' && client) {
+          try {
+            const lastTitle = await (bridge as any).getLocalStorage(STORAGE_KEY_BOOK_TITLE);
+            if (!lastTitle) return;
+            const recent = await getRecentBooksFromDB(bridge as any);
+            const match = recent.find((r) => r.title === lastTitle);
+            if (match) {
+              const book = await parseEpub(match.buffer, match.filename);
+              await client.loadBook(book, true, makeBookId(match.filename, match.title));
+            }
+          } catch (e) {
+            console.warn('Failed to auto-resume book:', e);
+          }
+        }
+      });
+    }
+
+    // Load library
+    await renderLibrary(client, bridge as any);
+    client.onViewChanged = () => renderLibrary(client as EvenEpubClient, bridge as any);
+
+    // Update position display in library on every page turn
+    client.onPositionChanged = (ch, pg) => {
+      const items = document.querySelectorAll('#library-container .lib-item');
+      const bookTitle = client?.['book']?.title;
+      if (!bookTitle) return;
+      for (const item of items) {
+        const titleEl = item.querySelector('.title');
+        if (titleEl?.textContent === bookTitle) {
+          const metaEl = item.querySelector('.meta');
+          if (metaEl) {
+            const parts = metaEl.textContent?.split('·').map((part) => part.trim()) || [];
+            const suffix = parts.slice(1).join(' · ');
+            metaEl.textContent = suffix
+              ? `Ch ${ch + 1}, Pg ${pg + 1} · ${suffix}`
+              : `Ch ${ch + 1}, Pg ${pg + 1}`;
+          }
+          break;
+        }
+      }
+    };
   } else {
-    // Should not happen with MockBridge
     setStatus('Error: Could not initialize bridge.');
   }
 
-  // Setup Settings UI
+  // --- Settings UI ---
   const hyphenConfig = document.getElementById('setting-hyphenation') as HTMLInputElement | null;
   const statusBarConfig = document.getElementById('setting-statusbar') as HTMLSelectElement | null;
   const readingModeConfig = document.getElementById('setting-reading-mode') as HTMLSelectElement | null;
   const flowSpeedConfig = document.getElementById('setting-flow-speed') as HTMLInputElement | null;
   const saveBtn = document.getElementById('save-settings-btn') as HTMLButtonElement | null;
 
-  if (hyphenConfig && statusBarConfig && readingModeConfig && flowSpeedConfig && saveBtn) {
+  const hyphenToggle = document.getElementById('setting-hyphenation-toggle');
+  if (hyphenToggle && hyphenConfig) {
+    const syncToggle = () => {
+      hyphenToggle.classList.toggle('on', hyphenConfig.checked);
+    };
     hyphenConfig.checked = config.hyphenation;
+    syncToggle();
+    hyphenToggle.addEventListener('click', () => {
+      hyphenConfig.checked = !hyphenConfig.checked;
+      syncToggle();
+    });
+  }
+
+  if (hyphenConfig && statusBarConfig && readingModeConfig && flowSpeedConfig && saveBtn) {
     statusBarConfig.value = config.statusBarPosition;
     readingModeConfig.value = config.readingMode;
     flowSpeedConfig.value = String(config.flowSpeedWpm);
@@ -70,170 +164,199 @@ async function main() {
     flowSpeedConfig.max = String(FLOW_MAX_WPM);
 
     saveBtn.addEventListener('click', async () => {
-      const hyph = hyphenConfig.checked;
-      const showStatus = statusBarConfig.value as 'none' | 'bottom' | 'right';
-      const readingMode = readingModeConfig.value === 'flow' ? 'flow' : 'paged';
+      config.hyphenation = hyphenConfig.checked;
+      config.statusBarPosition = statusBarConfig.value as 'none' | 'bottom' | 'right';
+      config.readingMode = readingModeConfig.value === 'flow' ? 'flow' : 'paged';
       const parsedSpeed = Number.parseInt(flowSpeedConfig.value, 10);
-      const flowSpeedWpm = Number.isFinite(parsedSpeed)
+      config.flowSpeedWpm = Number.isFinite(parsedSpeed)
         ? Math.max(FLOW_MIN_WPM, Math.min(FLOW_MAX_WPM, parsedSpeed))
         : config.flowSpeedWpm;
-
-      config.hyphenation = hyph;
-      config.statusBarPosition = showStatus;
-      config.readingMode = readingMode;
-      config.flowSpeedWpm = flowSpeedWpm;
-      flowSpeedConfig.value = String(flowSpeedWpm);
+      flowSpeedConfig.value = String(config.flowSpeedWpm);
 
       saveSettings();
-      appendEventLog(
-        `Settings saved - hyphenation: ${config.hyphenation}, status bar: ${config.statusBarPosition}, mode: ${config.readingMode}, flowSpeedWpm: ${config.flowSpeedWpm}`,
-      );
-
       if (client) {
-        setStatus('Applying new settings...');
+        setStatus('Applying settings...');
         await client.applySettings();
-        if (client['book']) {
-          setStatus(`Settings applied. Continuing reading ${client['book'].title}`);
-        } else {
-          setStatus('Settings applied. Ready. Upload an EPUB file.');
-        }
+        setStatus('Settings applied.');
       }
     });
   }
 
-  // Wire up file upload
+  setupCollapsible('gut-toggle', 'gut-body');
+  setupCollapsible('settings-toggle', 'settings-body');
+
+  const toggleSettingsBtn = document.getElementById('toggle-settings');
+  if (toggleSettingsBtn) {
+    toggleSettingsBtn.addEventListener('click', () => {
+      const header = document.getElementById('settings-toggle');
+      if (header) header.click();
+    });
+  }
+
+  // --- File upload ---
   const fileInput = document.getElementById('epub-file') as HTMLInputElement | null;
   if (fileInput) {
     fileInput.addEventListener('change', async () => {
       const file = fileInput.files?.[0];
       if (!file) return;
 
-      setStatus(`Loading: ${file.name}\u2026`);
-      appendEventLog(`File selected: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`);
-
+      setStatus(`Loading: ${file.name}...`);
       try {
         const data = await file.arrayBuffer();
-        const book = await parseEpub(data);
-        await saveEpubBufferToDB(data, file.name, book.title);
-
-        appendEventLog(
-          `Parsed: "${book.title}" with ${book.chapters.length} chapters`,
-        );
+        const book = await parseEpub(data, file.name);
+        await saveEpubBufferToDB(data, file.name, book.title, bridge as any);
 
         if (client) {
-          await client.loadBook(book);
-          await renderBookmarks(client);
-        } else {
-          // Browser-only mode: just show parse results
-          const summary = book.chapters
-            .map(
-              (ch, i) =>
-                `${i + 1}. ${ch.title} (${ch.text.length} chars)`,
-            )
-            .join('\n');
-          setStatus(`Parsed: ${book.title}\n\nChapters:\n${summary}`);
+          const id = makeBookId(file.name, book.title);
+          await client.loadBook(book, false, id);
+          await renderLibrary(client, bridge as any);
         }
+        setStatus(`Loaded: ${book.title}`);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        setStatus(`Error parsing EPUB: ${msg}`);
-        appendEventLog(`Parse error: ${msg}`);
+        setStatus(`Error: ${msg}`);
         console.error('EPUB parse error:', e);
       }
 
-      // Reset input so re-uploading the same file triggers change
       fileInput.value = '';
     });
   }
 
-  // Wire up Gutenberg
+  // --- Gutenberg ---
   const fetchGutBtn = document.getElementById('fetch-gutenberg-btn');
   const gutList = document.getElementById('gutenberg-list');
 
   if (fetchGutBtn && gutList) {
     fetchGutBtn.addEventListener('click', async () => {
       try {
-        setStatus('Fetching Top 100 Project Gutenberg books...');
+        setStatus('Fetching Gutenberg catalog...');
         const books = await fetchTopGutenbergBooks();
         gutList.innerHTML = '';
         gutList.style.display = 'block';
 
-        books.forEach(b => {
+        books.forEach((b) => {
           const div = document.createElement('div');
-          div.className = 'gutenberg-item';
-          div.innerHTML = `<span>${b.title}</span> <button class="action-btn" style="margin:0; padding:0.25rem 0.5rem">Read</button>`;
+          div.className = 'gut-item';
+          div.innerHTML = `<span>${b.title}</span> <button class="btn btn-ghost btn-sm">Read</button>`;
 
           div.querySelector('button')?.addEventListener('click', async () => {
             try {
               setStatus(`Downloading: ${b.title}...`);
-              appendEventLog(`Downloading Gutenberg book: ${b.id}`);
               const arrayBuffer = await downloadGutenbergEpub(b.id);
               setStatus(`Parsing: ${b.title}...`);
-              const book = await parseEpub(arrayBuffer);
-              await saveEpubBufferToDB(arrayBuffer, b.title + '.epub', book.title);
+              const book = await parseEpub(arrayBuffer, b.title + '.epub');
+              await saveEpubBufferToDB(arrayBuffer, b.title + '.epub', book.title, bridge as any);
+
               if (client) {
-                await client.loadBook(book);
-                await renderBookmarks(client);
-              } else {
-                setStatus(`Parsed: ${book.title}. (No glasses connected)`);
+                await client.loadBook(book, false, makeBookId(b.title + '.epub', book.title));
+                await renderLibrary(client, bridge as any);
               }
+              setStatus(`Loaded: ${book.title}`);
             } catch (e) {
               const msg = e instanceof Error ? e.message : String(e);
-              setStatus(`Error loading book: ${msg}`);
-              appendEventLog(`Gutenberg error: ${msg}`);
+              setStatus(`Error: ${msg}`);
             }
           });
 
           gutList.appendChild(div);
         });
-        setStatus(`Found ${books.length} books. Select one to read.`);
+        setStatus(`Found ${books.length} books.`);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         setStatus(`Failed to fetch Gutenberg list: ${msg}`);
       }
     });
   }
-  // Helper to render bookmarks
-  async function renderBookmarks(clientToUse: EvenEpubClient) {
-    const container = document.getElementById('bookmarks-container');
+
+  // --- Library rendering (local-only) ---
+  async function renderLibrary(clientToUse: EvenEpubClient, bridgeRef?: any) {
+    const container = document.getElementById('library-container');
     if (!container) return;
 
     try {
-      const recent = await getRecentBooksFromDB();
+      const localBooks = await getRecentBooksFromDB(bridgeRef);
+      const metas = localBooks.map(toCachedBookMeta);
+      const localById = new Map(localBooks.map((book) => [makeBookId(book.filename, book.title), book]));
       container.innerHTML = '';
 
-      if (recent.length === 0) {
-        container.innerHTML = '<span style="color: #666; font-size: 0.9em;">No saved books yet.</span>';
+      if (metas.length === 0) {
+        container.innerHTML = '<div class="lib-empty">No books yet. Upload an EPUB or browse Gutenberg.</div>';
+        await clientToUse.cacheBookList([]);
         return;
       }
 
-      for (const item of recent) {
-        const btn = document.createElement('button');
-        btn.className = 'bookmark-btn';
+      await clientToUse.cacheBookList(metas);
 
-        let posText = '';
-        const savedPos = await clientToUse.getSavedPosition(item.title);
-        if (savedPos) {
-          posText = ` <span style="color:#888; font-size: 0.8em;">(Ch ${savedPos.chapterIndex + 1}, Pg ${savedPos.pageIndex + 1})</span>`;
-        }
+      for (const meta of metas) {
+        const local = localById.get(meta.bookId);
+        if (!local) continue;
+        const item = document.createElement('div');
+        item.className = 'lib-item';
 
-        btn.innerHTML = `${item.title}${posText}`;
-        btn.onclick = async () => {
+        let posText = 'Not started';
+        try {
+          const savedPos = await clientToUse.getSavedPosition(meta.title, meta.bookId);
+          if (savedPos) {
+            posText = `Ch ${savedPos.chapterIndex + 1}, Pg ${savedPos.pageIndex + 1}`;
+          }
+        } catch { /* ignore */ }
+
+        const date = new Date(meta.uploadedAt);
+        const dateStr = date.toLocaleDateString('en', { month: 'short', day: 'numeric' });
+
+        item.innerHTML = `
+          <div class="info">
+            <div class="title-row">
+              <div class="title">${meta.title}</div>
+            </div>
+            <div class="meta">${posText} &middot; ${dateStr}</div>
+          </div>
+          <button class="del" title="Delete">&times;</button>
+        `;
+
+        item.querySelector('.info')?.addEventListener('click', async () => {
           try {
-            setStatus(`Restoring: ${item.title}...`);
-            const book = await parseEpub(item.buffer);
-            await clientToUse.loadBook(book, true);
-            await saveEpubBufferToDB(item.buffer, item.filename, book.title);
-            await renderBookmarks(clientToUse);
+            setStatus(`Loading: ${meta.title}...`);
+            const book = await parseEpub(local.buffer, meta.filename);
+            await clientToUse.loadBook(book, true, meta.bookId);
+            await renderLibrary(clientToUse, bridgeRef);
           } catch (e) {
             console.error(e);
-            setStatus('Failed to load bookmark.');
+            setStatus('Failed to load book.');
           }
-        };
-        container.appendChild(btn);
+        });
+
+        item.querySelector('.del')?.addEventListener('click', async (ev) => {
+          ev.stopPropagation();
+          if (!window.confirm(`Delete "${meta.title}"?\n\nThis removes the book from this device.`)) {
+            return;
+          }
+          setStatus(`Deleting: ${meta.title}...`);
+          try {
+            await deleteFromDB(meta.filename, bridgeRef);
+            await renderLibrary(clientToUse, bridgeRef);
+            setStatus('Book deleted.');
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            setStatus(`Delete failed: ${msg}`);
+          }
+        });
+
+        container.appendChild(item);
       }
     } catch (e) {
-      console.error("Error loading bookmarks:", e);
+      console.error('Error loading library:', e);
     }
+  }
+
+  function setupCollapsible(headerId: string, bodyId: string) {
+    const header = document.getElementById(headerId);
+    const body = document.getElementById(bodyId);
+    if (!header || !body) return;
+    header.addEventListener('click', () => {
+      header.classList.toggle('open');
+      body.classList.toggle('open');
+    });
   }
 }
 

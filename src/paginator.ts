@@ -2,10 +2,16 @@ import { config } from './constants';
 import type Hypher from 'hypher';
 
 let hyphenator: Hypher | null = null;
+let wideGlyphs = false;
 
 /** Set the hyphenator instance (called after language detection) */
 export function setHyphenator(h: Hypher): void {
   hyphenator = h;
+}
+
+/** Flag that the book uses a script with wider glyphs (Cyrillic) */
+export function setWideGlyphs(wide: boolean): void {
+  wideGlyphs = wide;
 }
 
 /**
@@ -14,7 +20,9 @@ export function setHyphenator(h: Hypher): void {
  */
 export function paginateText(
   text: string,
-  maxChars = config.statusBarPosition === 'right' ? 58 : 59,
+  maxChars = wideGlyphs
+    ? (config.statusBarPosition === 'right' ? 45 : 48)
+    : (config.statusBarPosition === 'right' ? 58 : 59),
   maxLines = config.statusBarPosition === 'bottom' ? 9 : 10,
 ): string[] {
   if (!text || text.trim().length === 0) return ['(empty)'];

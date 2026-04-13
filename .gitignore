@@ -3,3 +3,6 @@ dist/
 *.ehpk
 .DS_Store
 *.jpg
+.env
+.claude/
+glasses_*.png

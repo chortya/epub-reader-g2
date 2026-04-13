@@ -8,10 +8,17 @@ export type Book = {
   chapters: Chapter[];
 };
 
-export type ViewState = 'library' | 'reading' | 'flowReading';
+export type ViewState = 'bookPicker' | 'library' | 'reading' | 'flowReading';
 
 export type ReadingPosition = {
   chapterIndex: number;
   pageIndex: number;
   wordIndex?: number;
+};
+
+export type CachedBookMeta = {
+  bookId: string;
+  title: string;
+  filename: string;
+  uploadedAt: number;
 };
