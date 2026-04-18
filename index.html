@@ -4,6 +4,9 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
   <title>ePub Reader — G2</title>
   <style>
     :root {
@@ -61,6 +64,46 @@
     /* Simulator — show above content, don't overlap */
     #simulator-container { margin-bottom: var(--gap-lg); }
     #simulator-container:empty { display: none; }
+
+    /* Reader controls (context-aware, hidden by default) */
+    #reader-controls {
+      display: none;
+      background: var(--color-surface);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius);
+      padding: var(--gap);
+      margin-bottom: var(--gap-lg);
+    }
+    #reader-controls.open { display: block; }
+    #reader-controls .rc-title {
+      font-size: 13px; font-weight: 500; color: var(--color-text-dim);
+      text-transform: uppercase; letter-spacing: 0.5px;
+      margin-bottom: var(--gap-sm);
+    }
+    #reader-controls .rc-meta {
+      font-size: 12px; color: var(--color-text-dim); margin-bottom: var(--gap);
+      font-family: var(--font-mono);
+    }
+    #reader-controls .rc-row {
+      display: flex; gap: var(--gap-sm);
+    }
+    #reader-controls .rc-row + .rc-row { margin-top: var(--gap-sm); }
+    #reader-controls .rc-btn {
+      flex: 1;
+      background: var(--color-accent-alpha); color: var(--color-text);
+      border: none; padding: 10px 12px; border-radius: var(--radius);
+      font-family: var(--font); font-size: 14px; font-weight: 500;
+      cursor: pointer; transition: background 0.15s;
+    }
+    #reader-controls .rc-btn:hover:not(:disabled) { background: var(--color-border); }
+    #reader-controls .rc-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    #reader-controls .rc-btn.rc-primary {
+      background: var(--color-accent); color: #fff;
+    }
+    #reader-controls .rc-btn.rc-primary:hover:not(:disabled) { opacity: 0.85; background: var(--color-accent); }
+    #reader-controls .rc-paged, #reader-controls .rc-flow { display: none; }
+    #reader-controls.paged .rc-paged { display: block; }
+    #reader-controls.flow .rc-flow { display: block; }
 
     /* Upload */
     .upload-card {
@@ -180,6 +223,27 @@
     .s-row input[type="number"]::-webkit-inner-spin-button,
     .s-row input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 
+    .s-row .slider-wrap {
+      display: flex; align-items: center; gap: 8px; flex: 1; max-width: 200px;
+    }
+    .s-row input[type="range"] {
+      flex: 1; height: 4px; background: var(--color-border); border-radius: 2px;
+      appearance: none; -webkit-appearance: none; cursor: pointer;
+    }
+    .s-row input[type="range"]::-webkit-slider-thumb {
+      appearance: none; -webkit-appearance: none;
+      width: 18px; height: 18px; border-radius: 50%;
+      background: var(--color-accent); cursor: pointer;
+    }
+    .s-row input[type="range"]::-moz-range-thumb {
+      width: 18px; height: 18px; border-radius: 50%;
+      background: var(--color-accent); cursor: pointer; border: none;
+    }
+    .s-row .slider-value {
+      font-family: var(--font-mono); font-size: 13px; color: var(--color-text-dim);
+      min-width: 38px; text-align: right;
+    }
+
     /* Toggle switch (replaces checkbox) */
     .toggle {
       position: relative; width: 44px; height: 24px;
@@ -239,11 +303,31 @@
 
 <body>
   <header class="header">
-    <h1>ePub Reader <span style="font-size:11px; font-weight:400; color:var(--color-text-dim);">v1.1.0</span></h1>
+    <h1>ePub Reader <span style="font-size:11px; font-weight:400; color:var(--color-text-dim);">v1.2.0</span></h1>
     <button id="toggle-settings" title="Settings">&#9881;</button>
   </header>
 
   <div id="simulator-container"></div>
+
+  <div id="reader-controls">
+    <div class="rc-title">Reader</div>
+    <div class="rc-meta" id="reader-meta">&nbsp;</div>
+    <div class="rc-paged">
+      <div class="rc-row">
+        <button class="rc-btn" id="rc-prev-page">&#9664; Previous page</button>
+        <button class="rc-btn" id="rc-next-page">Next page &#9654;</button>
+      </div>
+    </div>
+    <div class="rc-flow">
+      <div class="rc-row">
+        <button class="rc-btn rc-primary" id="rc-toggle-flow">&#9654; Start</button>
+      </div>
+      <div class="rc-row">
+        <button class="rc-btn" id="rc-prev-chapter">&#9664; Prev chapter</button>
+        <button class="rc-btn" id="rc-next-chapter">Next chapter &#9654;</button>
+      </div>
+    </div>
+  </div>
 
   <label class="upload-card" for="epub-file">
     <div class="icon">&#128214;</div>
@@ -297,6 +381,13 @@
     <div class="s-row">
       <label for="setting-flow-speed">Flow speed (WPM)</label>
       <input type="number" id="setting-flow-speed" min="120" max="600" step="10" />
+    </div>
+    <div class="s-row">
+      <label for="setting-text-height">Text height</label>
+      <div class="slider-wrap">
+        <input type="range" id="setting-text-height" min="50" max="100" step="5" />
+        <span class="slider-value" id="setting-text-height-value">100%</span>
+      </div>
     </div>
     <button id="save-settings-btn" class="btn">Apply Settings</button>
   </div>

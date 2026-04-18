@@ -1,6 +1,6 @@
 {
   "name": "epub-reader-g2",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -18,9 +18,9 @@
     "pack:check": "evenhub pack app.json ./dist --check"
   },
   "dependencies": {
-    "@evenrealities/even_hub_sdk": "^0.0.9",
-    "@evenrealities/evenhub-cli": "^0.1.11",
-    "even-toolkit": "^1.6.5",
+    "@evenrealities/even_hub_sdk": "^0.0.10",
+    "@evenrealities/evenhub-cli": "^0.1.12",
+    "even-toolkit": "^1.7.0",
     "hyphenation.de": "^0.2.1",
     "hyphenation.en-us": "^0.2.1",
     "hyphenation.es": "^0.2.1",
@@ -35,7 +35,7 @@
     "upng-js": "^2.1.0"
   },
   "devDependencies": {
-    "@evenrealities/evenhub-simulator": "^0.7.1",
+    "@evenrealities/evenhub-simulator": "^0.7.2",
     "typescript": "^6.0.2",
     "vite": "^8.0.8"
   }

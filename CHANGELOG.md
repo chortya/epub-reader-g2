@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.2.0] - 2026-04-18
+
+### Added
+- **Text height setting**: New "Text height" slider (50–100%, step 10) in the web UI settings panel. Shrinking the value leaves the top portion of the G2 display blank and renders text in the bottom band — useful when glasses sit higher in the field of view. Applies to both Paged and Flow modes; lines-per-page shrink proportionally.
+- **Web-UI reader controls**: New context-aware "Reader" card that appears while a book is open. In Paged mode it shows Previous/Next page buttons (disabled at the book's start/end). In Flow mode it shows a Start/Pause toggle plus Previous/Next chapter buttons. Works in both real-device and simulator modes.
+
+### Changed
+- **Paginator**: `maxLines` per page is now derived from pixel math (`usableHeight / LINE_HEIGHT_PX`) instead of the hard-coded 9/10 split. Default output is unchanged — `floor((288 - 30)/28) = 9` with a bottom bar and `floor(288/28) = 10` without — verified by regression tests. At cropped sizes the visual "top crop" is rendered via leading blank lines prepended to each page; the text container itself always fills the full available height so every swipe lands on the capturing container (the SDK drops swipes that fall outside any `isEventCapture=1` container — that caused the single-swipe-is-ignored bug at 50/60 %).
+- **EvenEpubClient**: Added public state getters (`getView`, `isFlowActive`, `can*`) and public action wrappers (`pagedNext`, `pagedPrev`, `toggleFlowPlayback`, `flow{Prev,Next}Chapter`) for web-UI consumption. Added `onFlowStateChanged` callback.
+
+### Removed
+- **Dead code**: Unused `TEXT_HEIGHT`/`BAR_HEIGHT` constants in `even-client.ts`; stale "Updated to 60" comment in `constants.ts`.
+
+## [v1.1.1] - 2026-04-16
+
+### Fixed
+- **WebView Cache**: Added `Cache-Control: no-cache, no-store, must-revalidate` / `Pragma` / `Expires` meta tags to `index.html` so Android WebViews always refetch the HTML. Fingerprinted JS chunks already invalidate automatically — this ensures the HTML pointing at them does too.
+
+### Changed
+- **Dependencies**: Bumped `@evenrealities/even_hub_sdk` 0.0.9 → 0.0.10, `even-toolkit` 1.6.5 → 1.7.0, `@evenrealities/evenhub-cli` 0.1.11 → 0.1.12, `@evenrealities/evenhub-simulator` 0.7.1 → 0.7.2.
+- **app.json**: Bumped `min_sdk_version` to `0.0.10` to match the installed SDK.
+
 ## [v0.9.0] - 2026-03-01
 
 ### Added

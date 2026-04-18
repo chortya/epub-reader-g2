@@ -23,6 +23,7 @@ import {
   STORAGE_KEY_BOOK_TITLE,
   STORAGE_KEY_FLOW_POSITION,
   STORAGE_KEY_POSITION,
+  getTextLayout,
 } from './constants';
 import { clamp, setStatus, truncateForList, appendEventLog } from './utils';
 import { createSplashBridgeAdapter } from './splash-bridge';
@@ -31,9 +32,6 @@ type Bridge = Awaited<ReturnType<typeof waitForEvenAppBridge>>;
 
 const ITEMS_PER_PAGE = 4;
 const ROW_HEIGHT = Math.floor(DISPLAY_HEIGHT / ITEMS_PER_PAGE); // 72px
-
-const BAR_HEIGHT = 30;
-const TEXT_HEIGHT = DISPLAY_HEIGHT - BAR_HEIGHT; // Fill the full display height
 
 type FlowPageData = {
   tokens: string[];
@@ -63,6 +61,7 @@ export class EvenEpubClient {
 
   public onViewChanged?: () => void;
   public onPositionChanged?: (chapterIndex: number, pageIndex: number) => void;
+  public onFlowStateChanged?: (isRunning: boolean) => void;
 
   constructor(private bridge: Bridge) { }
 
@@ -436,23 +435,25 @@ export class EvenEpubClient {
     const bar = '━'.repeat(filled) + '─'.repeat(targetBarLen - filled);
     const label = `${infoText}[${bar}]`;
 
-    const barHeight = hasBottomBar ? 30 : 0;
+    const layout = getTextLayout();
     const rightBarWidth = hasRightBar ? 26 : 0;
-    const textHeight = DISPLAY_HEIGHT - barHeight;
     const textWidth = DISPLAY_WIDTH - rightBarWidth;
+    // Pad the page with leading blank lines so content sits at the bottom of
+    // the full-size container (no need to shrink the container and lose swipe
+    // capture over the blank top half).
+    const paddedPage = '\n'.repeat(layout.topBlankLines) + page;
 
-    // Text container: top area for page content
     const textContainer = new TextContainerProperty({
       xPosition: 0,
-      yPosition: 0,
+      yPosition: layout.yPosition,
       width: textWidth,
-      height: textHeight,
+      height: layout.usableHeight,
       borderWidth: 0,
       borderColor: 5,
       paddingLength: 6,
       containerID: 1,
       containerName: 'text',
-      content: page,
+      content: paddedPage,
       isEventCapture: 1,
     });
 
@@ -462,9 +463,9 @@ export class EvenEpubClient {
       // Footer container: thin bottom strip for progress
       const footerContainer = new TextContainerProperty({
         xPosition: 0,
-        yPosition: textHeight,
+        yPosition: layout.availableHeight,
         width: DISPLAY_WIDTH,
-        height: barHeight,
+        height: layout.barHeight,
         borderWidth: 0,
         borderColor: 5,
         paddingLength: 0,
@@ -563,22 +564,22 @@ export class EvenEpubClient {
     const bar = '━'.repeat(filled) + '─'.repeat(targetBarLen - filled);
     const label = `${infoText}[${bar}]`;
 
-    const barHeight = hasBottomBar ? BAR_HEIGHT : 0;
+    const layout = getTextLayout();
     const rightBarWidth = hasRightBar ? 26 : 0;
-    const textHeight = DISPLAY_HEIGHT - barHeight;
     const textWidth = DISPLAY_WIDTH - rightBarWidth;
+    const paddedContent = '\n'.repeat(layout.topBlankLines) + (content || '...');
 
     const textContainer = new TextContainerProperty({
       xPosition: 0,
-      yPosition: 0,
+      yPosition: layout.yPosition,
       width: textWidth,
-      height: textHeight,
+      height: layout.usableHeight,
       borderWidth: 0,
       borderColor: 5,
       paddingLength: 6,
       containerID: 1,
       containerName: 'flow-text',
-      content: content || '...',
+      content: paddedContent,
       isEventCapture: 1,
     });
 
@@ -587,9 +588,9 @@ export class EvenEpubClient {
       textObjects.push(
         new TextContainerProperty({
           xPosition: 0,
-          yPosition: textHeight,
+          yPosition: layout.availableHeight,
           width: DISPLAY_WIDTH,
-          height: barHeight,
+          height: layout.barHeight,
           borderWidth: 0,
           borderColor: 5,
           paddingLength: 0,
@@ -626,7 +627,7 @@ export class EvenEpubClient {
         new TextContainerUpgrade({
           containerID: 1,
           containerName: 'flow-text',
-          content: content || '...',
+          content: paddedContent,
         }),
       );
       // Update status bar if present
@@ -782,6 +783,7 @@ export class EvenEpubClient {
     if (this.isFlowRunning) return;
     this.isFlowRunning = true;
     appendEventLog('Flow started');
+    this.onFlowStateChanged?.(true);
     this.scheduleFlowTick();
     this.showFlowFrame().catch((e) => console.warn('Failed to render flow frame:', e));
   }
@@ -791,7 +793,9 @@ export class EvenEpubClient {
       window.clearTimeout(this.flowTimerId);
       this.flowTimerId = null;
     }
+    const wasRunning = this.isFlowRunning;
     this.isFlowRunning = false;
+    if (wasRunning) this.onFlowStateChanged?.(false);
   }
 
   private toggleFlow(): void {
@@ -1017,6 +1021,61 @@ export class EvenEpubClient {
   /** Set the book ID for blob position sync */
   public setCurrentBookId(id: string): void {
     this.currentBookId = id;
+  }
+
+  // --- Public reader controls (used by web-UI buttons) ---
+
+  public getView(): ViewState {
+    return this.view;
+  }
+
+  public isFlowActive(): boolean {
+    return this.isFlowRunning;
+  }
+
+  public canPagedPrev(): boolean {
+    return !!this.book && (this.pageIndex > 0 || this.chapterIndex > 0);
+  }
+
+  public canPagedNext(): boolean {
+    if (!this.book) return false;
+    const pages = this.chapterPages[this.chapterIndex];
+    if (!pages) return false;
+    return this.pageIndex < pages.length - 1
+      || this.chapterIndex < this.book.chapters.length - 1;
+  }
+
+  public canFlowPrevChapter(): boolean {
+    return !!this.book && this.chapterIndex > 0;
+  }
+
+  public canFlowNextChapter(): boolean {
+    return !!this.book && this.chapterIndex < this.book.chapters.length - 1;
+  }
+
+  public async pagedNext(): Promise<void> {
+    if (this.view !== 'reading') return;
+    await this.nextPage();
+  }
+
+  public async pagedPrev(): Promise<void> {
+    if (this.view !== 'reading') return;
+    await this.prevPage();
+  }
+
+  public toggleFlowPlayback(): void {
+    if (this.view !== 'flowReading') return;
+    this.toggleFlow();
+  }
+
+  public async flowNextChapter(): Promise<void> {
+    if (this.view !== 'flowReading') return;
+    await this.nextChapterInFlow();
+  }
+
+  public async flowPrevChapter(): Promise<void> {
+    if (this.view !== 'flowReading') return;
+    await this.prevChapterInFlow();
   }
 
   private async handleShutdown(): Promise<void> {

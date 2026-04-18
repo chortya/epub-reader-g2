@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Even G2 ePub Reader (v1.1.0) — a web app for reading EPUB books on Even Realities G2 smart glasses. Built with TypeScript, Vite, Even Hub SDK (v0.0.9), and even-toolkit. Renders paginated text to a 576x288px monochrome display.
+Even G2 ePub Reader (v1.2.0) — a web app for reading EPUB books on Even Realities G2 smart glasses. Built with TypeScript, Vite, Even Hub SDK (v0.0.10), and even-toolkit. Renders paginated text to a 576x288px monochrome display.
 
 ## Commands
 
@@ -12,12 +12,13 @@ Even G2 ePub Reader (v1.1.0) — a web app for reading EPUB books on Even Realit
 npm run dev          # Start dev server + show QR code for device pairing
 npm run dev:sim      # Start dev server + open browser simulator
 npm run build        # Production build (also used as validation — must pass)
+npm run test         # Run regression tests via Node's native test runner
 npm run preview      # Preview production build locally
 npm run pack         # Build + package as .ehpk for Even Hub distribution
 npm run pack:check   # Validate package structure against app.json schema
 ```
 
-No formal test framework. Ad-hoc integration tests exist as root-level `.mjs` scripts (e.g., `test-gutenberg.mjs`, `test-proxy.mjs`). Run with `node <script>.mjs`. Validate changes with `npm run build`.
+Tests live in `tests/*.test.ts` and run via Node's native `--test` with `--experimental-strip-types` (no Jest/Vitest). Run a single test file with `node --experimental-strip-types --test tests/app-json.test.ts`. Additional ad-hoc integration scripts exist at the root (`test-gutenberg.mjs`, `test-proxy.mjs`, `test-scraper.mjs`, `proxy-test.mjs`) — run with `node <script>.mjs`. Validate changes with `npm run build` and `npm run test`.
 
 ## Architecture
 
@@ -38,7 +39,7 @@ index.html → main.ts (bootstrap, UI wiring, file upload, settings panel, keep-
                └── types.ts — shared type definitions (Chapter, Book, ViewState, etc.)
 ```
 
-**Two reading modes:** Paged (page-by-page, swipe navigation) and Flow (word-by-word streaming, configurable 120-600 WPM).
+**Two reading modes:** Paged (page-by-page, swipe navigation) and Flow (word-by-word streaming, configurable 120-600 WPM). A "Text height" setting (50–100 % in 10 % steps) crops the reading area from the top, leaving the upper portion of the G2 display blank; lines-per-page shrinks proportionally. Implementation: the text container always fills the full available height (keeps `isEventCapture=1` coverage so no swipe is lost), and the crop is rendered by prepending `topBlankLines` leading blank lines to each page — see `getTextLayout()` in `constants.ts`.
 
 **Text pipeline:** Raw HTML → plain text extraction (epub-parser) → cleanForG2() per line → language detection → word-wrap with hyphenation → page splitting (paginator) → display rendering.
 
@@ -54,12 +55,12 @@ index.html → main.ts (bootstrap, UI wiring, file upload, settings panel, keep-
 
 **Position persistence:** Saved on every page turn to two layers: bridge localStorage (device) and browser localStorage (WebView fallback). Restored by trying bookId key first, then title key, across both layers.
 
-**Web UI:** Even Realities light theme (CSS custom properties). No React — vanilla HTML/CSS/JS. Collapsible settings/Gutenberg sections. Toggle switch for hyphenation. Version shown in header.
+**Web UI:** Even Realities light theme (CSS custom properties). No React — vanilla HTML/CSS/JS. Collapsible settings/Gutenberg sections. Toggle switch for hyphenation. A context-aware "Reader" card appears while a book is open and exposes Prev/Next (paged) or Start/Pause + chapter jumps (flow). Version shown in header.
 
 ## Key Dependencies
 
-- `@evenrealities/even_hub_sdk` (0.0.9) — G2 glasses SDK bridge
-- `even-toolkit` (1.6.x) — glasses gesture/event/text/splash modules + CSS design tokens (no React)
+- `@evenrealities/even_hub_sdk` (0.0.10) — G2 glasses SDK bridge
+- `even-toolkit` (1.7.x) — glasses gesture/event/text/splash modules + CSS design tokens (no React)
 - `jszip` — EPUB ZIP parsing
 - `hypher` + `hyphenation.*` — language-aware word hyphenation (en, de, es, fr, nl, pl, pt, ru, uk)
 - `upng-js` — PNG encoding for splash screen tiles

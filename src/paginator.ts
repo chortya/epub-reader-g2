@@ -1,4 +1,4 @@
-import { config } from './constants';
+import { config, getTextLayout } from './constants.ts';
 import type Hypher from 'hypher';
 
 let hyphenator: Hypher | null = null;
@@ -17,13 +17,14 @@ export function setWideGlyphs(wide: boolean): void {
 /**
  * Split chapter text into fixed-size pages.
  * Word-wraps at character count + end-of-line hyphenation.
+ * When `maxLines` is omitted it's derived from the current text-height crop.
  */
 export function paginateText(
   text: string,
   maxChars = wideGlyphs
     ? (config.statusBarPosition === 'right' ? 45 : 48)
     : (config.statusBarPosition === 'right' ? 58 : 59),
-  maxLines = config.statusBarPosition === 'bottom' ? 9 : 10,
+  maxLines = getTextLayout().maxLines,
 ): string[] {
   if (!text || text.trim().length === 0) return ['(empty)'];
 

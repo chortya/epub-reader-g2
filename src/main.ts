@@ -5,7 +5,16 @@ import { parseEpub } from './epub-parser';
 import { EvenEpubClient } from './even-client';
 import { fetchTopGutenbergBooks, downloadGutenbergEpub } from './gutenberg';
 import { getRecentBooksFromDB, saveEpubBufferToDB, deleteFromDB, type StoredBook } from './db';
-import { config, FLOW_MAX_WPM, FLOW_MIN_WPM, saveSettings, STORAGE_KEY_BOOK_TITLE } from './constants';
+import {
+  config,
+  FLOW_MAX_WPM,
+  FLOW_MIN_WPM,
+  saveSettings,
+  STORAGE_KEY_BOOK_TITLE,
+  TEXT_HEIGHT_MAX_PERCENT,
+  TEXT_HEIGHT_MIN_PERCENT,
+  TEXT_HEIGHT_STEP_PERCENT,
+} from './constants';
 import type { CachedBookMeta } from './types';
 import { makeBookId } from './book-id';
 
@@ -110,10 +119,14 @@ async function main() {
 
     // Load library
     await renderLibrary(client, bridge as any);
-    client.onViewChanged = () => renderLibrary(client as EvenEpubClient, bridge as any);
+    client.onViewChanged = () => {
+      renderLibrary(client as EvenEpubClient, bridge as any);
+      renderReaderControls(client as EvenEpubClient);
+    };
 
     // Update position display in library on every page turn
     client.onPositionChanged = (ch, pg) => {
+      renderReaderControls(client as EvenEpubClient);
       const items = document.querySelectorAll('#library-container .lib-item');
       const bookTitle = client?.['book']?.title;
       if (!bookTitle) return;
@@ -132,6 +145,11 @@ async function main() {
         }
       }
     };
+
+    client.onFlowStateChanged = () => renderReaderControls(client as EvenEpubClient);
+
+    setupReaderControls(client);
+    renderReaderControls(client);
   } else {
     setStatus('Error: Could not initialize bridge.');
   }
@@ -141,6 +159,8 @@ async function main() {
   const statusBarConfig = document.getElementById('setting-statusbar') as HTMLSelectElement | null;
   const readingModeConfig = document.getElementById('setting-reading-mode') as HTMLSelectElement | null;
   const flowSpeedConfig = document.getElementById('setting-flow-speed') as HTMLInputElement | null;
+  const textHeightConfig = document.getElementById('setting-text-height') as HTMLInputElement | null;
+  const textHeightValueEl = document.getElementById('setting-text-height-value');
   const saveBtn = document.getElementById('save-settings-btn') as HTMLButtonElement | null;
 
   const hyphenToggle = document.getElementById('setting-hyphenation-toggle');
@@ -156,12 +176,20 @@ async function main() {
     });
   }
 
-  if (hyphenConfig && statusBarConfig && readingModeConfig && flowSpeedConfig && saveBtn) {
+  if (hyphenConfig && statusBarConfig && readingModeConfig && flowSpeedConfig && textHeightConfig && saveBtn) {
     statusBarConfig.value = config.statusBarPosition;
     readingModeConfig.value = config.readingMode;
     flowSpeedConfig.value = String(config.flowSpeedWpm);
     flowSpeedConfig.min = String(FLOW_MIN_WPM);
     flowSpeedConfig.max = String(FLOW_MAX_WPM);
+    textHeightConfig.min = String(TEXT_HEIGHT_MIN_PERCENT);
+    textHeightConfig.max = String(TEXT_HEIGHT_MAX_PERCENT);
+    textHeightConfig.step = String(TEXT_HEIGHT_STEP_PERCENT);
+    textHeightConfig.value = String(config.textHeightPercent);
+    if (textHeightValueEl) textHeightValueEl.textContent = `${config.textHeightPercent}%`;
+    textHeightConfig.addEventListener('input', () => {
+      if (textHeightValueEl) textHeightValueEl.textContent = `${textHeightConfig.value}%`;
+    });
 
     saveBtn.addEventListener('click', async () => {
       config.hyphenation = hyphenConfig.checked;
@@ -172,6 +200,13 @@ async function main() {
         ? Math.max(FLOW_MIN_WPM, Math.min(FLOW_MAX_WPM, parsedSpeed))
         : config.flowSpeedWpm;
       flowSpeedConfig.value = String(config.flowSpeedWpm);
+
+      const parsedHeight = Number.parseInt(textHeightConfig.value, 10);
+      config.textHeightPercent = Number.isFinite(parsedHeight)
+        ? Math.max(TEXT_HEIGHT_MIN_PERCENT, Math.min(TEXT_HEIGHT_MAX_PERCENT, parsedHeight))
+        : config.textHeightPercent;
+      textHeightConfig.value = String(config.textHeightPercent);
+      if (textHeightValueEl) textHeightValueEl.textContent = `${config.textHeightPercent}%`;
 
       saveSettings();
       if (client) {
@@ -357,6 +392,49 @@ async function main() {
       header.classList.toggle('open');
       body.classList.toggle('open');
     });
+  }
+
+  function setupReaderControls(c: EvenEpubClient) {
+    const prevPageBtn = document.getElementById('rc-prev-page') as HTMLButtonElement | null;
+    const nextPageBtn = document.getElementById('rc-next-page') as HTMLButtonElement | null;
+    const toggleFlowBtn = document.getElementById('rc-toggle-flow') as HTMLButtonElement | null;
+    const prevChapterBtn = document.getElementById('rc-prev-chapter') as HTMLButtonElement | null;
+    const nextChapterBtn = document.getElementById('rc-next-chapter') as HTMLButtonElement | null;
+
+    prevPageBtn?.addEventListener('click', () => { c.pagedPrev().catch((e) => console.warn(e)); });
+    nextPageBtn?.addEventListener('click', () => { c.pagedNext().catch((e) => console.warn(e)); });
+    toggleFlowBtn?.addEventListener('click', () => { c.toggleFlowPlayback(); });
+    prevChapterBtn?.addEventListener('click', () => { c.flowPrevChapter().catch((e) => console.warn(e)); });
+    nextChapterBtn?.addEventListener('click', () => { c.flowNextChapter().catch((e) => console.warn(e)); });
+  }
+
+  function renderReaderControls(c: EvenEpubClient) {
+    const card = document.getElementById('reader-controls');
+    if (!card) return;
+    const view = c.getView();
+    const meta = document.getElementById('reader-meta');
+
+    if (view === 'reading') {
+      card.classList.add('open', 'paged');
+      card.classList.remove('flow');
+      const prev = document.getElementById('rc-prev-page') as HTMLButtonElement | null;
+      const next = document.getElementById('rc-next-page') as HTMLButtonElement | null;
+      if (prev) prev.disabled = !c.canPagedPrev();
+      if (next) next.disabled = !c.canPagedNext();
+      if (meta) meta.textContent = 'Paged mode';
+    } else if (view === 'flowReading') {
+      card.classList.add('open', 'flow');
+      card.classList.remove('paged');
+      const toggle = document.getElementById('rc-toggle-flow') as HTMLButtonElement | null;
+      const prev = document.getElementById('rc-prev-chapter') as HTMLButtonElement | null;
+      const next = document.getElementById('rc-next-chapter') as HTMLButtonElement | null;
+      if (toggle) toggle.innerHTML = c.isFlowActive() ? '&#10074;&#10074; Pause' : '&#9654; Start';
+      if (prev) prev.disabled = !c.canFlowPrevChapter();
+      if (next) next.disabled = !c.canFlowNextChapter();
+      if (meta) meta.textContent = c.isFlowActive() ? 'Flow running' : 'Flow paused';
+    } else {
+      card.classList.remove('open', 'paged', 'flow');
+    }
   }
 }
 
