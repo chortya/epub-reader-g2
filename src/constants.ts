@@ -22,50 +22,93 @@ export const TEXT_HEIGHT_STEP_PERCENT = 10;
 
 export const SETTINGS_KEY = 'epub-reader-settings';
 
-export const config = {
+export const SWIPE_COOLDOWN_MS = 300;
+export const FLOW_MIN_WPM = 120;
+export const FLOW_MAX_WPM = 600;
+
+export type AppConfig = {
+    hyphenation: boolean;
+    statusBarPosition: 'bottom' | 'right' | 'none';
+    readingMode: 'paged' | 'flow';
+    flowSpeedWpm: number;
+    textHeightPercent: number;
+};
+
+export const config: AppConfig = {
     hyphenation: true,
-    statusBarPosition: 'bottom' as 'bottom' | 'right' | 'none',
-    readingMode: 'paged' as 'paged' | 'flow',
+    statusBarPosition: 'bottom',
+    readingMode: 'paged',
     flowSpeedWpm: 240,
     textHeightPercent: TEXT_HEIGHT_MAX_PERCENT,
 };
 
-try {
-    const saved = localStorage.getItem(SETTINGS_KEY);
-    if (saved) {
-        const parsed = JSON.parse(saved);
-        if (parsed.hyphenation !== undefined) config.hyphenation = parsed.hyphenation;
-
-        if (parsed.statusBarPosition !== undefined) {
-            config.statusBarPosition = parsed.statusBarPosition;
-        } else if (parsed.showStatusBar !== undefined) {
-            config.statusBarPosition = parsed.showStatusBar ? 'bottom' : 'none';
-        }
-
-        if (parsed.readingMode === 'paged' || parsed.readingMode === 'flow') {
-            config.readingMode = parsed.readingMode;
-        }
-        if (typeof parsed.flowSpeedWpm === 'number' && Number.isFinite(parsed.flowSpeedWpm)) {
-            config.flowSpeedWpm = Math.max(120, Math.min(600, Math.floor(parsed.flowSpeedWpm)));
-        }
-        if (typeof parsed.textHeightPercent === 'number' && Number.isFinite(parsed.textHeightPercent)) {
-            config.textHeightPercent = Math.max(
-                TEXT_HEIGHT_MIN_PERCENT,
-                Math.min(TEXT_HEIGHT_MAX_PERCENT, Math.round(parsed.textHeightPercent)),
-            );
-        }
+/**
+ * Parse a serialized settings blob into a partial config override.
+ * Rejects invalid values field-by-field (returns nothing for that field)
+ * and clamps numeric ranges. Malformed JSON returns {}. This is the pure
+ * inverse of JSON.stringify(config) — tests should exercise this directly.
+ */
+export function loadSettings(raw: string | null): Partial<AppConfig> {
+    if (!raw) return {};
+    let parsed: any;
+    try {
+        parsed = JSON.parse(raw);
+    } catch {
+        return {};
     }
-} catch (e) {
-    // ignore
+    if (!parsed || typeof parsed !== 'object') return {};
+
+    const out: Partial<AppConfig> = {};
+
+    if (typeof parsed.hyphenation === 'boolean') {
+        out.hyphenation = parsed.hyphenation;
+    }
+
+    if (
+        parsed.statusBarPosition === 'bottom'
+        || parsed.statusBarPosition === 'right'
+        || parsed.statusBarPosition === 'none'
+    ) {
+        out.statusBarPosition = parsed.statusBarPosition;
+    } else if (typeof parsed.showStatusBar === 'boolean') {
+        // Legacy key from versions < v0.8.0
+        out.statusBarPosition = parsed.showStatusBar ? 'bottom' : 'none';
+    }
+
+    if (parsed.readingMode === 'paged' || parsed.readingMode === 'flow') {
+        out.readingMode = parsed.readingMode;
+    }
+
+    if (typeof parsed.flowSpeedWpm === 'number' && Number.isFinite(parsed.flowSpeedWpm)) {
+        out.flowSpeedWpm = Math.max(
+            FLOW_MIN_WPM,
+            Math.min(FLOW_MAX_WPM, Math.floor(parsed.flowSpeedWpm)),
+        );
+    }
+
+    if (typeof parsed.textHeightPercent === 'number' && Number.isFinite(parsed.textHeightPercent)) {
+        out.textHeightPercent = Math.max(
+            TEXT_HEIGHT_MIN_PERCENT,
+            Math.min(TEXT_HEIGHT_MAX_PERCENT, Math.round(parsed.textHeightPercent)),
+        );
+    }
+
+    return out;
+}
+
+try {
+    Object.assign(config, loadSettings(localStorage.getItem(SETTINGS_KEY)));
+} catch {
+    // localStorage unavailable — fall back to defaults
 }
 
 export function saveSettings() {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(config));
+    try {
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(config));
+    } catch {
+        // localStorage unavailable — silently skip
+    }
 }
-
-export const SWIPE_COOLDOWN_MS = 300;
-export const FLOW_MIN_WPM = 120;
-export const FLOW_MAX_WPM = 600;
 
 export const STORAGE_KEY_POSITION = 'epub-reading-position';
 export const STORAGE_KEY_FLOW_POSITION = 'epub-flow-position';

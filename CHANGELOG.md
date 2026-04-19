@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.3.0] - 2026-04-19
+
+### Changed
+- **Settings persistence**: Extracted the localStorage parse/validate logic from an inline IIFE into a pure `loadSettings(raw): Partial<AppConfig>` function in `constants.ts`. Behavior is unchanged for valid data; the refactor makes the logic testable without a DOM. Tightened validation: `hyphenation` and legacy `showStatusBar` now require `typeof === 'boolean'` (previously accepted any truthy/falsy value); non-object JSON roots (`"42"`, `null`, arrays) are rejected up front. `saveSettings()` now swallows `localStorage.setItem` errors so a storage-quota/private-mode error no longer throws out of the settings-apply handler.
+
+### Added
+- **Persistence tests**: New `tests/settings-persistence.test.ts` with 25 tests covering null/empty/malformed/non-object JSON inputs; range clamping for `textHeightPercent` and `flowSpeedWpm`; enum validation for `statusBarPosition` and `readingMode`; legacy `showStatusBar` migration in both directions; boolean-only validation for `hyphenation`; fractional rounding; round-trip verification against `JSON.stringify(config)`; partial/unknown-field handling.
+
 ## [v1.2.0] - 2026-04-18
 
 ### Added
