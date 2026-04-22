@@ -2,19 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
-## [v1.4.0] - (unreleased)
+## [v1.4.0] - 2026-04-22
 
 ### Added
-- _(filled in as stages land)_
+- **Main Menu on glasses.** After splash, the reader now shows a 3-slot main menu: `Continue reading`, `Library (N)`, `Settings`. Swipe to move, tap to enter, double-tap to exit the app. Slot 0 reads `(No recent book)` when no last-opened book is resolvable. See `docs/1.4.0-on-device-settings-and-menu.md`.
+- **On-device Settings.** All five settings previously only editable from the web UI (hyphenation, status-bar position, reading mode, flow speed, text height) can now be edited directly from the glasses via a unified list-of-values editor. Tap a setting to enter its value picker; tap a value to commit; double-tap to cancel. Commits write to both browser `localStorage` and `bridge.setLocalStorage`; the bridge write is non-blocking so the UI updates immediately.
+- **Clock in horizontal status bar.** Footer now reads `HH:MM  Ch C/T Pg P/N [━━━───]`. Updated via a 10 s `textContainerUpgrade` ticker with a string-compare gate so only actual minute rollovers trigger a redraw. Flicker-free. Automatically hides when `statusBarPosition='none'`.
+- **Continue Reading resolves by bookId.** Three new bridge keys (`epub-last-book-id`, `epub-last-book-filename`, plus the existing `epub-book-title`) are written together on every position save. Continue Reading matches by `bookId` first, then by `(filename, title)` → `makeBookId()` derived id. Duplicate titles no longer silently resume the wrong book (fixes a latent bug from v1.3.x auto-resume).
+- **Launch-intent-aware startup.** `main.ts` now registers `onLaunchSource` before `client.init()` so `runStartup` can consult the launch source after splash. `glassesMenu` with a resolvable last book bypasses the main menu and resumes directly (reading / flowReading per `readingMode`). `appMenu` and all other cases show the main menu.
 
 ### Changed
-- _(filled in as stages land)_
+- **Double-tap routing.** Back from `bookPicker` or the chapter list now returns to `mainMenu` (was: exit-app). Exit-app moves one level deeper — double-tap from `mainMenu` closes the app. This is one extra double-tap than v1.3.x to exit from a reading session, but the main menu becomes the natural home.
+- **Settings editor value-set for flow speed:** 17 uniform 30-WPM steps from 120 to 600. Previous web UI used a free-form slider; on-device and web both now present the same stepped list.
 
 ### Removed
-- _(filled in as stages land)_
+- **Vertical ("right") status bar.** The option was visually cramped (26 px × 288 px sidebar), broke the `maxChars`-from-layout abstraction (every renderer subtracted 26 px inline), and had no good fit for the new clock. Dropped from `AppConfig.statusBarPosition`, from the web UI, and from all rendering paths.
 
 ### Migration
-- _(filled in as stages land)_
+- Users with `statusBarPosition: 'right'` saved from v1.3.x are silently migrated to `'bottom'` on first read (precedent: the v0.8.0 `showStatusBar → statusBarPosition` migration). No action needed.
+- **v1.3.x users who upgrade without opening a book will see `(No recent book)` on the main menu until they open a book at least once under v1.4.0.** This is intentional: the new Continue Reading path requires the bookId/filename keys that v1.3.x didn't write. Title-only resumption was removed to eliminate the duplicate-title footgun.
 
 ## [v1.3.1] - 2026-04-22
 

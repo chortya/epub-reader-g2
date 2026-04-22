@@ -36,8 +36,9 @@ index.html → main.ts (bootstrap, UI wiring, file upload, settings panel, keep-
                ├── mock-bridge.ts — browser simulator fallback (renders to canvas)
                ├── constants.ts — display specs, config management, storage keys
                ├── utils.ts — shared helpers (status display, timeout wrapper, clamp, truncation)
-               ├── book-id.ts — deterministic bookId from filename+title (hash+slug)
+               ├── book-id.ts — deterministic bookId from filename+title (hash+slug); resolveLastBook() for Continue Reading
                ├── chapter-title.ts — picks/normalizes chapter titles (spine > heading > document)
+               ├── launch.ts — pickInitialView() pure post-splash view decision (glassesMenu vs mainMenu)
                └── types.ts — shared type definitions (Chapter, Book, ViewState, etc.)
 ```
 
@@ -47,15 +48,15 @@ index.html → main.ts (bootstrap, UI wiring, file upload, settings panel, keep-
 
 **even-toolkit integration:** Uses glasses-side modules only (no React). Event mapping via `action-map`, gesture debouncing via `gestures`, text safety via `text-clean`, WebView keep-alive via `keep-alive`. Does NOT use `EvenHubBridge` from toolkit — the app uses the raw SDK bridge directly for custom container layouts (status bars, chapter grid).
 
-**Persistence:** Reading positions saved to bridge localStorage per book title + browser localStorage as fallback. Config (hyphenation, status bar, reading mode, flow speed) in browser localStorage. Book files cached locally only — IndexedDB primary, base64 in bridge localStorage as fallback (max 3 books). No cloud storage.
+**Persistence:** Reading positions saved to bridge localStorage per book title + browser localStorage as fallback. Config (hyphenation, status bar, reading mode, flow speed, text height) written to BOTH bridge localStorage (via `saveSettingsToBridge`, persists across device app restarts) AND browser localStorage (fast warm-start on simulator). Book files cached locally only — IndexedDB primary, base64 in bridge localStorage as fallback (max 3 books). "Continue Reading" on the mainMenu resolves from three bridge keys written together on every save: `epub-book-title`, `epub-last-book-id`, `epub-last-book-filename`. No cloud storage.
 
 **Entry points:** `index.html` is the main reader app. `gutenberg.html` is a standalone page for browsing/downloading Project Gutenberg books.
 
-**Glasses-side views:** bookPicker → library (chapter list) → reading/flowReading. Splash screen on startup via even-toolkit `createSplash`. Book picker shows cached books from bridge localStorage; tap to load, double-tap to exit app.
+**Glasses-side views:** `mainMenu` (Continue / Library (N) / Settings) → `bookPicker` → `library` (chapter list) → `reading` / `flowReading`. Also `settings` (5-item list) and `settingEditor` (per-setting value picker) reachable from `mainMenu`. Splash screen on startup via even-toolkit `createSplash`; after splash, `pickInitialView` (in `src/launch.ts`) decides between direct-resume (when launched from `glassesMenu` with a resolvable last book) and `mainMenu`.
 
-**Gesture mapping:** Swipe up/down = prev/next page or browse books/chapters. Tap = select book/chapter or start/pause flow. Double-tap = back (reading→chapters→picker→exit).
+**Gesture mapping:** Swipe up/down = prev/next page or browse list items. Tap = select book/chapter/setting value or start/pause flow. Double-tap = back one level (reading→chapters→mainMenu→exit-app). Only 4 SDK gestures exist (`CLICK`, `DOUBLE_CLICK`, `SCROLL_TOP`, `SCROLL_BOTTOM`); no long-press / triple-tap / temple-swipe available — see `docs/1.4.0-on-device-settings-and-menu.md` §2.2.
 
-**Position persistence:** Saved on every page turn to two layers: bridge localStorage (device) and browser localStorage (WebView fallback). Restored by trying bookId key first, then title key, across both layers.
+**Position persistence:** Saved on every page turn to two layers: bridge localStorage (device) and browser localStorage (WebView fallback). Restored by trying bookId key first, then title key, across both layers. Since v1.4.0, every save also writes `STORAGE_KEY_LAST_BOOK_ID` and `STORAGE_KEY_LAST_BOOK_FILENAME` so the mainMenu's Continue Reading resolver can match by bookId — never by title alone.
 
 **Web UI:** Even Realities light theme (CSS custom properties). No React — vanilla HTML/CSS/JS. Collapsible settings/Gutenberg sections. Toggle switch for hyphenation. A context-aware "Reader" card appears while a book is open and exposes Prev/Next (paged) or Start/Pause + chapter jumps (flow). Version shown in header.
 

@@ -57,9 +57,12 @@ mock-bridge.ts       Browser-simulator bridge: intercepts SDK methods and render
                      a DOM canvas; provides Prev/Next/Tap/DblTap buttons.
 splash-bridge.ts     Adapter exposing an even-toolkit SplashBridge interface on top of the raw SDK.
 gutenberg.ts         Fetches the Gutenberg Top 100 and downloads individual EPUBs via a CORS proxy.
-book-id.ts           Deterministic slug-safe ID derived from filename + title hash.
+book-id.ts           Deterministic slug-safe ID from filename + title hash; resolveLastBook()
+                     for the mainMenu's Continue Reading resolver (bookId → filename+title).
 chapter-title.ts     Picks the best-looking chapter title from spine / heading / document-title
                      candidates (generic "Chapter N" labels deprioritized).
+launch.ts            pickInitialView(intent, lastBook, readingMode) — pure post-splash view
+                     decision. glassesMenu + resolvable → reading/flowReading; else mainMenu.
 logo.ts              Embedded logo byte data used on the upload page.
 ```
 
@@ -128,7 +131,8 @@ From `src/types.ts`:
 ```ts
 type Chapter         = { title: string; text: string };
 type Book            = { title: string; chapters: Chapter[] };
-type ViewState       = 'bookPicker' | 'library' | 'reading' | 'flowReading';
+type ViewState       = 'mainMenu' | 'bookPicker' | 'library' | 'reading' | 'flowReading'
+                     | 'settings' | 'settingEditor';
 type ReadingPosition = { chapterIndex: number; pageIndex: number; wordIndex?: number };
 type CachedBookMeta  = { bookId: string; title: string; filename: string; uploadedAt: number };
 ```
@@ -139,32 +143,59 @@ the original HTML — styling, images, and markup are discarded by design
 
 ## 6. View state machine
 
+As of v1.4.0 the top-level IA is the `mainMenu` (Continue / Library (N) /
+Settings). `pickInitialView(intent, lastBook, readingMode)` in `src/launch.ts`
+decides the post-splash view. `glassesMenu` launches with a resolvable last
+book bypass `mainMenu` and go straight to `reading` / `flowReading`.
+
 ```
-                       +------------+
-             startup   |            |   book picked
-   (connect) -------->  bookPicker   -----------+
-             (cached)  |            |           |
-                       +-----+------+           |
-                             | dbl-tap          |
-                             v  (exit)          v
-                       +------------+     +-----------+
-                       |            |     |           |
-                       |  library   +---->|  reading  |   (config.readingMode=paged)
-                       |  (chapter  |  tap|           |
-                       |    list)   |<----+           |
-                       +-----+------+ dbl-tap (back)  |
-                             |                        +--+
-                             |                           |
-                             |                (config.readingMode=flow)
-                             v                           v
-                       +------------+              +---------------+
-                       |  welcome   |              |  flowReading  |
-                       +------------+              +---------------+
+                              +---------+
+                 startup ---->| splash  |
+                              +----+----+
+                                   |
+                     pickInitialView(intent, lastBook, readingMode)
+                                   |
+         +-------- 'reading'/'flowReading' (glassesMenu + resolvable) ------+
+         |                         |                                       |
+         |                         v                                       |
+         |                   +-----------+                                 |
+         |                   | mainMenu  |  (3 slots: Continue / Lib(N) /   |
+         |                   |           |   Settings. dbl-tap = exit-app)  |
+         |                   +-----------+                                 |
+         |              tap=0 |  tap=1 |  tap=2                             |
+         |                    |        |        |                          |
+         |                    v        v        v                          |
+         |           +------------+  +-------+  +----------+               |
+         |           | reading /  |  |booPicker| | settings |               |
+         |           | flowReading|  +-------+  +----------+               |
+         |           | (via       |      |          | tap                  |
+         |           |  Continue) |      | tap      v                      |
+         |           +-----+------+      v    +-----------+                |
+         |                 | dbl          +->| settingEditor|               |
+         |                 v               |  +-----------+                |
+         |          +------------+         |       | tap=save              |
+         |          | library    |         |       | dbl=cancel            |
+         |          | (chapter   |<--------+       v                       |
+         |          |   list)    |              back to settings           |
+         |          +------------+                                         |
+         |                 | dbl                                           |
+         |                 v                                               |
+         |            back to mainMenu <----------------------------------+|
+         +-----------------+-------------------------------------------+
+                           |
+                           v
+                        mainMenu
 ```
 
-Transitions are driven either by mapped gestures (see §7) or by internal
-navigation after book selection / end-of-chapter. `onViewChanged` fires on
-every transition; the web UI uses it to show/hide the Reader card.
+Gesture-level notes:
+- `bookPicker` and `library` (chapter list) both GO_BACK to `mainMenu`. Exit-app
+  lives on `mainMenu` GO_BACK only.
+- `settingEditor` GO_BACK cancels the in-flight pick and returns to `settings`.
+- `settings` GO_BACK returns to `mainMenu`.
+- `flowReading` GO_BACK is gated on `!isFlowRunning` (unchanged from v1.3.x).
+
+`onViewChanged` fires on every transition; the web UI uses it to show/hide the
+Reader card.
 
 ## 7. Gesture pipeline
 
@@ -223,8 +254,7 @@ string[]  (one entry per page)
 
 ### 8.1 Paginator
 
-- `maxChars` is 58–59 for Latin glyphs, 45–48 for wide Cyrillic glyphs,
-  with a ‑1 adjustment when the right-side status bar steals width.
+- `maxChars` is 59 for Latin glyphs, 48 for wide Cyrillic glyphs.
 - `maxLines` comes from `getTextLayout()` — see §9.
 - Hyphenation is language-aware and applies either at end-of-line (preferred
   break inside a word that doesn't fit) or across a single word longer than
@@ -304,7 +334,18 @@ Five independent storage lanes:
 | App settings      | bridge local storage | window.localStorage           | SETTINGS_KEY                  |
 | (AppConfig)       |                      |                               |                               |
 +-------------------+----------------------+-------------------------------+-------------------------------+
+| Last book meta    | bridge local storage | (none)                        | STORAGE_KEY_BOOK_TITLE        |
+| (for Continue     |                      |                               | STORAGE_KEY_LAST_BOOK_ID      |
+|  Reading)         |                      |                               | STORAGE_KEY_LAST_BOOK_FILENAME|
++-------------------+----------------------+-------------------------------+-------------------------------+
 ```
+
+The three "Last book meta" keys are written together on every position save
+(invariant I1 — enforced by `tests/l3-save-invariant.test.ts`). The mainMenu's
+Continue Reading resolver (`resolveLastBook()` in `book-id.ts`) matches them
+against `cachedBookList`: bookId first, then `makeBookId(filename, title)` as
+a tiebreaker. Title-only resume is intentionally rejected to avoid duplicate-
+title footguns (design decision Q6).
 
 - **Book files** use IndexedDB for fast local reads; `db.ts` also keeps a
   bridge-localStorage base64 fallback so recent books survive the device's
@@ -418,7 +459,7 @@ Tests are pure: they import `src/*.ts` directly (using explicit `.ts`
 extensions — Node's native TS mode requires them) and exercise side-effect
 free functions. There is no jsdom / Vitest / Jest.
 
-Current suites (v1.3.1 → 50 tests):
+Current suites (v1.4.0 → 87 tests):
 
 - `app-json.test.ts` — manifest / package version alignment, SDK version
   consistency, `supported_languages` matches hyphenation set, network
@@ -429,9 +470,22 @@ Current suites (v1.3.1 → 50 tests):
 - `review-regressions.test.ts` — `makeBookId` stability,
   `pruneBridgeBooks` set semantics, `pickChapterTitle` priority order.
 - `settings-persistence.test.ts` — `loadSettings` clamping, type
-  rejection, `showStatusBar` migration, `JSON.stringify(config)` round-trip,
-  and bridge-backed `loadSettingsFromBridge()` / `saveSettingsToBridge()`
-  behavior.
+  rejection, `showStatusBar` + `'right' → 'bottom'` migrations,
+  `JSON.stringify(config)` round-trip, and bridge-backed
+  `loadSettingsFromBridge()` / `saveSettingsToBridge()` behavior.
+- `format-status-line.test.ts` — clock + progress-bar assembly for the
+  horizontal status bar (zero-padding, bar-length clamping, maxChars=48
+  Cyrillic path).
+- `settings-editor.test.ts` — `formatSettingsRow` per-key labels,
+  `applyEditorValue` index-to-value mapping for all 5 settings,
+  `FLOW_SPEED_VALUES` / `TEXT_HEIGHT_VALUES` shape invariants.
+- `continue-reading.test.ts` — `resolveLastBook` drift matrix (bookId
+  hit, filename+title tiebreaker, title-only rejected, empty cases).
+- `launch-intent.test.ts` — `pickInitialView` decision function for
+  each combination of launch intent, resolvable last book, and reading
+  mode.
+- `l3-save-invariant.test.ts` — ensures every paged/flow save writes
+  all three L3 keys (title, bookId, filename) together.
 
 The app-json test enforces a number of release invariants, so simply
 forgetting to bump `app.json` version alongside `package.json` is caught
