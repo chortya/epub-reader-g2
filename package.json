@@ -1,6 +1,6 @@
 {
   "name": "epub-reader-g2",
-  "version": "1.4.1",
+  "version": "1.4.0",
   "private": true,
   "type": "module",
   "scripts": {

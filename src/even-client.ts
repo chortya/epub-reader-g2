@@ -769,34 +769,6 @@ export class EvenEpubClient {
     }
   }
 
-  // --- v1.4.1 quick mode switch (design §6.1 Option A) ---
-
-  /**
-   * Tap in paged reading → enter flow mode at the same chapter/page, auto-start.
-   * flowWordIndex resets to 0 because paged mode doesn't track word precision.
-   * The existing page the user was reading gets replayed from the top in flow,
-   * which is a reasonable default for "continue this page word-by-word".
-   */
-  private async switchToFlowFromPaged(): Promise<void> {
-    if (!this.book) return;
-    this.flowWordIndex = 0;
-    appendEventLog('Mode switch: paged → flow');
-    await this.showFlowReading(true);
-  }
-
-  /**
-   * Double-tap in paused flow → return to paged reading at the same chapter/
-   * page. The flow word offset inside the page is discarded (paged has no
-   * word precision). Never called while flow is running — the calling
-   * GO_BACK branch gates on !isFlowRunning (A1, decision Q1).
-   */
-  private async switchToPagedFromFlow(): Promise<void> {
-    if (!this.book) return;
-    this.stopFlow();
-    appendEventLog('Mode switch: flow → paged');
-    await this.showPage();
-  }
-
   private async showFlowFrame(): Promise<void> {
     if (!this.book || this.flowPageData.length === 0) return;
     this.view = 'flowReading';
@@ -1199,11 +1171,7 @@ export class EvenEpubClient {
         break;
 
       case 'SELECT_HIGHLIGHTED':
-        if (this.view === 'reading' && this.book) {
-          // v1.4.1: tap in paged reading quick-switches to flow mode at the
-          // current position, auto-starting. Design §6.1 Option A.
-          await this.switchToFlowFromPaged();
-        } else if (this.view === 'flowReading' && this.book) {
+        if (this.view === 'flowReading' && this.book) {
           this.toggleFlow();
         } else if (this.view === 'library' && this.book) {
           await this.selectCurrentChapter();
@@ -1232,12 +1200,8 @@ export class EvenEpubClient {
           await this.showChapterList();
         } else if (this.view === 'flowReading' && this.book) {
           if (!this.isFlowRunning) {
-            // v1.4.1: paused-flow double-tap now quick-switches to paged at
-            // the current position (was: chapter list). Getting to the
-            // chapter list now costs one extra double-tap (flow → paged →
-            // chapter list). Design §6.1 Option A + decision Q1 (A1):
-            // running flow is untouched; user must pause first.
-            await this.switchToPagedFromFlow();
+            this.librarySelectedIndex = this.chapterIndex;
+            await this.showChapterList();
           }
         } else if (this.view === 'library' && this.book) {
           // Back from chapter list now routes to mainMenu (was bookPicker/welcome).

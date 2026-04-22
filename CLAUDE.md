@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Even G2 ePub Reader (v1.4.1) — a web app for reading EPUB books on Even Realities G2 smart glasses. Built with TypeScript, Vite, Even Hub SDK (v0.0.10), and even-toolkit. Renders paginated text to a 576x288px monochrome display.
+Even G2 ePub Reader (v1.4.0) — a web app for reading EPUB books on Even Realities G2 smart glasses. Built with TypeScript, Vite, Even Hub SDK (v0.0.10), and even-toolkit. Renders paginated text to a 576x288px monochrome display.
 
 ## Commands
 
@@ -54,7 +54,7 @@ index.html → main.ts (bootstrap, UI wiring, file upload, settings panel, keep-
 
 **Glasses-side views:** `mainMenu` (Continue / Library (N) / Settings) → `bookPicker` → `library` (chapter list) → `reading` / `flowReading`. Also `settings` (5-item list) and `settingEditor` (per-setting value picker) reachable from `mainMenu`. Splash screen on startup via even-toolkit `createSplash`; after splash, `pickInitialView` (in `src/launch.ts`) decides between direct-resume (when launched from `glassesMenu` with a resolvable last book) and `mainMenu`.
 
-**Gesture mapping:** Swipe up/down = prev/next page or browse list items. Tap = select book/chapter/setting value, **in paged reading = switch to flow mode at the current position** (v1.4.1+), in flow reading = start/pause. Double-tap = back one level (reading→chapters→mainMenu→exit-app), **in paused flow reading = switch to paged at the current position** (v1.4.1+; running flow dbl-tap is no-op). Only 4 SDK gestures exist (`CLICK`, `DOUBLE_CLICK`, `SCROLL_TOP`, `SCROLL_BOTTOM`); no long-press / triple-tap / temple-swipe available — see `docs/1.4.0-on-device-settings-and-menu.md` §2.2 and §6.1.
+**Gesture mapping:** Swipe up/down = prev/next page or browse list items. Tap = select book/chapter/setting value or start/pause flow. Double-tap = back one level (reading→chapters→mainMenu→exit-app). Only 4 SDK gestures exist (`CLICK`, `DOUBLE_CLICK`, `SCROLL_TOP`, `SCROLL_BOTTOM`); no long-press / triple-tap / temple-swipe available — see `docs/1.4.0-on-device-settings-and-menu.md` §2.2.
 
 **Position persistence:** Saved on every page turn to two layers: bridge localStorage (device) and browser localStorage (WebView fallback). Restored by trying bookId key first, then title key, across both layers. Since v1.4.0, every save also writes `STORAGE_KEY_LAST_BOOK_ID` and `STORAGE_KEY_LAST_BOOK_FILENAME` so the mainMenu's Continue Reading resolver can match by bookId — never by title alone.
 
