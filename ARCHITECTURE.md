@@ -282,7 +282,7 @@ view:
   yPosition: 0,                      // anchored at the top
   maxLines,                          // how many text lines the paginator produces
   topBlankLines,                     // how many blank lines to prepend at render time
-  barHeight,                         // 30 or 0
+  barHeight,                         // 28 or 0 (28 since v1.4.1 — was 30, reduced to give the container 2 px of vertical headroom so 9 × G2_LINE_PITCH_PX = 258.03 px of content fits cleanly)
 }
 ```
 

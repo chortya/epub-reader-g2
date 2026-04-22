@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.4.1] - 2026-04-22
+
+### Fixed
+- **Text overflow at cropped heights**: At `textHeightPercent<100%` with the bottom status bar enabled, the SDK's native scroll indicator would appear in the corner of the text container on some pages, and rarely the page would render as a scrollable view instead of a single paginated page (beta-tester report against v1.3.1). Root cause: `getTextLayout()` used a nominal line pitch of 28 px, but the measured G2 display pitch is ~28.67 px. At 50% + bar, nine lines of content (five blank padding + four text) totalled 258.03 px — 0.03 px over a 258 px container. Blank padding lines at cropped heights forced the SDK to measure the full line height, unlike 100% where real-text-ending-short partially hid the overflow. **Fix:** `getTextLayout()` now uses a new `G2_LINE_PITCH_PX = 28.67` constant for "how many lines fit" math, and `STATUS_BAR_HEIGHT_PX` is reduced from 30 → 28 px to give the container 2 px of headroom. No regression in lines-per-page at 100% (still 9 with bar, 10 without). Affected paginator tests updated with the new math rationale.
+
 ## [v1.4.0] - 2026-04-22
 
 ### Added

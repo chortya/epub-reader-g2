@@ -5,7 +5,9 @@ import { paginateText } from '../src/paginator.ts';
 import {
   config,
   LINE_HEIGHT_PX,
+  G2_LINE_PITCH_PX,
   DISPLAY_HEIGHT,
+  STATUS_BAR_HEIGHT_PX,
   getTextLayout,
 } from '../src/constants.ts';
 
@@ -23,8 +25,27 @@ function withConfig(overrides: Partial<typeof config>, fn: () => void) {
   }
 }
 
-test('LINE_HEIGHT_PX is the documented 28px', () => {
+test('LINE_HEIGHT_PX is the documented 28px nominal', () => {
   assert.equal(LINE_HEIGHT_PX, 28);
+});
+
+test('G2_LINE_PITCH_PX is the measured ~28.67px actual pitch', () => {
+  // This is the value used for "how many lines fit in a container" math.
+  // Must be ≥ real measured pitch or blank padding lines overflow cropped
+  // heights and the SDK draws its scroll indicator.
+  assert.ok(G2_LINE_PITCH_PX >= 28.67);
+  assert.ok(G2_LINE_PITCH_PX < 29);
+});
+
+test('STATUS_BAR_HEIGHT_PX: 9 lines × G2_LINE_PITCH fits inside the text container', () => {
+  // Core correctness invariant for the v1.4.1 overflow fix: with the bar on,
+  // 9 lines × 28.67 = 258.03 px of content must fit in a (288 − bar) container.
+  const availableHeight = DISPLAY_HEIGHT - STATUS_BAR_HEIGHT_PX;
+  assert.ok(
+    9 * G2_LINE_PITCH_PX <= availableHeight,
+    `9 × ${G2_LINE_PITCH_PX} = ${9 * G2_LINE_PITCH_PX} must fit in ${availableHeight}; ` +
+      'reduce STATUS_BAR_HEIGHT_PX or raise G2_LINE_PITCH_PX if this fails.',
+  );
 });
 
 test('paginateText: default height% + bottom status bar yields 9 lines per full page', () => {
@@ -49,7 +70,7 @@ test('paginateText: default height% + no status bar yields 10 lines per full pag
 });
 
 test('paginateText: textHeightPercent=50 + bottom bar yields 4 lines per full page', () => {
-  // 129 px target, floor(129/28)=4 lines; container tightened to 4*29=116
+  // 130 px target, floor(130/28.67)=4 lines
   withConfig({ statusBarPosition: 'bottom', textHeightPercent: 50 }, () => {
     const pages = paginateText(manyWords);
     const fullPages = pages.slice(0, -1);
@@ -60,7 +81,7 @@ test('paginateText: textHeightPercent=50 + bottom bar yields 4 lines per full pa
 });
 
 test('paginateText: textHeightPercent=50 + no bar yields 5 lines per full page', () => {
-  // 144 px target, floor(144/28)=5 lines
+  // 144 px target, floor(144/28.67)=5 lines
   withConfig({ statusBarPosition: 'none', textHeightPercent: 50 }, () => {
     const pages = paginateText(manyWords);
     const fullPages = pages.slice(0, -1);
@@ -83,7 +104,7 @@ test('getTextLayout: container always covers the full available area (for event 
       assert.equal(layout.yPosition, 0, `at ${percent}% container must start at y=0`);
       assert.equal(
         layout.usableHeight,
-        DISPLAY_HEIGHT - 30,
+        DISPLAY_HEIGHT - STATUS_BAR_HEIGHT_PX,
         `at ${percent}% container must fill full available height`,
       );
     }
@@ -176,8 +197,10 @@ test('paginateText: reducing height% produces strictly more pages than default',
   );
 });
 
-test('DISPLAY_HEIGHT / LINE_HEIGHT_PX ratio matches the legacy 9/10 line behavior', () => {
-  // Sanity: floor((288 - 30) / 28) = 9, floor(288 / 28) = 10
-  assert.equal(Math.floor((DISPLAY_HEIGHT - 30) / LINE_HEIGHT_PX), 9);
-  assert.equal(Math.floor(DISPLAY_HEIGHT / LINE_HEIGHT_PX), 10);
+test('DISPLAY_HEIGHT / G2_LINE_PITCH_PX yields the expected 9/10 line budget', () => {
+  // v1.4.1: math uses measured pitch (28.67), not nominal LINE_HEIGHT_PX (28).
+  // Status bar reduced to 28 px to preserve 9 lines with bar; 10 lines without
+  // bar is unchanged (floor(288/28.67) = 10).
+  assert.equal(Math.floor((DISPLAY_HEIGHT - STATUS_BAR_HEIGHT_PX) / G2_LINE_PITCH_PX), 9);
+  assert.equal(Math.floor(DISPLAY_HEIGHT / G2_LINE_PITCH_PX), 10);
 });

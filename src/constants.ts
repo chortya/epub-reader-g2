@@ -10,11 +10,25 @@
 export const DISPLAY_WIDTH = 576;  // SDK maximum X range
 export const DISPLAY_HEIGHT = 288; // SDK maximum Y range
 
-// Pixel height reserved per text line on the G2 display.
-// Chosen so floor((288 - 30)/LINE_HEIGHT_PX) = 9 lines with a 30px bottom bar
-// and floor(288/LINE_HEIGHT_PX) = 10 lines without — matches legacy behavior.
+// Nominal pixel height reserved per text line on the G2 display.
+// Kept at 28 for backward compatibility with external math and the sanity
+// test — but the REAL measured line pitch is ~28.67 px (see G2_LINE_PITCH_PX
+// below). Code that calculates "how many lines fit in a container" must use
+// G2_LINE_PITCH_PX, not LINE_HEIGHT_PX. LINE_HEIGHT_PX remains for callers
+// that want the nominal per-line budget (e.g. bar-height math).
 export const LINE_HEIGHT_PX = 28;
-export const STATUS_BAR_HEIGHT_PX = 30;
+
+// Measured G2 line pitch. Using 28 in layout math caused 9 lines of content
+// to overflow a 258 px container (9 × 28.67 = 258.03) → SDK draws its scroll
+// indicator, and some pages rendered with an SDK scroll bar instead of our
+// paginated footer (v1.3.1 beta tester regression, fixed in v1.4.1).
+export const G2_LINE_PITCH_PX = 28.67;
+
+// Bottom status bar height. Reduced from 30 → 28 in v1.4.1 to give the text
+// container 2 px of extra vertical headroom, so 9 × 28.67 = 258.03 px of
+// content cleanly fits a 288 − 28 = 260 px container. The visible footer
+// text (one line of "HH:MM  Ch C/T Pg P/N [bar]") fits comfortably in 28 px.
+export const STATUS_BAR_HEIGHT_PX = 28;
 
 export const TEXT_HEIGHT_MIN_PERCENT = 50;
 export const TEXT_HEIGHT_MAX_PERCENT = 100;
@@ -203,11 +217,13 @@ export function getTextLayout(): {
     Math.min(TEXT_HEIGHT_MAX_PERCENT, config.textHeightPercent),
   );
   const targetUsable = Math.max(
-    LINE_HEIGHT_PX,
+    G2_LINE_PITCH_PX,
     Math.floor((availableHeight * percent) / 100),
   );
-  const displayLines = Math.max(1, Math.floor(availableHeight / LINE_HEIGHT_PX));
-  const maxLines = Math.max(1, Math.min(displayLines, Math.floor(targetUsable / LINE_HEIGHT_PX)));
+  // Use the measured G2 line pitch (not LINE_HEIGHT_PX) so blank padding lines
+  // at cropped heights don't overflow the container. See G2_LINE_PITCH_PX note.
+  const displayLines = Math.max(1, Math.floor(availableHeight / G2_LINE_PITCH_PX));
+  const maxLines = Math.max(1, Math.min(displayLines, Math.floor(targetUsable / G2_LINE_PITCH_PX)));
   const topBlankLines = Math.max(0, displayLines - maxLines);
   return {
     availableHeight,
