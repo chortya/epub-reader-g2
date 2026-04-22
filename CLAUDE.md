@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Even G2 ePub Reader (v1.3.0) — a web app for reading EPUB books on Even Realities G2 smart glasses. Built with TypeScript, Vite, Even Hub SDK (v0.0.10), and even-toolkit. Renders paginated text to a 576x288px monochrome display.
+Even G2 ePub Reader (v1.3.1) — a web app for reading EPUB books on Even Realities G2 smart glasses. Built with TypeScript, Vite, Even Hub SDK (v0.0.10), and even-toolkit. Renders paginated text to a 576x288px monochrome display.
 
 ## Commands
 
@@ -18,7 +18,7 @@ npm run pack         # Build + package as .ehpk for Even Hub distribution
 npm run pack:check   # Validate package structure against app.json schema
 ```
 
-Tests live in `tests/*.test.ts` and run via Node's native `--test` with `--experimental-strip-types` (no Jest/Vitest). Run a single test file with `node --experimental-strip-types --test tests/app-json.test.ts`. Additional ad-hoc integration scripts exist at the root (`test-gutenberg.mjs`, `test-proxy.mjs`, `test-scraper.mjs`, `proxy-test.mjs`) — run with `node <script>.mjs`. Validate changes with `npm run build` and `npm run test`.
+Tests live in `tests/*.test.ts` and run via Node's native `--test` with `--experimental-strip-types` (no Jest/Vitest). Current suites: `app-json.test.ts` (enforces `app.json.version === package.json.version` and SDK alignment), `paginator.test.ts`, `settings-persistence.test.ts`, `review-regressions.test.ts`. Run a single file with `node --experimental-strip-types --test tests/app-json.test.ts`. Test imports of local TS modules must include the `.ts` extension. Additional ad-hoc integration scripts exist at the root (`test-gutenberg.mjs`, `test-proxy.mjs`, `test-scraper.mjs`, `proxy-test.mjs`) — run with `node <script>.mjs`. Validate changes with `npm run build` and `npm run test`.
 
 ## Architecture
 
@@ -36,6 +36,8 @@ index.html → main.ts (bootstrap, UI wiring, file upload, settings panel, keep-
                ├── mock-bridge.ts — browser simulator fallback (renders to canvas)
                ├── constants.ts — display specs, config management, storage keys
                ├── utils.ts — shared helpers (status display, timeout wrapper, clamp, truncation)
+               ├── book-id.ts — deterministic bookId from filename+title (hash+slug)
+               ├── chapter-title.ts — picks/normalizes chapter titles (spine > heading > document)
                └── types.ts — shared type definitions (Chapter, Book, ViewState, etc.)
 ```
 
@@ -56,6 +58,14 @@ index.html → main.ts (bootstrap, UI wiring, file upload, settings panel, keep-
 **Position persistence:** Saved on every page turn to two layers: bridge localStorage (device) and browser localStorage (WebView fallback). Restored by trying bookId key first, then title key, across both layers.
 
 **Web UI:** Even Realities light theme (CSS custom properties). No React — vanilla HTML/CSS/JS. Collapsible settings/Gutenberg sections. Toggle switch for hyphenation. A context-aware "Reader" card appears while a book is open and exposes Prev/Next (paged) or Start/Pause + chapter jumps (flow). Version shown in header.
+
+## G2 Platform Constraints
+
+- **Display:** 576×288 px monochrome; max 12 containers per page; max 1 `isEventCapture=1` container per page (must cover the full tap area or swipes are lost — see the Text-height note above).
+- **Startup vs runtime:** `createStartUpPageContainer` is text-only (no images). Images only work in `rebuildPageContainer`.
+- **Text updates:** use `textContainerUpgrade` for flicker-free content swaps; `rebuildPageContainer` for layout changes (causes brief flicker). Always call `notifyTextUpdate()` after `rebuildPageContainer()`.
+- **Version sync:** `app.json.version` must match `package.json.version` — `tests/app-json.test.ts` fails otherwise. Same test checks the Even Hub SDK version referenced in `app.json`.
+- **Deeper reference:** `ARCHITECTURE.md` (in repo root) and the `/even-dev` skill cover SDK details and G2 quirks.
 
 ## Key Dependencies
 

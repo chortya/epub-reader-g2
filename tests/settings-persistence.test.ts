@@ -3,11 +3,14 @@ import assert from 'node:assert/strict';
 
 import {
   loadSettings,
+  loadSettingsFromBridge,
+  saveSettingsToBridge,
   config,
   FLOW_MIN_WPM,
   FLOW_MAX_WPM,
   TEXT_HEIGHT_MIN_PERCENT,
   TEXT_HEIGHT_MAX_PERCENT,
+  SETTINGS_KEY,
   type AppConfig,
 } from '../src/constants.ts';
 
@@ -170,6 +173,76 @@ test('loadSettings: missing fields leave defaults for that field only', () => {
   assert.equal(loaded.textHeightPercent, undefined, 'old save file has no textHeightPercent');
   assert.equal(loaded.statusBarPosition, undefined);
   assert.equal(loaded.readingMode, undefined);
+});
+
+// --- Bridge-backed persistence (fixes "settings don't persist on device") ---
+
+function makeMockBridge(initial: Record<string, string> = {}) {
+  const store = new Map<string, string>(Object.entries(initial));
+  const writes: Array<{ key: string; value: string }> = [];
+  return {
+    store,
+    writes,
+    async getLocalStorage(key: string) { return store.get(key) ?? ''; },
+    async setLocalStorage(key: string, value: string) {
+      store.set(key, value);
+      writes.push({ key, value });
+      return true;
+    },
+  };
+}
+
+test('saveSettingsToBridge: writes JSON.stringify(config) under SETTINGS_KEY', async () => {
+  const bridge = makeMockBridge();
+  const snapshot = { ...config };
+  await saveSettingsToBridge(bridge);
+  assert.equal(bridge.writes.length, 1);
+  assert.equal(bridge.writes[0].key, SETTINGS_KEY);
+  assert.deepEqual(JSON.parse(bridge.writes[0].value), snapshot);
+});
+
+test('loadSettingsFromBridge: applies bridge overrides onto config', async () => {
+  const original = { ...config };
+  try {
+    const bridge = makeMockBridge({
+      [SETTINGS_KEY]: JSON.stringify({
+        hyphenation: !original.hyphenation,
+        textHeightPercent: 60,
+      }),
+    });
+    await loadSettingsFromBridge(bridge);
+    assert.equal(config.hyphenation, !original.hyphenation);
+    assert.equal(config.textHeightPercent, 60);
+    // Unchanged fields stay at their previous values
+    assert.equal(config.readingMode, original.readingMode);
+  } finally {
+    Object.assign(config, original);
+  }
+});
+
+test('loadSettingsFromBridge: tolerates empty bridge value and missing key', async () => {
+  const original = { ...config };
+  const bridge = makeMockBridge(); // bridge returns '' for any key
+  await loadSettingsFromBridge(bridge);
+  assert.deepEqual({ ...config }, original);
+});
+
+test('loadSettingsFromBridge: tolerates a throwing bridge', async () => {
+  const original = { ...config };
+  const bridge = {
+    async getLocalStorage(): Promise<string> { throw new Error('bridge down'); },
+    async setLocalStorage(): Promise<boolean> { return false; },
+  };
+  await loadSettingsFromBridge(bridge); // must not throw
+  assert.deepEqual({ ...config }, original);
+});
+
+test('saveSettingsToBridge: tolerates a throwing bridge', async () => {
+  const bridge = {
+    async getLocalStorage(): Promise<string> { return ''; },
+    async setLocalStorage(): Promise<boolean> { throw new Error('bridge down'); },
+  };
+  await saveSettingsToBridge(bridge); // must not throw
 });
 
 test('loadSettings: extra unknown fields are ignored', () => {

@@ -110,6 +110,38 @@ export function saveSettings() {
     }
 }
 
+// Bridge-backed persistence. On the real G2 device the WebView's browser
+// localStorage is wiped across app restarts; bridge.setLocalStorage is the
+// only store that survives. See https://hub.evenrealities.com/docs/guides/device-apis#local-storage
+interface SettingsBridge {
+    setLocalStorage(key: string, value: string): Promise<boolean>;
+    getLocalStorage(key: string): Promise<string>;
+}
+
+export async function loadSettingsFromBridge(bridge: SettingsBridge): Promise<void> {
+    try {
+        const raw = await bridge.getLocalStorage(SETTINGS_KEY);
+        const overrides = loadSettings(raw || null);
+        if (Object.keys(overrides).length > 0) {
+            Object.assign(config, overrides);
+            // Mirror to browser localStorage so a cold reload in the same
+            // WebView session still gets the persisted values synchronously.
+            try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(config)); } catch { /* */ }
+        }
+    } catch (e) {
+        console.warn('loadSettingsFromBridge failed:', e);
+    }
+}
+
+export async function saveSettingsToBridge(bridge: SettingsBridge): Promise<void> {
+    try {
+        const ok = await bridge.setLocalStorage(SETTINGS_KEY, JSON.stringify(config));
+        if (ok === false) console.warn('Bridge rejected settings write');
+    } catch (e) {
+        console.warn('saveSettingsToBridge failed:', e);
+    }
+}
+
 export const STORAGE_KEY_POSITION = 'epub-reading-position';
 export const STORAGE_KEY_FLOW_POSITION = 'epub-flow-position';
 export const STORAGE_KEY_BOOK_TITLE = 'epub-book-title';

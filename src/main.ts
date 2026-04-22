@@ -9,7 +9,9 @@ import {
   config,
   FLOW_MAX_WPM,
   FLOW_MIN_WPM,
+  loadSettingsFromBridge,
   saveSettings,
+  saveSettingsToBridge,
   STORAGE_KEY_BOOK_TITLE,
   TEXT_HEIGHT_MAX_PERCENT,
   TEXT_HEIGHT_MIN_PERCENT,
@@ -54,6 +56,13 @@ async function main() {
 
   if (bridge) {
     activateKeepAlive();
+
+    // Hydrate settings from the bridge-backed store BEFORE creating the client,
+    // so the first render (startup page + initial layout) reflects persisted
+    // values rather than defaults/browser-localStorage fallback. On device the
+    // WebView's browser localStorage is wiped across app restarts, so the
+    // bridge store is the only source of truth for persisted settings.
+    await loadSettingsFromBridge(bridge as any);
 
     client = new EvenEpubClient(bridge as any);
 
@@ -209,10 +218,20 @@ async function main() {
       if (textHeightValueEl) textHeightValueEl.textContent = `${config.textHeightPercent}%`;
 
       saveSettings();
+      // Also persist to bridge storage so settings survive an app restart on
+      // the G2 device (browser localStorage is ephemeral inside the Even Hub
+      // WebView). Fire in parallel with applySettings so the UI updates
+      // immediately and isn't blocked by a slow bridge round-trip.
+      const bridgeWrite = bridge
+        ? saveSettingsToBridge(bridge as any)
+        : Promise.resolve();
       if (client) {
         setStatus('Applying settings...');
         await client.applySettings();
+        await bridgeWrite;
         setStatus('Settings applied.');
+      } else {
+        await bridgeWrite;
       }
     });
   }

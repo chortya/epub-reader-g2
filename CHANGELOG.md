@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.3.1] - 2026-04-22
+
+### Fixed
+- **On-device settings persistence**: Settings (hyphenation, status-bar position, reading mode, flow speed, text height) now persist across app restarts on the G2 device. Previously they were written only to the WebView's browser `localStorage`, which is wiped when the Even Hub app restarts; positions and book cache already used `bridge.setLocalStorage` and were unaffected. Added `loadSettingsFromBridge(bridge)` and `saveSettingsToBridge(bridge)` in `constants.ts` — these call the official Device API (`bridge.getLocalStorage`/`setLocalStorage`, see [hub.evenrealities.com/docs/guides/device-apis](https://hub.evenrealities.com/docs/guides/device-apis#local-storage)). `main.ts` now hydrates `config` from bridge storage **before** `client.init()`, so the first startup render reflects persisted values, and mirrors every save to the bridge in addition to browser localStorage. Browser `localStorage` remains as a warm-start cache for faster page reloads in the simulator.
+
+### Changed
+- **Dependencies**: `even-toolkit` 1.7.0 → 1.7.2, `@evenrealities/evenhub-cli` 0.1.12 → 0.1.13, `@evenrealities/evenhub-simulator` 0.7.2 → 0.7.3, `vite` 8.0.8 → 8.0.9, `typescript` 6.0.2 → 6.0.3. even-toolkit 1.6.3 added a `storage` module that wraps the same bridge API we now use directly — see its changelog for the "shared storage no longer mirrors to browser localStorage" note that confirmed this bug.
+
+### Added
+- **Persistence tests**: Five new tests in `tests/settings-persistence.test.ts` covering `saveSettingsToBridge` and `loadSettingsFromBridge` with a mock bridge — writing under `SETTINGS_KEY`, applying overrides onto `config`, tolerating empty bridge values, and tolerating a throwing bridge without crashing the caller.
+
 ## [v1.3.0] - 2026-04-19
 
 ### Changed

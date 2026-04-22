@@ -1,7 +1,7 @@
 # Architecture
 
 This document describes how the **Even G2 ePub Reader** is put together as of
-**v1.3.0**. It is meant for contributors touching the codebase; user-facing
+**v1.3.1**. It is meant for contributors touching the codebase; user-facing
 docs live in `README.md` / `CHANGELOG.md` and high-level conventions live in
 `CLAUDE.md`.
 
@@ -37,8 +37,9 @@ Two entry points ship in the built bundle:
 ## 3. Module map (`src/`)
 
 ```
-main.ts              entry: bridge setup, UI wiring, upload, Gutenberg, library render, settings panel,
-                     Reader-controls card, auto-resume, keep-alive activation.
+main.ts              entry: bridge setup, simulator fallback, bridge-settings hydration, UI wiring,
+                     upload, Gutenberg, library render, Reader-controls card, keep-alive activation,
+                     glassesMenu auto-resume hook.
 even-client.ts       EvenEpubClient: views, navigation, reading modes, gesture handling,
                      position persistence. Talks to the raw SDK bridge directly.
 epub-parser.ts       EPUB ZIP -> Chapter[]: ZIP unpacking, OPF/spine traversal, DOM-based plain-text
@@ -46,7 +47,8 @@ epub-parser.ts       EPUB ZIP -> Chapter[]: ZIP unpacking, OPF/spine traversal, 
 paginator.ts         Plain text -> string[] pages: word-wrap at character width with end-of-line
                      hyphenation fallback; page line count derived from getTextLayout().
 constants.ts         DISPLAY_* / LINE_HEIGHT_PX, the persistent `config` object, TEXT_HEIGHT_* limits,
-                     loadSettings() / saveSettings(), getTextLayout() — central layout math.
+                     loadSettings() / saveSettings(), loadSettingsFromBridge() / saveSettingsToBridge(),
+                     getTextLayout() — central layout math.
 types.ts             Shared type aliases: Chapter, Book, ViewState, ReadingPosition, CachedBookMeta.
 utils.ts             setStatus / appendEventLog / withTimeout / clamp / truncateForList.
 db.ts                Local book cache: IndexedDB primary + bridge-localStorage fallback (base64),
@@ -282,7 +284,7 @@ Examples (bottom status bar on):
 
 ## 10. Persistence
 
-Five independent storage lanes, all keyed by book identity:
+Five independent storage lanes:
 
 ```
 +-------------------+----------------------+-------------------------------+-------------------------------+
@@ -299,19 +301,26 @@ Five independent storage lanes, all keyed by book identity:
 +-------------------+----------------------+-------------------------------+-------------------------------+
 | Flow position     | bridge local storage | window.localStorage           | STORAGE_KEY_FLOW_POSITION +...|
 +-------------------+----------------------+-------------------------------+-------------------------------+
-| App settings      | window.localStorage  | (none)                        | SETTINGS_KEY                  |
+| App settings      | bridge local storage | window.localStorage           | SETTINGS_KEY                  |
 | (AppConfig)       |                      |                               |                               |
 +-------------------+----------------------+-------------------------------+-------------------------------+
 ```
 
-- **Book files** use IndexedDB for fast local reads and mirror to the bridge
-  storage in the background so the glasses-side book picker can see them.
+- **Book files** use IndexedDB for fast local reads; `db.ts` also keeps a
+  bridge-localStorage base64 fallback so recent books survive the device's
+  constrained environment.
+- **Cached book list** is separate from the book bytes: `EvenEpubClient`
+  stores a compact metadata array under `'epub-book-list'` so startup can
+  render the glasses-side picker before any EPUB is parsed.
 - **Positions** are saved on every page turn to *both* lanes. Read path
   tries `bookId` first, then `title`, then bridge, then browser
   localStorage — whichever returns valid state first wins.
-- **Settings** pass through the pure `loadSettings(raw): Partial<AppConfig>`
-  at module load (see §11); `saveSettings()` serializes the whole `config`
-  object, so adding a new field is automatically forward-compatible.
+- **Settings** now use bridge localStorage as the source of truth on device.
+  `constants.ts` still hydrates synchronously from browser localStorage at
+  module load for warm reloads in the same WebView, then `main.ts` calls
+  `loadSettingsFromBridge()` before `EvenEpubClient` is constructed so the
+  first startup render reflects persisted device settings. Saves mirror to
+  both lanes.
 
 ## 11. Settings lifecycle
 
@@ -325,24 +334,30 @@ constants.ts module evaluates
 Object.assign(config, loadSettings(localStorage.getItem(SETTINGS_KEY)))
     |
     v
+main.ts resolves bridge (real SDK or MockBridge)
+    |
+    v
+main.ts awaits loadSettingsFromBridge(bridge)
+    |
+    v
+EvenEpubClient is constructed / init() runs with hydrated config
+    |
+    v
 DOM ready: main.ts binds <select>/<input>/<slider> values from `config`
     |
     v
 user clicks "Apply Settings"
     |
-    v
-main.ts mutates `config` with validated values from the DOM
-    |
-    v
-saveSettings() writes JSON.stringify(config) to localStorage
-    |
-    v
-client.applySettings()
-    |
-    +- repaginate all chapters
-    +- rescale pageIndex via old/new page-count ratio
-    +- force flowLayoutReady = false (forces full rebuild next frame)
-    +- refreshCurrentView()
+    +- main.ts mutates `config` with validated values from the DOM
+    +- saveSettings() writes JSON.stringify(config) to browser localStorage
+    +- saveSettingsToBridge(bridge) mirrors to device-persistent storage
+    +- client.applySettings()
+         +- repaginate all chapters
+         +- rescale pageIndex via old/new page-count ratio
+         +- clamp flowWordIndex to the new page's word count
+         +- switch reading <-> flowReading if readingMode changed
+         +- force flowLayoutReady = false when re-rendering flow
+         +- refreshCurrentView()
 ```
 
 `loadSettings` is pure and exhaustively tested
@@ -350,6 +365,11 @@ client.applySettings()
 clamps numeric ranges, rejects non-object JSON, migrates the legacy
 `showStatusBar` boolean to the newer `statusBarPosition` enum, and returns
 `{}` on any parse error so the caller just keeps defaults.
+
+`loadSettingsFromBridge()` and `saveSettingsToBridge()` are intentionally
+thin async wrappers over `bridge.getLocalStorage()` / `setLocalStorage()`.
+They swallow bridge failures and leave browser localStorage as a degraded
+fallback instead of blocking the UI.
 
 ## 12. Web-UI reader controls
 
@@ -375,6 +395,11 @@ real SDK bridge is used. On timeout (or when the URL contains
 the subset of SDK methods the client actually uses and renders text
 containers into a DOM canvas in the page.
 
+Before creating `EvenEpubClient`, `main.ts` hydrates settings from the
+bridge-backed store. This ordering matters: on the real device the WebView's
+browser localStorage is wiped across app restarts, so bridge localStorage is
+the only reliable settings source for first paint.
+
 `MockBridge` is singleton; the `rebuildPageContainer` / `textContainerUpgrade`
 calls update `#sim-screen`, and button clicks (Swipe Up, Swipe Down, Tap,
 DblTap) synthesize `EvenHubEvent` objects that flow through the same
@@ -393,7 +418,7 @@ Tests are pure: they import `src/*.ts` directly (using explicit `.ts`
 extensions — Node's native TS mode requires them) and exercise side-effect
 free functions. There is no jsdom / Vitest / Jest.
 
-Current suites (v1.3.0 → 45 tests):
+Current suites (v1.3.1 → 50 tests):
 
 - `app-json.test.ts` — manifest / package version alignment, SDK version
   consistency, `supported_languages` matches hyphenation set, network
@@ -404,7 +429,9 @@ Current suites (v1.3.0 → 45 tests):
 - `review-regressions.test.ts` — `makeBookId` stability,
   `pruneBridgeBooks` set semantics, `pickChapterTitle` priority order.
 - `settings-persistence.test.ts` — `loadSettings` clamping, type
-  rejection, `showStatusBar` migration, `JSON.stringify(config)` round-trip.
+  rejection, `showStatusBar` migration, `JSON.stringify(config)` round-trip,
+  and bridge-backed `loadSettingsFromBridge()` / `saveSettingsToBridge()`
+  behavior.
 
 The app-json test enforces a number of release invariants, so simply
 forgetting to bump `app.json` version alongside `package.json` is caught
