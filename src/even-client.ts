@@ -25,6 +25,7 @@ import {
   STORAGE_KEY_LAST_BOOK_FILENAME,
   STORAGE_KEY_LAST_BOOK_ID,
   STORAGE_KEY_POSITION,
+  formatStatusLine,
   getTextLayout,
 } from './constants';
 import { clamp, setStatus, truncateForList, appendEventLog } from './utils';
@@ -61,6 +62,12 @@ export class EvenEpubClient {
   private bookPickerSelectedIndex = 0;
   private currentBookId: string | null = null;
   private currentBookFilename: string | null = null;
+
+  // Clock ticker state (Stage 4). Only runs while the view is reading/flowReading.
+  // 10 s poll period with a string-compare gate — wakes up often enough to catch
+  // the next minute boundary within 10 s without hammering textContainerUpgrade.
+  private clockTickerId: number | null = null;
+  private lastMinuteString: string | null = null;
 
   public onViewChanged?: () => void;
   public onPositionChanged?: (chapterIndex: number, pageIndex: number) => void;
@@ -336,6 +343,7 @@ export class EvenEpubClient {
 
   private async showBookPicker(): Promise<void> {
     this.stopFlow();
+    this.stopClockTicker();
     this.view = 'bookPicker';
 
     const total = this.cachedBookList.length;
@@ -365,6 +373,7 @@ export class EvenEpubClient {
 
   private async showWelcome(): Promise<void> {
     this.stopFlow();
+    this.stopClockTicker();
     this.view = 'library';
 
     await this.bridge.rebuildPageContainer(
@@ -382,6 +391,7 @@ export class EvenEpubClient {
   private async showChapterList(): Promise<void> {
     if (!this.book) return;
     this.stopFlow();
+    this.stopClockTicker();
     this.view = 'library';
 
     const total = this.book.chapters.length;
@@ -434,14 +444,16 @@ export class EvenEpubClient {
     const totalChapters = this.book.chapters.length;
     const infoText = `Ch ${this.chapterIndex + 1}/${totalChapters} Pg ${this.pageIndex + 1}/${totalPages} `;
 
-    // Calculate the remaining space for the progress bar.
+    // Status-line content: "HH:MM  Ch C/T Pg P/N [━━━───]". Clock updates via
+    // the periodic clockTicker (every 10 s with a string-compare gate); the
+    // full label is also re-rendered on every page turn. See design §7.
     const hasBottomBar = config.statusBarPosition === 'bottom';
-    const maxChars = 59;
-    // Reserve 2 chars for brackets, use remaining space for bar
-    const targetBarLen = Math.max(5, Math.min(20, maxChars - infoText.length - 2));
-    const filled = Math.round(targetBarLen * progress);
-    const bar = '━'.repeat(filled) + '─'.repeat(targetBarLen - filled);
-    const label = `${infoText}[${bar}]`;
+    const label = formatStatusLine({
+      now: new Date(),
+      infoText,
+      maxChars: 59,
+      progress,
+    });
 
     const layout = getTextLayout();
     // Pad the page with leading blank lines so content sits at the bottom of
@@ -492,6 +504,7 @@ export class EvenEpubClient {
     notifyTextUpdate();
 
     await this.savePagedPosition();
+    this.startClockTicker();
 
     setStatus(
       `Ch ${this.chapterIndex + 1
@@ -545,11 +558,12 @@ export class EvenEpubClient {
     const infoText = `Flow ${flowState} ${config.flowSpeedWpm}wpm Ch ${this.chapterIndex + 1}/${this.book.chapters.length} Pg ${this.pageIndex + 1}/${chapterTotalPages} W ${this.flowWordIndex + 1}/${totalPageWords} `;
 
     const hasBottomBar = config.statusBarPosition === 'bottom';
-    const maxChars = 59;
-    const targetBarLen = Math.max(5, Math.min(20, maxChars - infoText.length - 2));
-    const filled = Math.round(targetBarLen * progress);
-    const bar = '━'.repeat(filled) + '─'.repeat(targetBarLen - filled);
-    const label = `${infoText}[${bar}]`;
+    const label = formatStatusLine({
+      now: new Date(),
+      infoText,
+      maxChars: 59,
+      progress,
+    });
 
     const layout = getTextLayout();
     const paddedContent = '\n'.repeat(layout.topBlankLines) + (content || '...');
@@ -618,6 +632,7 @@ export class EvenEpubClient {
     notifyTextUpdate();
 
     await this.saveFlowPosition();
+    this.startClockTicker();
     setStatus(
       `Flow ${this.isFlowRunning ? 'running' : 'paused'} | Ch ${this.chapterIndex + 1}/${this.book.chapters.length} | Pg ${this.pageIndex + 1}/${chapterTotalPages} | Word ${this.flowWordIndex + 1}/${totalPageWords} | ${config.flowSpeedWpm} WPM`,
     );
@@ -878,12 +893,16 @@ export class EvenEpubClient {
     }
     if (sysEvent?.eventType === OsEventTypeList.FOREGROUND_EXIT_EVENT) {
       if (this.isFlowRunning) this.stopFlow();
+      this.stopClockTicker();
       if (this.view === 'flowReading') await this.saveFlowPosition();
       else await this.savePagedPosition();
       return;
     }
     if (sysEvent?.eventType === OsEventTypeList.FOREGROUND_ENTER_EVENT) {
       await this.refreshCurrentView();
+      if (this.view === 'reading' || this.view === 'flowReading') {
+        this.startClockTicker();
+      }
       return;
     }
 
@@ -1034,9 +1053,100 @@ export class EvenEpubClient {
 
   private async handleShutdown(): Promise<void> {
     this.stopFlow();
+    this.stopClockTicker();
     if (this.view === 'flowReading') await this.saveFlowPosition();
     else await this.savePagedPosition();
     try { await this.bridge.shutDownPageContainer(); } catch { /* */ }
+  }
+
+  // --- Clock ticker (Stage 4) ---
+
+  private startClockTicker(): void {
+    // Belt-and-suspenders: clear any existing timer so a double-call never
+    // leaks an interval (§12.1 risk list, mitigation).
+    if (this.clockTickerId !== null) {
+      window.clearInterval(this.clockTickerId);
+      this.clockTickerId = null;
+    }
+    this.lastMinuteString = this.formatHHMM(new Date());
+    this.clockTickerId = window.setInterval(() => {
+      this.tickClock().catch((e) => console.warn('clock tick failed:', e));
+    }, 10_000);
+  }
+
+  private stopClockTicker(): void {
+    if (this.clockTickerId !== null) {
+      window.clearInterval(this.clockTickerId);
+      this.clockTickerId = null;
+    }
+    this.lastMinuteString = null;
+  }
+
+  private formatHHMM(now: Date): string {
+    const h = now.getHours();
+    const m = now.getMinutes();
+    return `${h < 10 ? '0' : ''}${h}:${m < 10 ? '0' : ''}${m}`;
+  }
+
+  private async tickClock(): Promise<void> {
+    // Only refresh the footer for the two views that actually render it.
+    if (this.view !== 'reading' && this.view !== 'flowReading') return;
+    if (config.statusBarPosition !== 'bottom') return;
+    const current = this.formatHHMM(new Date());
+    if (current === this.lastMinuteString) return;
+    this.lastMinuteString = current;
+
+    // §7.4 invariant: upgrade container 2 in place. Both showPage and
+    // showFlowFrame render the footer as container ID 2 (names 'footer' and
+    // 'flow-footer' respectively). textContainerUpgrade is flicker-free.
+    const label = this.buildCurrentFooterLabel();
+    if (label === null) return;
+    const name = this.view === 'reading' ? 'footer' : 'flow-footer';
+    try {
+      await this.bridge.textContainerUpgrade(
+        new TextContainerUpgrade({ containerID: 2, containerName: name, content: label }),
+      );
+    } catch (e) {
+      console.warn('clock tick textContainerUpgrade failed:', e);
+    }
+  }
+
+  private buildCurrentFooterLabel(): string | null {
+    if (!this.book) return null;
+    if (this.view === 'reading') {
+      const totalPages = this.chapterPages[this.chapterIndex]?.length ?? 1;
+      const totalChapters = this.book.chapters.length;
+      const infoText = `Ch ${this.chapterIndex + 1}/${totalChapters} Pg ${this.pageIndex + 1}/${totalPages} `;
+      let totalBookPages = 0, currentAbsolutePage = 0;
+      for (let i = 0; i < this.chapterPages.length; i++) {
+        if (i < this.chapterIndex) currentAbsolutePage += this.chapterPages[i].length;
+        else if (i === this.chapterIndex) currentAbsolutePage += this.pageIndex + 1;
+        totalBookPages += this.chapterPages[i].length;
+      }
+      const progress = totalBookPages > 1 ? currentAbsolutePage / totalBookPages : 1;
+      return formatStatusLine({ now: new Date(), infoText, maxChars: 59, progress });
+    }
+    // flowReading
+    const pageData = this.flowPageData[this.chapterIndex]?.[this.pageIndex];
+    if (!pageData) return null;
+    const totalPageWords = Math.max(1, pageData.wordCount);
+    const flowState = this.isFlowRunning ? 'RUN' : 'PAUSE';
+    const chapterTotalPages = this.chapterPages[this.chapterIndex]?.length ?? 1;
+    const infoText = `Flow ${flowState} ${config.flowSpeedWpm}wpm Ch ${this.chapterIndex + 1}/${this.book.chapters.length} Pg ${this.pageIndex + 1}/${chapterTotalPages} W ${this.flowWordIndex + 1}/${totalPageWords} `;
+    let totalBookWords = 0, currentAbsoluteWord = 0;
+    for (let ch = 0; ch < this.flowPageData.length; ch++) {
+      for (let pg = 0; pg < this.flowPageData[ch].length; pg++) {
+        const pw = this.flowPageData[ch][pg].wordCount;
+        totalBookWords += pw;
+        if (ch < this.chapterIndex || (ch === this.chapterIndex && pg < this.pageIndex)) {
+          currentAbsoluteWord += pw;
+        } else if (ch === this.chapterIndex && pg === this.pageIndex) {
+          currentAbsoluteWord += this.flowWordIndex + 1;
+        }
+      }
+    }
+    const progress = totalBookWords > 1 ? currentAbsoluteWord / totalBookWords : 1;
+    return formatStatusLine({ now: new Date(), infoText, maxChars: 59, progress });
   }
 
   // --- Persistence ---
