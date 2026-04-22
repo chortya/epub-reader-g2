@@ -180,7 +180,7 @@ export class EvenEpubClient {
 
   private getWelcomeContainers(): TextContainerProperty[] {
     const title = 'G2 ePUB Reader';
-    const maxChars = config.statusBarPosition === 'right' ? 58 : 59;
+    const maxChars = 59;
     const titlePad = Math.floor((maxChars - title.length) / 2);
     const centeredTitle = ' '.repeat(Math.max(0, titlePad)) + title;
 
@@ -427,8 +427,7 @@ export class EvenEpubClient {
 
     // Calculate the remaining space for the progress bar.
     const hasBottomBar = config.statusBarPosition === 'bottom';
-    const hasRightBar = config.statusBarPosition === 'right';
-    const maxChars = hasRightBar ? 58 : 59;
+    const maxChars = 59;
     // Reserve 2 chars for brackets, use remaining space for bar
     const targetBarLen = Math.max(5, Math.min(20, maxChars - infoText.length - 2));
     const filled = Math.round(targetBarLen * progress);
@@ -436,8 +435,6 @@ export class EvenEpubClient {
     const label = `${infoText}[${bar}]`;
 
     const layout = getTextLayout();
-    const rightBarWidth = hasRightBar ? 26 : 0;
-    const textWidth = DISPLAY_WIDTH - rightBarWidth;
     // Pad the page with leading blank lines so content sits at the bottom of
     // the full-size container (no need to shrink the container and lose swipe
     // capture over the blank top half).
@@ -446,7 +443,7 @@ export class EvenEpubClient {
     const textContainer = new TextContainerProperty({
       xPosition: 0,
       yPosition: layout.yPosition,
-      width: textWidth,
+      width: DISPLAY_WIDTH,
       height: layout.usableHeight,
       borderWidth: 0,
       borderColor: 5,
@@ -475,24 +472,6 @@ export class EvenEpubClient {
         isEventCapture: 0,
       });
       textObjects.push(footerContainer);
-    } else if (hasRightBar) {
-      const verticalBarLines = 10;
-      const verticalFilled = Math.round(verticalBarLines * progress);
-      const verticalContent = '█'.repeat(verticalFilled) + '│'.repeat(verticalBarLines - verticalFilled);
-      const sideContainer = new TextContainerProperty({
-        xPosition: textWidth,
-        yPosition: 0,
-        width: rightBarWidth,
-        height: DISPLAY_HEIGHT,
-        borderWidth: 0,
-        borderColor: 5,
-        paddingLength: 0,
-        containerID: 2,
-        containerName: 'sidebar',
-        content: verticalContent.split('').join('\n'),
-        isEventCapture: 0,
-      });
-      textObjects.push(sideContainer);
     }
 
     await this.bridge.rebuildPageContainer(
@@ -557,22 +536,19 @@ export class EvenEpubClient {
     const infoText = `Flow ${flowState} ${config.flowSpeedWpm}wpm Ch ${this.chapterIndex + 1}/${this.book.chapters.length} Pg ${this.pageIndex + 1}/${chapterTotalPages} W ${this.flowWordIndex + 1}/${totalPageWords} `;
 
     const hasBottomBar = config.statusBarPosition === 'bottom';
-    const hasRightBar = config.statusBarPosition === 'right';
-    const maxChars = hasRightBar ? 58 : 59;
+    const maxChars = 59;
     const targetBarLen = Math.max(5, Math.min(20, maxChars - infoText.length - 2));
     const filled = Math.round(targetBarLen * progress);
     const bar = '━'.repeat(filled) + '─'.repeat(targetBarLen - filled);
     const label = `${infoText}[${bar}]`;
 
     const layout = getTextLayout();
-    const rightBarWidth = hasRightBar ? 26 : 0;
-    const textWidth = DISPLAY_WIDTH - rightBarWidth;
     const paddedContent = '\n'.repeat(layout.topBlankLines) + (content || '...');
 
     const textContainer = new TextContainerProperty({
       xPosition: 0,
       yPosition: layout.yPosition,
-      width: textWidth,
+      width: DISPLAY_WIDTH,
       height: layout.usableHeight,
       borderWidth: 0,
       borderColor: 5,
@@ -600,25 +576,6 @@ export class EvenEpubClient {
           isEventCapture: 0,
         }),
       );
-    } else if (hasRightBar) {
-      const verticalBarLines = 10;
-      const verticalFilled = Math.round(verticalBarLines * progress);
-      const verticalContent = '█'.repeat(verticalFilled) + '│'.repeat(verticalBarLines - verticalFilled);
-      textObjects.push(
-        new TextContainerProperty({
-          xPosition: textWidth,
-          yPosition: 0,
-          width: rightBarWidth,
-          height: DISPLAY_HEIGHT,
-          borderWidth: 0,
-          borderColor: 5,
-          paddingLength: 0,
-          containerID: 2,
-          containerName: 'flow-side',
-          content: verticalContent.split('').join('\n'),
-          isEventCapture: 0,
-        }),
-      );
     }
 
     if (this.flowLayoutReady) {
@@ -630,24 +587,12 @@ export class EvenEpubClient {
           content: paddedContent,
         }),
       );
-      // Update status bar if present
       if (hasBottomBar) {
         await this.bridge.textContainerUpgrade(
           new TextContainerUpgrade({
             containerID: 2,
             containerName: 'flow-footer',
             content: label,
-          }),
-        );
-      } else if (hasRightBar) {
-        const verticalBarLines = 10;
-        const verticalFilled = Math.round(verticalBarLines * progress);
-        const verticalContent = '█'.repeat(verticalFilled) + '│'.repeat(verticalBarLines - verticalFilled);
-        await this.bridge.textContainerUpgrade(
-          new TextContainerUpgrade({
-            containerID: 2,
-            containerName: 'flow-side',
-            content: verticalContent.split('').join('\n'),
           }),
         );
       }

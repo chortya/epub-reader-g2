@@ -28,7 +28,7 @@ export const FLOW_MAX_WPM = 600;
 
 export type AppConfig = {
     hyphenation: boolean;
-    statusBarPosition: 'bottom' | 'right' | 'none';
+    statusBarPosition: 'bottom' | 'none';
     readingMode: 'paged' | 'flow';
     flowSpeedWpm: number;
     textHeightPercent: number;
@@ -66,10 +66,12 @@ export function loadSettings(raw: string | null): Partial<AppConfig> {
 
     if (
         parsed.statusBarPosition === 'bottom'
-        || parsed.statusBarPosition === 'right'
         || parsed.statusBarPosition === 'none'
     ) {
         out.statusBarPosition = parsed.statusBarPosition;
+    } else if (parsed.statusBarPosition === 'right') {
+        // v1.4.0 removed the vertical status bar. Migrate saved 'right' to 'bottom'.
+        out.statusBarPosition = 'bottom';
     } else if (typeof parsed.showStatusBar === 'boolean') {
         // Legacy key from versions < v0.8.0
         out.statusBarPosition = parsed.showStatusBar ? 'bottom' : 'none';

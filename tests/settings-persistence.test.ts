@@ -88,10 +88,20 @@ test('loadSettings: clamps flowSpeedWpm to [FLOW_MIN_WPM, FLOW_MAX_WPM]', () => 
 
 // --- statusBarPosition ---
 
-test('loadSettings: accepts all three statusBarPosition values', () => {
-  for (const pos of ['bottom', 'right', 'none']) {
+test('loadSettings: accepts the two supported statusBarPosition values', () => {
+  for (const pos of ['bottom', 'none']) {
     assert.equal(loadSettings(JSON.stringify({ statusBarPosition: pos })).statusBarPosition, pos);
   }
+});
+
+test("loadSettings: legacy 'right' migrates to 'bottom'", () => {
+  // v1.4.0 removed the vertical (right) status bar. Saved 'right' values must
+  // migrate silently so users on v1.3.x do not see their setting drop to its
+  // default on upgrade. See docs/1.4.0-implementation-plan.md Stage 1.
+  assert.equal(
+    loadSettings(JSON.stringify({ statusBarPosition: 'right' })).statusBarPosition,
+    'bottom',
+  );
 });
 
 test('loadSettings: rejects invalid statusBarPosition', () => {
@@ -108,8 +118,10 @@ test('loadSettings: legacy showStatusBar=false migrates to none', () => {
 });
 
 test('loadSettings: modern statusBarPosition wins over legacy showStatusBar', () => {
-  const raw = JSON.stringify({ statusBarPosition: 'right', showStatusBar: false });
-  assert.equal(loadSettings(raw).statusBarPosition, 'right');
+  // A valid modern value should not be clobbered by the legacy boolean, even
+  // if the legacy value disagrees. 'none' (modern) must stick over showStatusBar:true.
+  const raw = JSON.stringify({ statusBarPosition: 'none', showStatusBar: true });
+  assert.equal(loadSettings(raw).statusBarPosition, 'none');
 });
 
 // --- readingMode ---
@@ -140,7 +152,7 @@ test('loadSettings: rejects non-boolean hyphenation', () => {
 test('loadSettings: round-trips a JSON.stringify(config)-shaped blob', () => {
   const saved: AppConfig = {
     hyphenation: false,
-    statusBarPosition: 'right',
+    statusBarPosition: 'none',
     readingMode: 'flow',
     flowSpeedWpm: 360,
     textHeightPercent: 70,

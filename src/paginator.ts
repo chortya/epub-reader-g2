@@ -21,9 +21,7 @@ export function setWideGlyphs(wide: boolean): void {
  */
 export function paginateText(
   text: string,
-  maxChars = wideGlyphs
-    ? (config.statusBarPosition === 'right' ? 45 : 48)
-    : (config.statusBarPosition === 'right' ? 58 : 59),
+  maxChars = wideGlyphs ? 48 : 59,
   maxLines = getTextLayout().maxLines,
 ): string[] {
   if (!text || text.trim().length === 0) return ['(empty)'];

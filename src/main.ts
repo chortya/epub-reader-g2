@@ -202,7 +202,7 @@ async function main() {
 
     saveBtn.addEventListener('click', async () => {
       config.hyphenation = hyphenConfig.checked;
-      config.statusBarPosition = statusBarConfig.value as 'none' | 'bottom' | 'right';
+      config.statusBarPosition = statusBarConfig.value === 'none' ? 'none' : 'bottom';
       config.readingMode = readingModeConfig.value === 'flow' ? 'flow' : 'paged';
       const parsedSpeed = Number.parseInt(flowSpeedConfig.value, 10);
       config.flowSpeedWpm = Number.isFinite(parsedSpeed)
