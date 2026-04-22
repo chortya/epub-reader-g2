@@ -124,6 +124,8 @@ export class EvenEpubClient {
   private currentBookFilename: string | null = null;
   private mainMenuSelectedIndex = 0;
   private launchIntent: LaunchIntent = null;
+  // Cached at showMainMenu time so the SELECT dispatch does not re-hit the bridge.
+  private continueReadingResolved: CachedBookMeta | null = null;
 
   // Settings-menu state (Stage 6). settingsListSelectedIndex indexes into
   // SETTINGS_MENU_KEYS; editingSettingKey is non-null while the editor view
@@ -451,11 +453,14 @@ export class EvenEpubClient {
     this.stopClockTicker();
     this.view = 'mainMenu';
 
-    // Three slots: Continue, Library (N), Settings. Slot 0 label is a
-    // placeholder in Stage 5 — Stage 7 wires it to resolveLastBook() output.
-    // The list is stable at 3 items, slot 3 is blank — see design decision Q3.
+    // Three slots: Continue, Library (N), Settings. Slot 0 label reflects
+    // whether a last book is resolvable (bookId-first via resolveLastBook).
+    // Stable 3-slot layout — see decision Q3. Slot 3 is blank.
+    const resolved = await this.resolveLastBookFromBridge();
+    this.continueReadingResolved = resolved;
+    const continueLabel = resolved ? 'Continue reading' : '(No recent book)';
     const libraryLabel = `Library (${this.cachedBookList.length})`;
-    const labels = ['Continue reading', libraryLabel, 'Settings', ''];
+    const labels = [continueLabel, libraryLabel, 'Settings', ''];
     const selectedSlot = Math.max(0, Math.min(2, this.mainMenuSelectedIndex));
     await this.rebuildSlots(labels, selectedSlot);
     setStatus(`Main menu: ${selectedSlot + 1}/3. Swipe=browse, Tap=open, DblTap=exit`);
@@ -1242,10 +1247,22 @@ export class EvenEpubClient {
    */
   private async onMainMenuSelect(): Promise<void> {
     switch (this.mainMenuSelectedIndex) {
-      case 0:
-        // Stage 7 wires this to onBookSelected(resolved).
-        appendEventLog('Continue reading: stub (wired in Stage 7)');
+      case 0: {
+        // Continue Reading: hand off to the same callback the bookPicker uses.
+        // If nothing is resolvable, slot 0 shows "(No recent book)" and the
+        // tap is a no-op (stable layout per Q3).
+        const resolved = this.continueReadingResolved;
+        if (!resolved || !this.onBookSelected) {
+          appendEventLog('No recent book to continue');
+          return;
+        }
+        try {
+          await this.onBookSelected(resolved);
+        } catch (e) {
+          console.warn('Continue Reading failed:', e);
+        }
         return;
+      }
       case 1:
         if (this.cachedBookList.length > 0) await this.showBookPicker();
         else await this.showWelcome();
