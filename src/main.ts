@@ -12,7 +12,6 @@ import {
   loadSettingsFromBridge,
   saveSettings,
   saveSettingsToBridge,
-  STORAGE_KEY_BOOK_TITLE,
   TEXT_HEIGHT_MAX_PERCENT,
   TEXT_HEIGHT_MIN_PERCENT,
   TEXT_HEIGHT_STEP_PERCENT,
@@ -66,6 +65,15 @@ async function main() {
 
     client = new EvenEpubClient(bridge as any);
 
+    // Register onLaunchSource BEFORE client.init() so runStartup's pickInitialView
+    // decision can consult the launch intent (per Codex #1 / design §3.1a).
+    // The callback just stashes the source; runStartup reads it after splash.
+    if ('onLaunchSource' in bridge) {
+      (bridge as any).onLaunchSource((source: 'appMenu' | 'glassesMenu') => {
+        client?.setLaunchIntent(source);
+      });
+    }
+
     // Wire up book selection from glasses-side picker
     client.onBookSelected = async (meta: CachedBookMeta) => {
       try {
@@ -104,26 +112,6 @@ async function main() {
       setStatus('Simulator ready');
     } else {
       setStatus('Connected');
-    }
-
-    // Auto-resume last book when launched from glasses menu
-    if ('onLaunchSource' in bridge) {
-      (bridge as any).onLaunchSource(async (source: string) => {
-        if (source === 'glassesMenu' && client) {
-          try {
-            const lastTitle = await (bridge as any).getLocalStorage(STORAGE_KEY_BOOK_TITLE);
-            if (!lastTitle) return;
-            const recent = await getRecentBooksFromDB(bridge as any);
-            const match = recent.find((r) => r.title === lastTitle);
-            if (match) {
-              const book = await parseEpub(match.buffer, match.filename);
-              await client.loadBook(book, true, makeBookId(match.filename, match.title), match.filename);
-            }
-          } catch (e) {
-            console.warn('Failed to auto-resume book:', e);
-          }
-        }
-      });
     }
 
     // Load library

@@ -13,6 +13,9 @@ import { mapGlassEvent } from 'even-toolkit/action-map';
 import { notifyTextUpdate, armImmediateScroll } from 'even-toolkit/gestures';
 import { createSplash, TILE_PRESETS } from 'even-toolkit/splash';
 import type { Book, ReadingPosition, ViewState, CachedBookMeta } from './types';
+import type { LaunchIntent } from './launch';
+import { pickInitialView } from './launch';
+import { resolveLastBook } from './book-id';
 import { paginateText } from './paginator';
 import {
   config,
@@ -62,6 +65,8 @@ export class EvenEpubClient {
   private bookPickerSelectedIndex = 0;
   private currentBookId: string | null = null;
   private currentBookFilename: string | null = null;
+  private mainMenuSelectedIndex = 0;
+  private launchIntent: LaunchIntent = null;
 
   // Clock ticker state (Stage 4). Only runs while the view is reading/flowReading.
   // 10 s poll period with a string-compare gate — wakes up often enough to catch
@@ -325,20 +330,64 @@ export class EvenEpubClient {
       console.warn('Splash failed, continuing:', e);
     }
 
-    // Show book picker or welcome
-    if (this.cachedBookList.length > 0) {
-      // Pre-select the last-read book if available
+    // Post-splash: decide between mainMenu and direct resume per §3.1a.
+    // Resolve the last book from L3 keys once, then let pickInitialView pick
+    // the view based on launch intent. For glassesMenu + resolvable book we
+    // bypass mainMenu and hand off to onBookSelected (same path as picker tap).
+    const lastBook = await this.resolveLastBookFromBridge();
+    const initial = pickInitialView(this.launchIntent, lastBook, config.readingMode);
+    if (initial !== 'mainMenu' && lastBook && this.onBookSelected) {
+      // Pre-select the book in the picker for correctness on back-out.
+      const idx = this.cachedBookList.findIndex((b) => b.bookId === lastBook.bookId);
+      if (idx >= 0) this.bookPickerSelectedIndex = idx;
       try {
-        const lastTitle = await this.bridge.getLocalStorage(STORAGE_KEY_BOOK_TITLE);
-        if (lastTitle) {
-          const idx = this.cachedBookList.findIndex(b => b.title === lastTitle);
-          if (idx >= 0) this.bookPickerSelectedIndex = idx;
-        }
-      } catch { /* */ }
-      await this.showBookPicker();
-    } else {
-      await this.showWelcome();
+        await this.onBookSelected(lastBook);
+        return;
+      } catch (e) {
+        console.warn('glassesMenu auto-resume failed; falling back to mainMenu:', e);
+      }
     }
+    await this.showMainMenu();
+  }
+
+  /** Read L3 keys from the bridge and resolve them against the cached book list. */
+  private async resolveLastBookFromBridge(): Promise<CachedBookMeta | null> {
+    if (this.cachedBookList.length === 0) return null;
+    try {
+      const [bookId, title, filename] = await Promise.all([
+        this.bridge.getLocalStorage(STORAGE_KEY_LAST_BOOK_ID),
+        this.bridge.getLocalStorage(STORAGE_KEY_BOOK_TITLE),
+        this.bridge.getLocalStorage(STORAGE_KEY_LAST_BOOK_FILENAME),
+      ]);
+      return resolveLastBook(this.cachedBookList, {
+        bookId: bookId || undefined,
+        title: title || undefined,
+        filename: filename || undefined,
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  /** Called by main.ts before init() so runStartup can consult the launch source. */
+  public setLaunchIntent(intent: LaunchIntent): void {
+    this.launchIntent = intent;
+  }
+
+  private async showMainMenu(): Promise<void> {
+    this.stopFlow();
+    this.stopClockTicker();
+    this.view = 'mainMenu';
+
+    // Three slots: Continue, Library (N), Settings. Slot 0 label is a
+    // placeholder in Stage 5 — Stage 7 wires it to resolveLastBook() output.
+    // The list is stable at 3 items, slot 3 is blank — see design decision Q3.
+    const libraryLabel = `Library (${this.cachedBookList.length})`;
+    const labels = ['Continue reading', libraryLabel, 'Settings', ''];
+    const selectedSlot = Math.max(0, Math.min(2, this.mainMenuSelectedIndex));
+    await this.rebuildSlots(labels, selectedSlot);
+    setStatus(`Main menu: ${selectedSlot + 1}/3. Swipe=browse, Tap=open, DblTap=exit`);
+    this.onViewChanged?.();
   }
 
   private async showBookPicker(): Promise<void> {
@@ -916,11 +965,13 @@ export class EvenEpubClient {
           else if (this.view === 'flowReading') await this.nextChapterInFlow();
           else if (this.view === 'library') await this.nextChapterInList();
           else if (this.view === 'bookPicker') await this.nextBookInPicker();
+          else if (this.view === 'mainMenu') await this.nextMainMenuSlot();
         } else {
           if (this.view === 'reading') await this.prevPage();
           else if (this.view === 'flowReading') await this.prevChapterInFlow();
           else if (this.view === 'library') await this.prevChapterInList();
           else if (this.view === 'bookPicker') await this.prevBookInPicker();
+          else if (this.view === 'mainMenu') await this.prevMainMenuSlot();
         }
         break;
 
@@ -938,6 +989,8 @@ export class EvenEpubClient {
               console.warn('Book selection failed:', e);
             }
           }
+        } else if (this.view === 'mainMenu') {
+          await this.onMainMenuSelect();
         }
         break;
 
@@ -951,17 +1004,55 @@ export class EvenEpubClient {
             await this.showChapterList();
           }
         } else if (this.view === 'library' && this.book) {
+          // Back from chapter list now routes to mainMenu (was bookPicker/welcome).
           this.book = null;
           this.stopFlow();
-          if (this.cachedBookList.length > 0) {
-            await this.showBookPicker();
-          } else {
-            await this.showWelcome();
-          }
+          await this.showMainMenu();
         } else if (this.view === 'bookPicker' || (this.view === 'library' && !this.book)) {
+          // Back from picker/welcome now routes to mainMenu (was exit-app).
+          await this.showMainMenu();
+        } else if (this.view === 'mainMenu') {
+          // Exit-app lives on mainMenu dbltap now.
           try { await this.bridge.shutDownPageContainer(1); } catch { /* */ }
         }
         break;
+    }
+  }
+
+  // Main-menu navigation (3 fixed slots — see design §3.2).
+  private async nextMainMenuSlot(): Promise<void> {
+    if (this.mainMenuSelectedIndex < 2) {
+      this.mainMenuSelectedIndex++;
+      await this.showMainMenu();
+    }
+  }
+
+  private async prevMainMenuSlot(): Promise<void> {
+    if (this.mainMenuSelectedIndex > 0) {
+      this.mainMenuSelectedIndex--;
+      await this.showMainMenu();
+    }
+  }
+
+  /**
+   * Dispatch a SELECT_HIGHLIGHTED event on the mainMenu. Slot 0 (Continue) is
+   * a stub here — Stage 7 replaces it with resolveLastBook-driven hand-off.
+   * Slot 2 (Settings) is a stub — Stage 6 replaces it with showSettingsMenu().
+   */
+  private async onMainMenuSelect(): Promise<void> {
+    switch (this.mainMenuSelectedIndex) {
+      case 0:
+        // Stage 7 wires this to onBookSelected(resolved).
+        appendEventLog('Continue reading: stub (wired in Stage 7)');
+        return;
+      case 1:
+        if (this.cachedBookList.length > 0) await this.showBookPicker();
+        else await this.showWelcome();
+        return;
+      case 2:
+        // Stage 6 wires this to showSettingsMenu().
+        appendEventLog('Settings: stub (wired in Stage 6)');
+        return;
     }
   }
 

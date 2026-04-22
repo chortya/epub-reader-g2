@@ -8,7 +8,7 @@ export type Book = {
   chapters: Chapter[];
 };
 
-export type ViewState = 'bookPicker' | 'library' | 'reading' | 'flowReading';
+export type ViewState = 'mainMenu' | 'bookPicker' | 'library' | 'reading' | 'flowReading';
 
 export type ReadingPosition = {
   chapterIndex: number;
