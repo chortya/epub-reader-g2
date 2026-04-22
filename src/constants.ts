@@ -26,6 +26,25 @@ export const SWIPE_COOLDOWN_MS = 300;
 export const FLOW_MIN_WPM = 120;
 export const FLOW_MAX_WPM = 600;
 
+// Editor presentation value sets. These drive the on-device settings editor
+// (see docs/1.4.0-on-device-settings-and-menu.md §4.2). They are NOT used for
+// validation — loadSettings continues to clamp free-form input to the full
+// [MIN, MAX] range. A rogue blob containing flowSpeedWpm=999 is clamped to 600
+// and the editor pre-selection algorithm picks the nearest valid step.
+export const FLOW_SPEED_VALUES = [
+  120, 150, 180, 210, 240, 270, 300, 330, 360,
+  390, 420, 450, 480, 510, 540, 570, 600,
+] as const;
+
+export const TEXT_HEIGHT_VALUES = [50, 60, 70, 80, 90, 100] as const;
+
+export type SettingKey =
+  | 'hyphenation'
+  | 'statusBarPosition'
+  | 'readingMode'
+  | 'flowSpeedWpm'
+  | 'textHeightPercent';
+
 export type AppConfig = {
     hyphenation: boolean;
     statusBarPosition: 'bottom' | 'none';
@@ -192,4 +211,98 @@ export function getTextLayout(): {
     topBlankLines,
     barHeight,
   };
+}
+
+// --- v1.4.0 pure helpers (consumed by clock ticker, settings menu, editor) ---
+
+function zeroPad2(n: number): string {
+  return n < 10 ? `0${n}` : `${n}`;
+}
+
+/**
+ * Build the single-line footer string for the horizontal status bar:
+ *
+ *   "HH:MM  <infoText>[━━━──────]"
+ *
+ * The progress bar width is derived from (maxChars - clock - infoText - brackets),
+ * clamped to a sane minimum so cramped infoText never produces a negative-length
+ * bar. The bar is omitted entirely if no width is left.
+ *
+ * Pure function; all inputs explicit so it is test-friendly without a DOM or a
+ * real clock. See docs/1.4.0-on-device-settings-and-menu.md §7.2.
+ */
+export function formatStatusLine(args: {
+  now: Date;
+  infoText: string;
+  maxChars: number;
+  progress: number;
+}): string {
+  const { now, infoText, maxChars, progress } = args;
+  const hhmm = `${zeroPad2(now.getHours())}:${zeroPad2(now.getMinutes())}`;
+  const prefix = `${hhmm}  `;
+  const clampedProgress = Math.max(0, Math.min(1, progress));
+
+  // Reserve brackets. Bar width is whatever remains after clock + infoText.
+  const BRACKETS = 2;
+  const rawBarLen = maxChars - prefix.length - infoText.length - BRACKETS;
+
+  if (rawBarLen <= 0) {
+    // Not enough room for even a 1-char bar; drop the bar entirely rather than
+    // render something misleading or crash on a negative repeat.
+    return `${prefix}${infoText}`.slice(0, maxChars);
+  }
+
+  const barLen = Math.max(5, Math.min(20, rawBarLen));
+  const filled = Math.round(barLen * clampedProgress);
+  const empty = barLen - filled;
+  const bar = '━'.repeat(filled) + '─'.repeat(empty);
+  return `${prefix}${infoText}[${bar}]`;
+}
+
+/**
+ * Render a single row for the on-device settings list, given the current
+ * config. Format: "{Label}: {formatted value}".
+ */
+export function formatSettingsRow(key: SettingKey, cfg: AppConfig): string {
+  switch (key) {
+    case 'hyphenation':
+      return `Hyphenation: ${cfg.hyphenation ? 'ON' : 'OFF'}`;
+    case 'statusBarPosition':
+      return `Status bar: ${cfg.statusBarPosition === 'bottom' ? 'Bottom' : 'Hidden'}`;
+    case 'readingMode':
+      return `Reading mode: ${cfg.readingMode === 'flow' ? 'Flow' : 'Paged'}`;
+    case 'flowSpeedWpm':
+      return `Flow speed: ${cfg.flowSpeedWpm} wpm`;
+    case 'textHeightPercent':
+      return `Text height: ${cfg.textHeightPercent}%`;
+  }
+}
+
+/**
+ * Mutate `cfg` in place, setting the slot named by `key` from the editor's
+ * value-list at position `index`. Index bounds are assumed to come from a
+ * paginated list whose length matches the value array; callers must not pass
+ * out-of-range indices.
+ */
+export function applyEditorValue(cfg: AppConfig, key: SettingKey, index: number): void {
+  switch (key) {
+    case 'hyphenation':
+      // Editor list: [ON, OFF] → [true, false].
+      cfg.hyphenation = index === 0;
+      return;
+    case 'statusBarPosition':
+      // Editor list: [Bottom, Hidden] → ['bottom', 'none'].
+      cfg.statusBarPosition = index === 0 ? 'bottom' : 'none';
+      return;
+    case 'readingMode':
+      // Editor list: [Paged, Flow] → ['paged', 'flow'].
+      cfg.readingMode = index === 0 ? 'paged' : 'flow';
+      return;
+    case 'flowSpeedWpm':
+      cfg.flowSpeedWpm = FLOW_SPEED_VALUES[index];
+      return;
+    case 'textHeightPercent':
+      cfg.textHeightPercent = TEXT_HEIGHT_VALUES[index];
+      return;
+  }
 }
