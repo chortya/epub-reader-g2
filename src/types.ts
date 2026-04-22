@@ -8,7 +8,14 @@ export type Book = {
   chapters: Chapter[];
 };
 
-export type ViewState = 'mainMenu' | 'bookPicker' | 'library' | 'reading' | 'flowReading';
+export type ViewState =
+  | 'mainMenu'
+  | 'bookPicker'
+  | 'library'
+  | 'reading'
+  | 'flowReading'
+  | 'settings'        // list of 5 editable settings
+  | 'settingEditor';  // value-picker for the focused setting
 
 export type ReadingPosition = {
   chapterIndex: number;

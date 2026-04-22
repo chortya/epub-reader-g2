@@ -23,13 +23,20 @@ import {
   DISPLAY_WIDTH,
   FLOW_MAX_WPM,
   FLOW_MIN_WPM,
+  FLOW_SPEED_VALUES,
   STORAGE_KEY_BOOK_TITLE,
   STORAGE_KEY_FLOW_POSITION,
   STORAGE_KEY_LAST_BOOK_FILENAME,
   STORAGE_KEY_LAST_BOOK_ID,
   STORAGE_KEY_POSITION,
+  TEXT_HEIGHT_VALUES,
+  applyEditorValue,
+  formatSettingsRow,
   formatStatusLine,
   getTextLayout,
+  saveSettings,
+  saveSettingsToBridge,
+  type SettingKey,
 } from './constants';
 import { clamp, setStatus, truncateForList, appendEventLog } from './utils';
 import { createSplashBridgeAdapter } from './splash-bridge';
@@ -45,6 +52,56 @@ type FlowPageData = {
 };
 
 const BOOK_LIST_KEY = 'epub-book-list';
+
+// Order in which settings appear in the on-device menu. Kept here (not in
+// constants.ts) because the rendering concern is per-view.
+const SETTINGS_MENU_KEYS: readonly SettingKey[] = [
+  'hyphenation',
+  'statusBarPosition',
+  'readingMode',
+  'flowSpeedWpm',
+  'textHeightPercent',
+];
+
+// Value arrays for each key's editor. Enums/booleans are inlined; numeric
+// ranges come from constants.ts. Order matches applyEditorValue's index map.
+const EDITOR_VALUE_LABELS: Record<SettingKey, readonly string[]> = {
+  hyphenation: ['ON', 'OFF'],
+  statusBarPosition: ['Bottom', 'Hidden'],
+  readingMode: ['Paged', 'Flow'],
+  flowSpeedWpm: FLOW_SPEED_VALUES.map((v) => `${v} wpm`),
+  textHeightPercent: TEXT_HEIGHT_VALUES.map((v) => `${v}%`),
+};
+
+function currentEditorIndex(key: SettingKey): number {
+  switch (key) {
+    case 'hyphenation':
+      return config.hyphenation ? 0 : 1;
+    case 'statusBarPosition':
+      return config.statusBarPosition === 'bottom' ? 0 : 1;
+    case 'readingMode':
+      return config.readingMode === 'paged' ? 0 : 1;
+    case 'flowSpeedWpm': {
+      // argmin |v − config.flowSpeedWpm|
+      let best = 0;
+      let bestDist = Infinity;
+      for (let i = 0; i < FLOW_SPEED_VALUES.length; i++) {
+        const d = Math.abs(FLOW_SPEED_VALUES[i] - config.flowSpeedWpm);
+        if (d < bestDist) { best = i; bestDist = d; }
+      }
+      return best;
+    }
+    case 'textHeightPercent': {
+      let best = 0;
+      let bestDist = Infinity;
+      for (let i = 0; i < TEXT_HEIGHT_VALUES.length; i++) {
+        const d = Math.abs(TEXT_HEIGHT_VALUES[i] - config.textHeightPercent);
+        if (d < bestDist) { best = i; bestDist = d; }
+      }
+      return best;
+    }
+  }
+}
 
 export class EvenEpubClient {
   private view: ViewState = 'library'; // Starts as library (welcome), transitions after init
@@ -67,6 +124,13 @@ export class EvenEpubClient {
   private currentBookFilename: string | null = null;
   private mainMenuSelectedIndex = 0;
   private launchIntent: LaunchIntent = null;
+
+  // Settings-menu state (Stage 6). settingsListSelectedIndex indexes into
+  // SETTINGS_MENU_KEYS; editingSettingKey is non-null while the editor view
+  // is active; editorSelectedIndex indexes into the per-key value array.
+  private settingsListSelectedIndex = 0;
+  private editingSettingKey: SettingKey | null = null;
+  private editorSelectedIndex = 0;
 
   // Clock ticker state (Stage 4). Only runs while the view is reading/flowReading.
   // 10 s poll period with a string-compare gate — wakes up often enough to catch
@@ -179,7 +243,15 @@ export class EvenEpubClient {
       const maxWordIndex = Math.max(0, (flowPage?.wordCount ?? 1) - 1);
       this.flowWordIndex = clamp(this.flowWordIndex, 0, maxWordIndex);
 
-      if (config.readingMode === 'flow' && this.view === 'reading') {
+      // Stage 6 guard: when the user edited a setting from the on-device
+      // settings UI, we only repaginate — we do NOT auto-switch into the
+      // reading view. commitEditor() will route the user back to the
+      // settings list; the user chooses when to return to reading via
+      // mainMenu -> Continue. Also invalidate flowLayoutReady so the next
+      // re-entry into flow does a full rebuild.
+      if (this.view === 'settings' || this.view === 'settingEditor') {
+        this.flowLayoutReady = false;
+      } else if (config.readingMode === 'flow' && this.view === 'reading') {
         this.flowWordIndex = 0;
         await this.showFlowReading(false);
       } else if (config.readingMode === 'paged' && this.view === 'flowReading') {
@@ -388,6 +460,120 @@ export class EvenEpubClient {
     await this.rebuildSlots(labels, selectedSlot);
     setStatus(`Main menu: ${selectedSlot + 1}/3. Swipe=browse, Tap=open, DblTap=exit`);
     this.onViewChanged?.();
+  }
+
+  private async showSettingsMenu(): Promise<void> {
+    this.stopFlow();
+    this.stopClockTicker();
+    this.view = 'settings';
+    this.editingSettingKey = null;
+
+    const total = SETTINGS_MENU_KEYS.length;
+    const pageStart = Math.floor(this.settingsListSelectedIndex / ITEMS_PER_PAGE) * ITEMS_PER_PAGE;
+    const selectedSlot = this.settingsListSelectedIndex - pageStart;
+
+    const labels: string[] = [];
+    for (let i = 0; i < ITEMS_PER_PAGE; i++) {
+      const idx = pageStart + i;
+      labels.push(idx < total ? formatSettingsRow(SETTINGS_MENU_KEYS[idx], config) : '');
+    }
+
+    await this.rebuildSlots(labels, selectedSlot);
+    setStatus(`Settings: ${this.settingsListSelectedIndex + 1}/${total}. Swipe=browse, Tap=edit, DblTap=back`);
+    this.onViewChanged?.();
+  }
+
+  private async showSettingEditor(key: SettingKey): Promise<void> {
+    this.stopFlow();
+    this.stopClockTicker();
+    this.view = 'settingEditor';
+    this.editingSettingKey = key;
+    this.editorSelectedIndex = currentEditorIndex(key);
+
+    const values = EDITOR_VALUE_LABELS[key];
+    const total = values.length;
+    const pageStart = Math.floor(this.editorSelectedIndex / ITEMS_PER_PAGE) * ITEMS_PER_PAGE;
+    const selectedSlot = this.editorSelectedIndex - pageStart;
+
+    const labels: string[] = [];
+    for (let i = 0; i < ITEMS_PER_PAGE; i++) {
+      const idx = pageStart + i;
+      labels.push(idx < total ? values[idx] : '');
+    }
+    await this.rebuildSlots(labels, selectedSlot);
+    setStatus(`Edit ${key}: ${this.editorSelectedIndex + 1}/${total}. Swipe=move, Tap=save, DblTap=cancel`);
+  }
+
+  /**
+   * Commit the currently-highlighted editor value. Bridge write runs in
+   * parallel with applySettings per Codex #3 / design §4.4 — the user sees
+   * the updated UI immediately regardless of bridge latency.
+   */
+  private async commitEditor(): Promise<void> {
+    const key = this.editingSettingKey;
+    if (key === null) return;
+    applyEditorValue(config, key, this.editorSelectedIndex);
+    saveSettings();
+    const bridgeWrite = saveSettingsToBridge(this.bridge as any)
+      .catch((e) => console.warn('commitEditor: bridge write failed:', e));
+    try {
+      await this.applySettings();
+    } catch (e) {
+      console.warn('commitEditor: applySettings failed:', e);
+    }
+    await this.showSettingsMenu();
+    await bridgeWrite;
+  }
+
+  private async nextSettingsListItem(): Promise<void> {
+    if (this.settingsListSelectedIndex < SETTINGS_MENU_KEYS.length - 1) {
+      this.settingsListSelectedIndex++;
+      await this.showSettingsMenu();
+    }
+  }
+
+  private async prevSettingsListItem(): Promise<void> {
+    if (this.settingsListSelectedIndex > 0) {
+      this.settingsListSelectedIndex--;
+      await this.showSettingsMenu();
+    }
+  }
+
+  private async nextEditorValue(): Promise<void> {
+    const key = this.editingSettingKey;
+    if (!key) return;
+    const total = EDITOR_VALUE_LABELS[key].length;
+    if (this.editorSelectedIndex < total - 1) {
+      this.editorSelectedIndex++;
+      // Rerender via the same path; avoid re-reading config because we want
+      // the user's in-flight pick (not the committed value) reflected.
+      await this.rerenderEditor();
+    }
+  }
+
+  private async prevEditorValue(): Promise<void> {
+    if (!this.editingSettingKey) return;
+    if (this.editorSelectedIndex > 0) {
+      this.editorSelectedIndex--;
+      await this.rerenderEditor();
+    }
+  }
+
+  private async rerenderEditor(): Promise<void> {
+    const key = this.editingSettingKey;
+    if (!key) return;
+    const values = EDITOR_VALUE_LABELS[key];
+    const total = values.length;
+    const pageStart = Math.floor(this.editorSelectedIndex / ITEMS_PER_PAGE) * ITEMS_PER_PAGE;
+    const selectedSlot = this.editorSelectedIndex - pageStart;
+
+    const labels: string[] = [];
+    for (let i = 0; i < ITEMS_PER_PAGE; i++) {
+      const idx = pageStart + i;
+      labels.push(idx < total ? values[idx] : '');
+    }
+    await this.rebuildSlots(labels, selectedSlot);
+    setStatus(`Edit ${key}: ${this.editorSelectedIndex + 1}/${total}. Swipe=move, Tap=save, DblTap=cancel`);
   }
 
   private async showBookPicker(): Promise<void> {
@@ -966,12 +1152,16 @@ export class EvenEpubClient {
           else if (this.view === 'library') await this.nextChapterInList();
           else if (this.view === 'bookPicker') await this.nextBookInPicker();
           else if (this.view === 'mainMenu') await this.nextMainMenuSlot();
+          else if (this.view === 'settings') await this.nextSettingsListItem();
+          else if (this.view === 'settingEditor') await this.nextEditorValue();
         } else {
           if (this.view === 'reading') await this.prevPage();
           else if (this.view === 'flowReading') await this.prevChapterInFlow();
           else if (this.view === 'library') await this.prevChapterInList();
           else if (this.view === 'bookPicker') await this.prevBookInPicker();
           else if (this.view === 'mainMenu') await this.prevMainMenuSlot();
+          else if (this.view === 'settings') await this.prevSettingsListItem();
+          else if (this.view === 'settingEditor') await this.prevEditorValue();
         }
         break;
 
@@ -991,6 +1181,11 @@ export class EvenEpubClient {
           }
         } else if (this.view === 'mainMenu') {
           await this.onMainMenuSelect();
+        } else if (this.view === 'settings') {
+          const key = SETTINGS_MENU_KEYS[this.settingsListSelectedIndex];
+          if (key) await this.showSettingEditor(key);
+        } else if (this.view === 'settingEditor') {
+          await this.commitEditor();
         }
         break;
 
@@ -1014,6 +1209,12 @@ export class EvenEpubClient {
         } else if (this.view === 'mainMenu') {
           // Exit-app lives on mainMenu dbltap now.
           try { await this.bridge.shutDownPageContainer(1); } catch { /* */ }
+        } else if (this.view === 'settings') {
+          await this.showMainMenu();
+        } else if (this.view === 'settingEditor') {
+          // Cancel: discard the highlighted value, return to settings list.
+          this.editingSettingKey = null;
+          await this.showSettingsMenu();
         }
         break;
     }
@@ -1050,8 +1251,8 @@ export class EvenEpubClient {
         else await this.showWelcome();
         return;
       case 2:
-        // Stage 6 wires this to showSettingsMenu().
-        appendEventLog('Settings: stub (wired in Stage 6)');
+        this.settingsListSelectedIndex = 0;
+        await this.showSettingsMenu();
         return;
     }
   }
