@@ -22,6 +22,8 @@ import {
   FLOW_MIN_WPM,
   STORAGE_KEY_BOOK_TITLE,
   STORAGE_KEY_FLOW_POSITION,
+  STORAGE_KEY_LAST_BOOK_FILENAME,
+  STORAGE_KEY_LAST_BOOK_ID,
   STORAGE_KEY_POSITION,
   getTextLayout,
 } from './constants';
@@ -58,6 +60,7 @@ export class EvenEpubClient {
   private cachedBookList: CachedBookMeta[] = [];
   private bookPickerSelectedIndex = 0;
   private currentBookId: string | null = null;
+  private currentBookFilename: string | null = null;
 
   public onViewChanged?: () => void;
   public onPositionChanged?: (chapterIndex: number, pageIndex: number) => void;
@@ -94,10 +97,16 @@ export class EvenEpubClient {
     }
   }
 
-  async loadBook(book: Book, resume: boolean = false, bookId?: string): Promise<void> {
+  async loadBook(
+    book: Book,
+    resume: boolean = false,
+    bookId?: string,
+    filename?: string,
+  ): Promise<void> {
     this.stopFlow();
     this.book = book;
     this.currentBookId = bookId ?? null;
+    this.currentBookFilename = filename ?? null;
     this.chapterPages = book.chapters.map((ch) => paginateText(ch.text));
     this.flowPageData = this.buildFlowPageData(this.chapterPages);
 
@@ -1046,6 +1055,13 @@ export class EvenEpubClient {
       }
       await this.bridge.setLocalStorage(titleKey, json);
       await this.bridge.setLocalStorage(STORAGE_KEY_BOOK_TITLE, this.book.title);
+      // L3 invariant I1 (design §8.5): title, bookId, filename written together.
+      if (this.currentBookId) {
+        await this.bridge.setLocalStorage(STORAGE_KEY_LAST_BOOK_ID, this.currentBookId);
+      }
+      if (this.currentBookFilename) {
+        await this.bridge.setLocalStorage(STORAGE_KEY_LAST_BOOK_FILENAME, this.currentBookFilename);
+      }
 
       // Also save to browser localStorage as fallback (bridge storage may not persist)
       try { localStorage.setItem(titleKey, json); } catch { /* */ }
@@ -1125,6 +1141,13 @@ export class EvenEpubClient {
       }
       await this.bridge.setLocalStorage(`${STORAGE_KEY_FLOW_POSITION}-${this.book.title}`, json);
       await this.bridge.setLocalStorage(STORAGE_KEY_BOOK_TITLE, this.book.title);
+      // L3 invariant I1 (design §8.5): title, bookId, filename written together.
+      if (this.currentBookId) {
+        await this.bridge.setLocalStorage(STORAGE_KEY_LAST_BOOK_ID, this.currentBookId);
+      }
+      if (this.currentBookFilename) {
+        await this.bridge.setLocalStorage(STORAGE_KEY_LAST_BOOK_FILENAME, this.currentBookFilename);
+      }
       // Browser localStorage fallback
       try {
         localStorage.setItem(`${STORAGE_KEY_FLOW_POSITION}-${this.book.title}`, json);

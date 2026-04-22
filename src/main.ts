@@ -81,7 +81,7 @@ async function main() {
           return;
         }
         const book = await parseEpub(cached.buffer, cached.filename);
-        await client!.loadBook(book, true, makeBookId(cached.filename, cached.title));
+        await client!.loadBook(book, true, makeBookId(cached.filename, cached.title), cached.filename);
         await renderLibrary(client!, bridge as any);
       } catch (e) {
         console.error('Failed to load book from picker:', e);
@@ -117,7 +117,7 @@ async function main() {
             const match = recent.find((r) => r.title === lastTitle);
             if (match) {
               const book = await parseEpub(match.buffer, match.filename);
-              await client.loadBook(book, true, makeBookId(match.filename, match.title));
+              await client.loadBook(book, true, makeBookId(match.filename, match.title), match.filename);
             }
           } catch (e) {
             console.warn('Failed to auto-resume book:', e);
@@ -262,7 +262,7 @@ async function main() {
 
         if (client) {
           const id = makeBookId(file.name, book.title);
-          await client.loadBook(book, false, id);
+          await client.loadBook(book, false, id, file.name);
           await renderLibrary(client, bridge as any);
         }
         setStatus(`Loaded: ${book.title}`);
@@ -302,7 +302,7 @@ async function main() {
               await saveEpubBufferToDB(arrayBuffer, b.title + '.epub', book.title, bridge as any);
 
               if (client) {
-                await client.loadBook(book, false, makeBookId(b.title + '.epub', book.title));
+                await client.loadBook(book, false, makeBookId(b.title + '.epub', book.title), b.title + '.epub');
                 await renderLibrary(client, bridge as any);
               }
               setStatus(`Loaded: ${book.title}`);
@@ -372,7 +372,7 @@ async function main() {
           try {
             setStatus(`Loading: ${meta.title}...`);
             const book = await parseEpub(local.buffer, meta.filename);
-            await clientToUse.loadBook(book, true, meta.bookId);
+            await clientToUse.loadBook(book, true, meta.bookId, meta.filename);
             await renderLibrary(clientToUse, bridgeRef);
           } catch (e) {
             console.error(e);

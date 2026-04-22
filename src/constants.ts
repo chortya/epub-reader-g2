@@ -167,6 +167,12 @@ export const STORAGE_KEY_POSITION = 'epub-reading-position';
 export const STORAGE_KEY_FLOW_POSITION = 'epub-flow-position';
 export const STORAGE_KEY_BOOK_TITLE = 'epub-book-title';
 
+// v1.4.0 L3 keys — written alongside STORAGE_KEY_BOOK_TITLE on every save so
+// "Continue reading" on the mainMenu can resolve by bookId/filename instead of
+// by title alone. See design §3.2, §8.5, and decision Q6.
+export const STORAGE_KEY_LAST_BOOK_ID = 'epub-last-book-id';
+export const STORAGE_KEY_LAST_BOOK_FILENAME = 'epub-last-book-filename';
+
 /**
  * Layout for the reading text container given current config.
  *
