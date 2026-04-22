@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.4.0] - (unreleased)
+
+### Added
+- _(filled in as stages land)_
+
+### Changed
+- _(filled in as stages land)_
+
+### Removed
+- _(filled in as stages land)_
+
+### Migration
+- _(filled in as stages land)_
+
 ## [v1.3.1] - 2026-04-22
 
 ### Fixed
