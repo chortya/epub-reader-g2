@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.4.1] - 2026-04-22
+
+### Added
+- **Quick mode switch during reading.** A single tap in paged reading now switches to flow mode at the current chapter/page and auto-starts. A double-tap while flow is **paused** switches back to paged reading at the same position. This makes it possible to toggle reading styles without going to Settings. Design rationale and rejected alternatives in `docs/1.4.0-on-device-settings-and-menu.md` §6 (Phase 2, now shipped).
+
+### Changed
+- **Double-tap from paused flow** now returns to paged reading (was: chapter list). Reaching the chapter list from flow mode now costs one extra gesture: pause (tap) → switch to paged (double-tap) → chapter list (double-tap). Acceptable trade-off for always-available mode switching.
+
+### Note
+- **Running flow is protected from the mode switch** (decision Q1 → A1): double-tap while flow is actively running is a no-op. This preserves v1.3.x behavior and guards against accidental exits mid-reading. To switch modes from running flow, tap once to pause first.
+- **No discoverability hint** (decision Q5 → B): the new gesture is documented here and in the README controls table. If post-release feedback shows the tap-in-paged behavior is undiscoverable, a one-shot on-screen hint can be added in a future release. Universal fallback remains: `Main Menu → Settings → Reading mode` toggles the mode globally.
+
+## [v1.4.0] - 2026-04-22
+
 ## [v1.4.0] - 2026-04-22
 
 ### Added
