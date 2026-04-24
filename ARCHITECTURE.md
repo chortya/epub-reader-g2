@@ -282,7 +282,7 @@ view:
   yPosition: 0,                      // anchored at the top
   maxLines,                          // how many text lines the paginator produces
   topBlankLines,                     // how many blank lines to prepend at render time
-  barHeight,                         // 30 or 0. In v1.4.1, cropped heights reserve one blank line (BLANK_OVERFLOW_RESERVE) so total rendered content caps at 8 (with bar) or 9 (without), avoiding the SDK's scroll indicator at 50–90% text heights.
+  barHeight,                         // 30 or 0
 }
 ```
 

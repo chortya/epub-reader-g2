@@ -224,17 +224,14 @@ export function getTextLayout(): {
   );
   const displayLines = Math.max(1, Math.floor(availableHeight / LINE_HEIGHT_PX));
   const maxLines = Math.max(1, Math.min(displayLines, Math.floor(targetUsable / LINE_HEIGHT_PX)));
-  // BLANK_OVERFLOW_RESERVE: reduce blank padding by 1 line at cropped heights.
-  // Rationale: blank padding lines measure at the G2's actual line pitch
-  // (~28.67 px), so 9 lines total is 258.03 px — 0.03 px over the 258 px
-  // container. At 100% all lines are real text; the last line often has
-  // no descenders so the SDK tolerates the marginal overflow. At cropped
-  // heights the blank lines at the top always measure full-pitch and the
-  // overflow shows as the SDK's scroll indicator. Reducing blank padding
-  // by 1 caps total rendered content at 8 (with bar) / 9 (without), which
-  // fits with ~29 px of headroom and eliminates the overflow entirely.
-  const blankOverflowReserve = maxLines < displayLines ? 1 : 0;
-  const topBlankLines = Math.max(0, displayLines - maxLines - blankOverflowReserve);
+  // Blank padding fills the top of the container so the text sits at the
+  // bottom (cropped-from-top visual). 9 total lines at measured pitch
+  // ~28.67 px overflows the 258 px container by 0.03 px — in practice the
+  // SDK tolerates this marginal overflow and the real scroll-indicator
+  // artefact seen in v1.3.1 was horizontal (label wrapping inside the
+  // footer), not vertical. Keep the padding full so there's no visible
+  // gap between the text content and the status bar.
+  const topBlankLines = Math.max(0, displayLines - maxLines);
   return {
     availableHeight,
     usableHeight: availableHeight, // container always fills the area below the status bar
@@ -284,12 +281,13 @@ export function formatStatusLine(args: {
     return `${prefix}${infoText}`.slice(0, maxChars);
   }
 
-  // Cap at 10 cells: the heavy/light horizontal box-drawing glyphs ('━', '─')
-  // render wider than one monospace cell on the G2 display, so a 20-cell bar
-  // in the string ends up taking closer to 30–40 px-cells of actual width,
-  // which combined with the v1.4.0 clock prefix pushed the label past 576 px
-  // and made the footer wrap to a second line. 10 keeps total label ≤ 40
-  // cells even in the worst case and leaves comfortable horizontal margin.
+  // Cap at 10 cells. The heavy/light horizontal box-drawing glyphs ('━', '─')
+  // render slightly wider than one monospace cell on the G2, so the older
+  // 20-cell cap plus the v1.4.0 clock prefix pushed the label past 576 px
+  // and wrapped. The binding constraint is the flow-running label
+  // ("RUN 600wpm Ch 12/99 Pg 123/256") which is already 32 cells of infoText
+  // — 10 bar cells keeps the rendered worst case safely under 59 even when
+  // the box glyphs take ~1.5 cell-widths.
   const barLen = Math.max(5, Math.min(10, rawBarLen));
   const filled = Math.round(barLen * clampedProgress);
   const empty = barLen - filled;

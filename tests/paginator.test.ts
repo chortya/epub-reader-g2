@@ -126,48 +126,29 @@ test('getTextLayout: container always covers the full available area (for event 
   }
 });
 
-test('getTextLayout: rendered-line total at 100% matches legacy 9/10 count', () => {
-  // At 100% there is no blank padding, so total rendered lines == maxLines.
-  // This is the count that defines "lines of text per full page".
-  const snapshot = { ...config };
-  try {
-    config.textHeightPercent = 100;
-
-    config.statusBarPosition = 'bottom';
-    assert.equal(getTextLayout().maxLines + getTextLayout().topBlankLines, 9);
-
-    config.statusBarPosition = 'none';
-    assert.equal(getTextLayout().maxLines + getTextLayout().topBlankLines, 10);
-  } finally {
-    Object.assign(config, snapshot);
-  }
-});
-
-test('getTextLayout: cropped heights reserve 1 blank line to avoid overflow', () => {
-  // v1.4.1 overflow fix: blank padding at cropped heights measures at full
-  // G2_LINE_PITCH_PX, so rendering 9 lines total (blank + text) overflows
-  // the 258 px container by 0.03 px and triggers the SDK scroll indicator.
-  // The fix caps total rendered content at (displayLines − 1) when cropped.
+test('getTextLayout: topBlankLines + maxLines fills the full display line count', () => {
+  // Total rendered content (blank padding + text) exactly fills the container,
+  // so there's no visible gap between the text and the status bar.
   const snapshot = { ...config };
   try {
     config.statusBarPosition = 'bottom';
-    for (const percent of [50, 60, 70, 80, 90]) {
-      config.textHeightPercent = percent;
-      const layout = getTextLayout();
-      assert.equal(
-        layout.topBlankLines + layout.maxLines,
-        8,
-        `at bar ${percent}% content + blank padding must equal 8 (displayLines − 1) to avoid overflow`,
-      );
-    }
-    config.statusBarPosition = 'none';
-    for (const percent of [50, 60, 70, 80, 90]) {
+    for (const percent of [50, 60, 70, 80, 90, 100]) {
       config.textHeightPercent = percent;
       const layout = getTextLayout();
       assert.equal(
         layout.topBlankLines + layout.maxLines,
         9,
-        `at no-bar ${percent}% content + blank padding must equal 9 (displayLines − 1) to avoid overflow`,
+        `at bar ${percent}% content + blank padding must equal 9`,
+      );
+    }
+    config.statusBarPosition = 'none';
+    for (const percent of [50, 60, 70, 80, 90, 100]) {
+      config.textHeightPercent = percent;
+      const layout = getTextLayout();
+      assert.equal(
+        layout.topBlankLines + layout.maxLines,
+        10,
+        `at no-bar ${percent}% content + blank padding must equal 10`,
       );
     }
   } finally {
@@ -192,16 +173,14 @@ test('getTextLayout: 100% has no blank padding', () => {
   }
 });
 
-test('getTextLayout: 50% + bar has 4 blank lines padding the content down', () => {
-  // v1.4.1: was 5 blank lines; reduced to 4 to prevent 9 × G2_LINE_PITCH_PX
-  // overflow of the 258 px container (see BLANK_OVERFLOW_RESERVE).
+test('getTextLayout: 50% + bar has 5 blank lines padding the content down', () => {
   const snapshot = { ...config };
   try {
     config.statusBarPosition = 'bottom';
     config.textHeightPercent = 50;
     const layout = getTextLayout();
     assert.equal(layout.maxLines, 4);
-    assert.equal(layout.topBlankLines, 4);
+    assert.equal(layout.topBlankLines, 5);
   } finally {
     Object.assign(config, snapshot);
   }
