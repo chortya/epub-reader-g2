@@ -284,7 +284,13 @@ export function formatStatusLine(args: {
     return `${prefix}${infoText}`.slice(0, maxChars);
   }
 
-  const barLen = Math.max(5, Math.min(20, rawBarLen));
+  // Cap at 10 cells: the heavy/light horizontal box-drawing glyphs ('━', '─')
+  // render wider than one monospace cell on the G2 display, so a 20-cell bar
+  // in the string ends up taking closer to 30–40 px-cells of actual width,
+  // which combined with the v1.4.0 clock prefix pushed the label past 576 px
+  // and made the footer wrap to a second line. 10 keeps total label ≤ 40
+  // cells even in the worst case and leaves comfortable horizontal margin.
+  const barLen = Math.max(5, Math.min(10, rawBarLen));
   const filled = Math.round(barLen * clampedProgress);
   const empty = barLen - filled;
   const bar = '━'.repeat(filled) + '─'.repeat(empty);

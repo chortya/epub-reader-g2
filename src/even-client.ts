@@ -795,7 +795,12 @@ export class EvenEpubClient {
     const progress = totalBookWords > 1 ? currentAbsoluteWord / totalBookWords : 1;
     const flowState = this.isFlowRunning ? 'RUN' : 'PAUSE';
     const chapterTotalPages = this.chapterPages[this.chapterIndex]?.length ?? 1;
-    const infoText = `Flow ${flowState} ${config.flowSpeedWpm}wpm Ch ${this.chapterIndex + 1}/${this.book.chapters.length} Pg ${this.pageIndex + 1}/${chapterTotalPages} W ${this.flowWordIndex + 1}/${totalPageWords} `;
+    // Shorter than v1.4.0's "Flow RUN Nwpm Ch a/b Pg c/d W e/f" — that was
+    // ~40 cells and combined with the 7-cell clock prefix overflowed the
+    // footer to a second line on wide-glyph content. Drop the "Flow" prefix
+    // (redundant with RUN/PAUSE) and the W-index suffix (the progress bar
+    // already indicates within-page position).
+    const infoText = `${flowState} ${config.flowSpeedWpm}wpm Ch ${this.chapterIndex + 1}/${this.book.chapters.length} Pg ${this.pageIndex + 1}/${chapterTotalPages} `;
 
     const hasBottomBar = config.statusBarPosition === 'bottom';
     const label = formatStatusLine({
@@ -1441,7 +1446,12 @@ export class EvenEpubClient {
     const totalPageWords = Math.max(1, pageData.wordCount);
     const flowState = this.isFlowRunning ? 'RUN' : 'PAUSE';
     const chapterTotalPages = this.chapterPages[this.chapterIndex]?.length ?? 1;
-    const infoText = `Flow ${flowState} ${config.flowSpeedWpm}wpm Ch ${this.chapterIndex + 1}/${this.book.chapters.length} Pg ${this.pageIndex + 1}/${chapterTotalPages} W ${this.flowWordIndex + 1}/${totalPageWords} `;
+    // Shorter than v1.4.0's "Flow RUN Nwpm Ch a/b Pg c/d W e/f" — that was
+    // ~40 cells and combined with the 7-cell clock prefix overflowed the
+    // footer to a second line on wide-glyph content. Drop the "Flow" prefix
+    // (redundant with RUN/PAUSE) and the W-index suffix (the progress bar
+    // already indicates within-page position).
+    const infoText = `${flowState} ${config.flowSpeedWpm}wpm Ch ${this.chapterIndex + 1}/${this.book.chapters.length} Pg ${this.pageIndex + 1}/${chapterTotalPages} `;
     let totalBookWords = 0, currentAbsoluteWord = 0;
     for (let ch = 0; ch < this.flowPageData.length; ch++) {
       for (let pg = 0; pg < this.flowPageData[ch].length; pg++) {
