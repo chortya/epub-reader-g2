@@ -24,11 +24,13 @@ export const LINE_HEIGHT_PX = 28;
 // paginated footer (v1.3.1 beta tester regression, fixed in v1.4.1).
 export const G2_LINE_PITCH_PX = 28.67;
 
-// Bottom status bar height. Reduced from 30 → 28 in v1.4.1 to give the text
-// container 2 px of extra vertical headroom, so 9 × 28.67 = 258.03 px of
-// content cleanly fits a 288 − 28 = 260 px container. The visible footer
-// text (one line of "HH:MM  Ch C/T Pg P/N [bar]") fits comfortably in 28 px.
-export const STATUS_BAR_HEIGHT_PX = 28;
+// Bottom status bar height. Holds one line of "HH:MM  Ch C/T Pg P/N [bar]"
+// at measured pitch 28.67 px, so the container must be >= 29 px or the SDK
+// truncates/overflows the text (a 28 px container showed the SDK's own
+// scroll indicator where our progress bar belongs — regression fixed in
+// post-v1.4.1 patch). 29 px also leaves 288 − 29 = 259 px for the text
+// container, fitting 9 × 28.67 = 258.03 px of content with 0.97 px to spare.
+export const STATUS_BAR_HEIGHT_PX = 29;
 
 export const TEXT_HEIGHT_MIN_PERCENT = 50;
 export const TEXT_HEIGHT_MAX_PERCENT = 100;
