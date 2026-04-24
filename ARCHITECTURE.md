@@ -459,7 +459,7 @@ Tests are pure: they import `src/*.ts` directly (using explicit `.ts`
 extensions — Node's native TS mode requires them) and exercise side-effect
 free functions. There is no jsdom / Vitest / Jest.
 
-Current suites (v1.4.0 → 87 tests):
+Current suites (v1.4.1 → 89 tests):
 
 - `app-json.test.ts` — manifest / package version alignment, SDK version
   consistency, `supported_languages` matches hyphenation set, network

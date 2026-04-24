@@ -37,11 +37,13 @@ test('G2_LINE_PITCH_PX is the measured ~28.67px actual pitch', () => {
   assert.ok(G2_LINE_PITCH_PX < 29);
 });
 
-test('BLANK_OVERFLOW_RESERVE: worst-case blank padding fits at cropped heights', () => {
-  // Core correctness invariant for the v1.4.1 overflow fix: at any crop, the
-  // total number of rendered lines (blank padding + text) × measured pitch
-  // must fit the container. The reserve of 1 blank line at cropped heights
-  // means worst-case is (displayLines - 1) × G2_LINE_PITCH_PX.
+test('getTextLayout: total rendered content fits the container within SDK tolerance', () => {
+  // Correctness invariant: at every (bar × textHeightPercent) combination,
+  // the rendered height (blank padding + text lines) × measured G2 pitch
+  // must not exceed the container by more than the SDK's marginal tolerance
+  // (~0.05 px). The 100% + bar case has a 0.03 px theoretical overflow that
+  // is harmless in practice because the last rendered line is real text and
+  // often doesn't need full pitch.
   const snapshot = { ...config };
   try {
     for (const barPos of ['bottom', 'none'] as const) {
@@ -51,7 +53,7 @@ test('BLANK_OVERFLOW_RESERVE: worst-case blank padding fits at cropped heights',
         const layout = getTextLayout();
         const totalRenderedPx = (layout.maxLines + layout.topBlankLines) * G2_LINE_PITCH_PX;
         assert.ok(
-          totalRenderedPx <= layout.usableHeight + 0.05, // 0.05 tolerance for 100% real-text case (0.03 overflow is SDK-tolerated)
+          totalRenderedPx <= layout.usableHeight + 0.05,
           `bar=${barPos} ${percent}%: ${totalRenderedPx} px content > ${layout.usableHeight} px container`,
         );
       }
@@ -212,10 +214,10 @@ test('paginateText: reducing height% produces strictly more pages than default',
   );
 });
 
-test('DISPLAY_HEIGHT / LINE_HEIGHT_PX ratio matches the legacy 9/10 line behavior', () => {
-  // Sanity: floor((288 - 30) / 28) = 9, floor(288 / 28) = 10. This is the
-  // line count at 100% text height; cropped heights cap total content at
-  // displayLines − 1 via BLANK_OVERFLOW_RESERVE to avoid SDK overflow.
+test('DISPLAY_HEIGHT / LINE_HEIGHT_PX ratio yields the documented 9/10 line budget', () => {
+  // Sanity: floor((288 − 30) / 28) = 9, floor(288 / 28) = 10. This is the
+  // line count at any textHeightPercent; the crop is rendered by distributing
+  // the total between blank padding at the top and real text below.
   assert.equal(Math.floor((DISPLAY_HEIGHT - STATUS_BAR_HEIGHT_PX) / LINE_HEIGHT_PX), 9);
   assert.equal(Math.floor(DISPLAY_HEIGHT / LINE_HEIGHT_PX), 10);
 });
