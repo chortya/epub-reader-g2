@@ -282,7 +282,7 @@ view:
   yPosition: 0,                      // anchored at the top
   maxLines,                          // how many text lines the paginator produces
   topBlankLines,                     // how many blank lines to prepend at render time
-  barHeight,                         // 29 or 0 (29 since v1.4.1 — was 30; 29 is the minimum for one line of 28.67 px footer text and leaves 259 px for 9 × 28.67 = 258.03 px of content to fit)
+  barHeight,                         // 30 or 0. In v1.4.1, cropped heights reserve one blank line (BLANK_OVERFLOW_RESERVE) so total rendered content caps at 8 (with bar) or 9 (without), avoiding the SDK's scroll indicator at 50–90% text heights.
 }
 ```
 

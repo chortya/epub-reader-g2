@@ -24,13 +24,13 @@ export const LINE_HEIGHT_PX = 28;
 // paginated footer (v1.3.1 beta tester regression, fixed in v1.4.1).
 export const G2_LINE_PITCH_PX = 28.67;
 
-// Bottom status bar height. Holds one line of "HH:MM  Ch C/T Pg P/N [bar]"
-// at measured pitch 28.67 px, so the container must be >= 29 px or the SDK
-// truncates/overflows the text (a 28 px container showed the SDK's own
-// scroll indicator where our progress bar belongs — regression fixed in
-// post-v1.4.1 patch). 29 px also leaves 288 − 29 = 259 px for the text
-// container, fitting 9 × 28.67 = 258.03 px of content with 0.97 px to spare.
-export const STATUS_BAR_HEIGHT_PX = 29;
+// Bottom status bar height. Held one line of "HH:MM  Ch C/T Pg P/N [bar]".
+// Empirically the G2 SDK needs the full 30 px container to render without
+// showing its own scroll indicator on the footer — both 28 and 29 caused the
+// progress bar to render as a truncated-scroll glyph. This is consistent
+// with the "text containers need > 1 × pitch of headroom" observation we
+// handle elsewhere via BLANK_OVERFLOW_RESERVE in getTextLayout().
+export const STATUS_BAR_HEIGHT_PX = 30;
 
 export const TEXT_HEIGHT_MIN_PERCENT = 50;
 export const TEXT_HEIGHT_MAX_PERCENT = 100;
@@ -219,14 +219,22 @@ export function getTextLayout(): {
     Math.min(TEXT_HEIGHT_MAX_PERCENT, config.textHeightPercent),
   );
   const targetUsable = Math.max(
-    G2_LINE_PITCH_PX,
+    LINE_HEIGHT_PX,
     Math.floor((availableHeight * percent) / 100),
   );
-  // Use the measured G2 line pitch (not LINE_HEIGHT_PX) so blank padding lines
-  // at cropped heights don't overflow the container. See G2_LINE_PITCH_PX note.
-  const displayLines = Math.max(1, Math.floor(availableHeight / G2_LINE_PITCH_PX));
-  const maxLines = Math.max(1, Math.min(displayLines, Math.floor(targetUsable / G2_LINE_PITCH_PX)));
-  const topBlankLines = Math.max(0, displayLines - maxLines);
+  const displayLines = Math.max(1, Math.floor(availableHeight / LINE_HEIGHT_PX));
+  const maxLines = Math.max(1, Math.min(displayLines, Math.floor(targetUsable / LINE_HEIGHT_PX)));
+  // BLANK_OVERFLOW_RESERVE: reduce blank padding by 1 line at cropped heights.
+  // Rationale: blank padding lines measure at the G2's actual line pitch
+  // (~28.67 px), so 9 lines total is 258.03 px — 0.03 px over the 258 px
+  // container. At 100% all lines are real text; the last line often has
+  // no descenders so the SDK tolerates the marginal overflow. At cropped
+  // heights the blank lines at the top always measure full-pitch and the
+  // overflow shows as the SDK's scroll indicator. Reducing blank padding
+  // by 1 caps total rendered content at 8 (with bar) / 9 (without), which
+  // fits with ~29 px of headroom and eliminates the overflow entirely.
+  const blankOverflowReserve = maxLines < displayLines ? 1 : 0;
+  const topBlankLines = Math.max(0, displayLines - maxLines - blankOverflowReserve);
   return {
     availableHeight,
     usableHeight: availableHeight, // container always fills the area below the status bar

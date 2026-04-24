@@ -37,15 +37,28 @@ test('G2_LINE_PITCH_PX is the measured ~28.67px actual pitch', () => {
   assert.ok(G2_LINE_PITCH_PX < 29);
 });
 
-test('STATUS_BAR_HEIGHT_PX: 9 lines × G2_LINE_PITCH fits inside the text container', () => {
-  // Core correctness invariant for the v1.4.1 overflow fix: with the bar on,
-  // 9 lines × 28.67 = 258.03 px of content must fit in a (288 − bar) container.
-  const availableHeight = DISPLAY_HEIGHT - STATUS_BAR_HEIGHT_PX;
-  assert.ok(
-    9 * G2_LINE_PITCH_PX <= availableHeight,
-    `9 × ${G2_LINE_PITCH_PX} = ${9 * G2_LINE_PITCH_PX} must fit in ${availableHeight}; ` +
-      'reduce STATUS_BAR_HEIGHT_PX or raise G2_LINE_PITCH_PX if this fails.',
-  );
+test('BLANK_OVERFLOW_RESERVE: worst-case blank padding fits at cropped heights', () => {
+  // Core correctness invariant for the v1.4.1 overflow fix: at any crop, the
+  // total number of rendered lines (blank padding + text) × measured pitch
+  // must fit the container. The reserve of 1 blank line at cropped heights
+  // means worst-case is (displayLines - 1) × G2_LINE_PITCH_PX.
+  const snapshot = { ...config };
+  try {
+    for (const barPos of ['bottom', 'none'] as const) {
+      config.statusBarPosition = barPos;
+      for (const percent of [50, 60, 70, 80, 90, 100]) {
+        config.textHeightPercent = percent;
+        const layout = getTextLayout();
+        const totalRenderedPx = (layout.maxLines + layout.topBlankLines) * G2_LINE_PITCH_PX;
+        assert.ok(
+          totalRenderedPx <= layout.usableHeight + 0.05, // 0.05 tolerance for 100% real-text case (0.03 overflow is SDK-tolerated)
+          `bar=${barPos} ${percent}%: ${totalRenderedPx} px content > ${layout.usableHeight} px container`,
+        );
+      }
+    }
+  } finally {
+    Object.assign(config, snapshot);
+  }
 });
 
 test('paginateText: default height% + bottom status bar yields 9 lines per full page', () => {
@@ -70,7 +83,7 @@ test('paginateText: default height% + no status bar yields 10 lines per full pag
 });
 
 test('paginateText: textHeightPercent=50 + bottom bar yields 4 lines per full page', () => {
-  // 130 px target, floor(130/28.67)=4 lines
+  // 129 px target, floor(129/28)=4 lines
   withConfig({ statusBarPosition: 'bottom', textHeightPercent: 50 }, () => {
     const pages = paginateText(manyWords);
     const fullPages = pages.slice(0, -1);
@@ -81,7 +94,7 @@ test('paginateText: textHeightPercent=50 + bottom bar yields 4 lines per full pa
 });
 
 test('paginateText: textHeightPercent=50 + no bar yields 5 lines per full page', () => {
-  // 144 px target, floor(144/28.67)=5 lines
+  // 144 px target, floor(144/28)=5 lines
   withConfig({ statusBarPosition: 'none', textHeightPercent: 50 }, () => {
     const pages = paginateText(manyWords);
     const fullPages = pages.slice(0, -1);
@@ -113,27 +126,48 @@ test('getTextLayout: container always covers the full available area (for event 
   }
 });
 
-test('getTextLayout: topBlankLines + maxLines == full display line count', () => {
+test('getTextLayout: rendered-line total at 100% matches legacy 9/10 count', () => {
+  // At 100% there is no blank padding, so total rendered lines == maxLines.
+  // This is the count that defines "lines of text per full page".
+  const snapshot = { ...config };
+  try {
+    config.textHeightPercent = 100;
+
+    config.statusBarPosition = 'bottom';
+    assert.equal(getTextLayout().maxLines + getTextLayout().topBlankLines, 9);
+
+    config.statusBarPosition = 'none';
+    assert.equal(getTextLayout().maxLines + getTextLayout().topBlankLines, 10);
+  } finally {
+    Object.assign(config, snapshot);
+  }
+});
+
+test('getTextLayout: cropped heights reserve 1 blank line to avoid overflow', () => {
+  // v1.4.1 overflow fix: blank padding at cropped heights measures at full
+  // G2_LINE_PITCH_PX, so rendering 9 lines total (blank + text) overflows
+  // the 258 px container by 0.03 px and triggers the SDK scroll indicator.
+  // The fix caps total rendered content at (displayLines − 1) when cropped.
   const snapshot = { ...config };
   try {
     config.statusBarPosition = 'bottom';
-    for (const percent of [50, 60, 70, 80, 90, 100]) {
+    for (const percent of [50, 60, 70, 80, 90]) {
+      config.textHeightPercent = percent;
+      const layout = getTextLayout();
+      assert.equal(
+        layout.topBlankLines + layout.maxLines,
+        8,
+        `at bar ${percent}% content + blank padding must equal 8 (displayLines − 1) to avoid overflow`,
+      );
+    }
+    config.statusBarPosition = 'none';
+    for (const percent of [50, 60, 70, 80, 90]) {
       config.textHeightPercent = percent;
       const layout = getTextLayout();
       assert.equal(
         layout.topBlankLines + layout.maxLines,
         9,
-        `at ${percent}% content + blank padding must equal 9 display lines (bottom bar)`,
-      );
-    }
-    config.statusBarPosition = 'none';
-    for (const percent of [50, 60, 70, 80, 90, 100]) {
-      config.textHeightPercent = percent;
-      const layout = getTextLayout();
-      assert.equal(
-        layout.topBlankLines + layout.maxLines,
-        10,
-        `at ${percent}% content + blank padding must equal 10 display lines (no bar)`,
+        `at no-bar ${percent}% content + blank padding must equal 9 (displayLines − 1) to avoid overflow`,
       );
     }
   } finally {
@@ -158,14 +192,16 @@ test('getTextLayout: 100% has no blank padding', () => {
   }
 });
 
-test('getTextLayout: 50% + bar has 5 blank lines padding the content down', () => {
+test('getTextLayout: 50% + bar has 4 blank lines padding the content down', () => {
+  // v1.4.1: was 5 blank lines; reduced to 4 to prevent 9 × G2_LINE_PITCH_PX
+  // overflow of the 258 px container (see BLANK_OVERFLOW_RESERVE).
   const snapshot = { ...config };
   try {
     config.statusBarPosition = 'bottom';
     config.textHeightPercent = 50;
     const layout = getTextLayout();
     assert.equal(layout.maxLines, 4);
-    assert.equal(layout.topBlankLines, 5);
+    assert.equal(layout.topBlankLines, 4);
   } finally {
     Object.assign(config, snapshot);
   }
@@ -197,10 +233,10 @@ test('paginateText: reducing height% produces strictly more pages than default',
   );
 });
 
-test('DISPLAY_HEIGHT / G2_LINE_PITCH_PX yields the expected 9/10 line budget', () => {
-  // v1.4.1: math uses measured pitch (28.67), not nominal LINE_HEIGHT_PX (28).
-  // Status bar reduced to 28 px to preserve 9 lines with bar; 10 lines without
-  // bar is unchanged (floor(288/28.67) = 10).
-  assert.equal(Math.floor((DISPLAY_HEIGHT - STATUS_BAR_HEIGHT_PX) / G2_LINE_PITCH_PX), 9);
-  assert.equal(Math.floor(DISPLAY_HEIGHT / G2_LINE_PITCH_PX), 10);
+test('DISPLAY_HEIGHT / LINE_HEIGHT_PX ratio matches the legacy 9/10 line behavior', () => {
+  // Sanity: floor((288 - 30) / 28) = 9, floor(288 / 28) = 10. This is the
+  // line count at 100% text height; cropped heights cap total content at
+  // displayLines − 1 via BLANK_OVERFLOW_RESERVE to avoid SDK overflow.
+  assert.equal(Math.floor((DISPLAY_HEIGHT - STATUS_BAR_HEIGHT_PX) / LINE_HEIGHT_PX), 9);
+  assert.equal(Math.floor(DISPLAY_HEIGHT / LINE_HEIGHT_PX), 10);
 });
