@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.4.2] - 2026-05-04
+
+### Fixed
+- **First swipe in the on-glasses menu was eaten on device.** After a `rebuildPageContainer`, the toolkit's gesture pipeline kept stale tap/scroll debounce state across the view boundary, so the user's first swipe in the new menu was silently dropped on hardware (the simulator never reproduced it). Patched `even-toolkit/gestures.ts` to add `resetGestureState()`, which clears `lastTapTime` / `lastTapKind` / `lastScrollTime` / `lastScrollDir` without touching the post-rebuild text-update suppression window — leaving that window in place is what swallows the device's phantom SCROLL after re-layout. `rebuildSlots()` and `showWelcome()` now do `notifyTextUpdate(); resetGestureState();` in that order; `selectCurrentChapter()` calls `resetGestureState()` after `showPage()` / `showFlowFrame()` (which already arm the window). A first attempt that flipped on `bypassNextScrollChecks` after rebuild let the phantom through and snapped the highlight back to where it started — that approach was abandoned in favor of the narrower contract above.
+- **Felt-laggy second swipe at the original 80 ms window.** Lowered `SCROLL_SUPPRESS_AFTER_TEXT_MS` in the toolkit patch from 80 → 40 ms. The phantom fires essentially with the rebuild (well under 30 ms), so 40 ms still suppresses it, while a deliberate human follow-up swipe (≥150 ms) lands without the previous wait.
+
+### Added
+- **`patch-package` wired up.** New `postinstall` script applies `patches/even-toolkit+1.7.2.patch` so the gesture-pipeline changes survive `npm install`.
+- **`tests/gestures-reset.test.ts`** pins the new contract: `resetGestureState()` clears stale tap state, preserves the post-rebuild suppression window, and a real swipe lands once the window expires.
+
+### Changed
+- **`qr` / `qr:sim` scripts** now run `evenhub qr --clear` first, so the previous dev session's QR doesn't linger if the port number changed.
+
 ## [v1.4.1] - 2026-04-24
 
 ### Fixed

@@ -1,0 +1,75 @@
+diff --git a/node_modules/even-toolkit/dist/glasses/gestures.d.ts b/node_modules/even-toolkit/dist/glasses/gestures.d.ts
+index ea913dd..7b7f93a 100644
+--- a/node_modules/even-toolkit/dist/glasses/gestures.d.ts
++++ b/node_modules/even-toolkit/dist/glasses/gestures.d.ts
+@@ -7,4 +7,10 @@ export declare function isScrollDebounced(direction: 'prev' | 'next'): boolean;
+ export declare function shouldIgnoreScroll(direction: 'prev' | 'next'): boolean;
+ /** Allow the next scroll event through immediately after a tap-driven mode change. */
+ export declare function armImmediateScroll(): void;
++/**
++ * Clear stale cross-view tap/scroll history (so the user's first input in a new
++ * view isn't held by lingering debounce). Preserves the post-rebuild textUpdate
++ * suppression window so phantom SCROLL events from the device are still ignored.
++ */
++export declare function resetGestureState(): void;
+ //# sourceMappingURL=gestures.d.ts.map
+\ No newline at end of file
+diff --git a/node_modules/even-toolkit/dist/glasses/gestures.js b/node_modules/even-toolkit/dist/glasses/gestures.js
+index 26724e2..482baac 100644
+--- a/node_modules/even-toolkit/dist/glasses/gestures.js
++++ b/node_modules/even-toolkit/dist/glasses/gestures.js
+@@ -5,7 +5,7 @@ const SCROLL_SUPPRESS_AFTER_TAP_MS = 110;
+ // Tuned for G2 hardware — prevents double-scroll from duplicate events
+ const SAME_DIRECTION_DEBOUNCE_MS = 350;
+ const DIRECTION_CHANGE_DEBOUNCE_MS = 50;
+-const SCROLL_SUPPRESS_AFTER_TEXT_MS = 80;
++const SCROLL_SUPPRESS_AFTER_TEXT_MS = 40;
+ let lastTapTime = 0;
+ let lastTapKind = null;
+ let bypassNextScrollChecks = false;
+@@ -88,4 +88,15 @@ export function armImmediateScroll() {
+     lastScrollTime = 0;
+     lastScrollDir = null;
+ }
++/**
++ * Clear stale cross-view tap/scroll history (so the user's first input in a new
++ * view isn't held by lingering debounce). Preserves the post-rebuild textUpdate
++ * suppression window so phantom SCROLL events from the device are still ignored.
++ */
++export function resetGestureState() {
++    lastTapTime = 0;
++    lastTapKind = null;
++    lastScrollTime = 0;
++    lastScrollDir = null;
++}
+ //# sourceMappingURL=gestures.js.map
+\ No newline at end of file
+diff --git a/node_modules/even-toolkit/glasses/gestures.ts b/node_modules/even-toolkit/glasses/gestures.ts
+index ffabf3b..edde5ef 100644
+--- a/node_modules/even-toolkit/glasses/gestures.ts
++++ b/node_modules/even-toolkit/glasses/gestures.ts
+@@ -6,7 +6,7 @@ const SCROLL_SUPPRESS_AFTER_TAP_MS = 110;
+ // Tuned for G2 hardware — prevents double-scroll from duplicate events
+ const SAME_DIRECTION_DEBOUNCE_MS = 350;
+ const DIRECTION_CHANGE_DEBOUNCE_MS = 50;
+-const SCROLL_SUPPRESS_AFTER_TEXT_MS = 80;
++const SCROLL_SUPPRESS_AFTER_TEXT_MS = 40;
+ 
+ let lastTapTime = 0;
+ let lastTapKind: 'tap' | 'double' | null = null;
+@@ -108,3 +108,15 @@ export function armImmediateScroll(): void {
+   lastScrollTime = 0;
+   lastScrollDir = null;
+ }
++
++/**
++ * Clear stale cross-view tap/scroll history (so the user's first input in a new
++ * view isn't held by lingering debounce). Preserves the post-rebuild textUpdate
++ * suppression window so phantom SCROLL events from the device are still ignored.
++ */
++export function resetGestureState(): void {
++  lastTapTime = 0;
++  lastTapKind = null;
++  lastScrollTime = 0;
++  lastScrollDir = null;
++}

@@ -10,7 +10,7 @@ import {
   type EvenHubEvent,
 } from '@evenrealities/even_hub_sdk';
 import { mapGlassEvent } from 'even-toolkit/action-map';
-import { notifyTextUpdate, armImmediateScroll } from 'even-toolkit/gestures';
+import { notifyTextUpdate, resetGestureState } from 'even-toolkit/gestures';
 import { createSplash, TILE_PRESETS } from 'even-toolkit/splash';
 import type { Book, ReadingPosition, ViewState, CachedBookMeta } from './types';
 import type { LaunchIntent } from './launch';
@@ -622,7 +622,13 @@ export class EvenEpubClient {
         textObject: this.getWelcomeContainers(),
       }),
     );
+    // Order matters: notifyTextUpdate arms the 80 ms phantom-suppression window
+    // (the device fires a spurious SCROLL right after rebuildPageContainer);
+    // resetGestureState then clears stale cross-view tap/scroll history without
+    // touching that window or the bypass flag, so the phantom is dropped and
+    // the user's first real swipe lands.
     notifyTextUpdate();
+    resetGestureState();
 
     setStatus('Ready. Upload an EPUB or browse Gutenberg.');
     this.onViewChanged?.();
@@ -912,7 +918,14 @@ export class EvenEpubClient {
         textObject: textContainers,
       }),
     );
+    // Order matters: notifyTextUpdate first arms the 80 ms window that swallows
+    // the phantom SCROLL the device fires right after rebuildPageContainer (the
+    // one that used to snap the highlight back to where it started). Then
+    // resetGestureState clears stale cross-view tap/scroll history so the user's
+    // first real swipe in the new menu lands without being held by the 110 ms
+    // post-tap or 350 ms same-direction debounces from the previous view.
     notifyTextUpdate();
+    resetGestureState();
   }
 
   // --- Navigation ---
@@ -1103,7 +1116,6 @@ export class EvenEpubClient {
 
   private async selectCurrentChapter(): Promise<void> {
     if (!this.book) return;
-    armImmediateScroll();
     this.chapterIndex = this.librarySelectedIndex;
     this.pageIndex = 0;
     this.flowWordIndex = 0;
@@ -1112,6 +1124,11 @@ export class EvenEpubClient {
     } else {
       await this.showPage();
     }
+    // showPage / showFlowFrame already called notifyTextUpdate() to arm the
+    // phantom-suppression window. Clear the lingering tap/scroll history from
+    // the chapter-list view so the user's first swipe in the new reading view
+    // isn't held by the 110 ms post-tap gate or the previous view's debounce.
+    resetGestureState();
   }
 
   private async refreshCurrentView(): Promise<void> {
