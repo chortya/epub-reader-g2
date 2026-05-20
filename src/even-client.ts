@@ -40,11 +40,17 @@ import {
 } from './constants';
 import { clamp, setStatus, truncateForList, appendEventLog } from './utils';
 import { createSplashBridgeAdapter } from './splash-bridge';
+import {
+  ITEMS_PER_PAGE,
+  ROW_HEIGHT,
+  centerLabel,
+  computeBoxWidthPx,
+  computeRowOffsets,
+  trimTrailingEmptySlots,
+  CHAR_PITCH_PX,
+} from './layout';
 
 type Bridge = Awaited<ReturnType<typeof waitForEvenAppBridge>>;
-
-const ITEMS_PER_PAGE = 4;
-const ROW_HEIGHT = Math.floor(DISPLAY_HEIGHT / ITEMS_PER_PAGE); // 72px
 
 type FlowPageData = {
   tokens: string[];
@@ -453,9 +459,12 @@ export class EvenEpubClient {
     this.stopClockTicker();
     this.view = 'mainMenu';
 
-    // Three slots: Continue, Library (N), Settings. Slot 0 label reflects
-    // whether a last book is resolvable (bookId-first via resolveLastBook).
-    // Stable 3-slot layout — see decision Q3. Slot 3 is blank.
+    // Three semantic choices: Continue, Library (N), Settings (per v1.4.0
+    // decision Q3 — the three-option main menu is stable). Slot 0's label
+    // reflects whether a last book is resolvable (bookId-first via
+    // resolveLastBook). The trailing empty entry is dropped by
+    // rebuildSlots' trimTrailingEmptySlots so the three rows render
+    // vertically centered instead of padding a dead fourth row at the bottom.
     const resolved = await this.resolveLastBookFromBridge();
     this.continueReadingResolved = resolved;
     const continueLabel = resolved ? 'Continue reading' : '(No recent book)';
@@ -890,40 +899,73 @@ export class EvenEpubClient {
   }
 
   private async rebuildSlots(labels: string[], selectedSlot: number): Promise<void> {
-    const textContainers: TextContainerProperty[] = [];
+    // v1.4.3 layout: trim trailing empty slots so a partial page (3-item main
+    // menu, 2-option binary editors, last page of a paginated settings list)
+    // doesn't render dead rows; vertically center what remains; size every row
+    // to the page's longest label so the highlight outlines a button-shaped
+    // box rather than a full-width banner.
+    const visibleLabels = trimTrailingEmptySlots(labels);
+    const n = visibleLabels.length;
+    const boxWidthPx = computeBoxWidthPx(visibleLabels);
+    const boxChars = Math.floor(boxWidthPx / CHAR_PITCH_PX);
+    const xPosition = Math.floor((DISPLAY_WIDTH - boxWidthPx) / 2);
+    const yPositions = computeRowOffsets(n);
+    const safeSelected = n > 0 ? clamp(selectedSlot, 0, n - 1) : -1;
 
-    for (let i = 0; i < ITEMS_PER_PAGE; i++) {
-      const isSelected = i === selectedSlot;
-      textContainers.push(
+    const containers: TextContainerProperty[] = [];
+
+    // Container 1 must be declared FIRST so it sits beneath the option rows in
+    // the SDK's paint/event order (matches even-toolkit/glasses/bridge.ts).
+    // Empty content + zero border + zero padding renders nothing visible; the
+    // full-screen rect catches every swipe regardless of slot geometry.
+    containers.push(
+      new TextContainerProperty({
+        xPosition: 0,
+        yPosition: 0,
+        width: DISPLAY_WIDTH,
+        height: DISPLAY_HEIGHT,
+        borderWidth: 0,
+        borderColor: 0,
+        paddingLength: 0,
+        containerID: 1,
+        containerName: 'swipe',
+        content: '',
+        isEventCapture: 1,
+      }),
+    );
+
+    for (let i = 0; i < n; i++) {
+      const isSelected = i === safeSelected;
+      containers.push(
         new TextContainerProperty({
-          xPosition: 0,
-          yPosition: i * ROW_HEIGHT,
-          width: DISPLAY_WIDTH,
+          xPosition,
+          yPosition: yPositions[i],
+          width: boxWidthPx,
           height: ROW_HEIGHT,
           borderWidth: isSelected ? 1 : 0,
           borderColor: 5,
           borderRadius: 8,
           paddingLength: 2,
-          containerID: i + 1,
+          containerID: i + 2,
           containerName: `slot-${i}`,
-          content: labels[i] ?? '',
-          isEventCapture: isSelected ? 1 : (selectedSlot < 0 && i === 0 ? 1 : 0),
+          content: centerLabel(visibleLabels[i], boxChars),
+          isEventCapture: 0,
         }),
       );
     }
 
     await this.bridge.rebuildPageContainer(
       new RebuildPageContainer({
-        containerTotalNum: ITEMS_PER_PAGE,
-        textObject: textContainers,
+        containerTotalNum: containers.length,
+        textObject: containers,
       }),
     );
-    // Order matters: notifyTextUpdate first arms the 80 ms window that swallows
-    // the phantom SCROLL the device fires right after rebuildPageContainer (the
-    // one that used to snap the highlight back to where it started). Then
-    // resetGestureState clears stale cross-view tap/scroll history so the user's
-    // first real swipe in the new menu lands without being held by the 110 ms
-    // post-tap or 350 ms same-direction debounces from the previous view.
+    // Order matters: notifyTextUpdate first arms the 40 ms window that swallows
+    // the phantom SCROLL the device fires right after rebuildPageContainer
+    // (the one that used to snap the highlight back to where it started). Then
+    // resetGestureState clears stale cross-view tap/scroll history so the
+    // user's first real swipe in the new menu lands without being held by the
+    // 110 ms post-tap or 350 ms same-direction debounces from the previous view.
     notifyTextUpdate();
     resetGestureState();
   }
@@ -1247,7 +1289,7 @@ export class EvenEpubClient {
     }
   }
 
-  // Main-menu navigation (3 fixed slots — see design §3.2).
+  // Main-menu navigation (3 semantic options — see v1.4.0 design §3.2).
   private async nextMainMenuSlot(): Promise<void> {
     if (this.mainMenuSelectedIndex < 2) {
       this.mainMenuSelectedIndex++;

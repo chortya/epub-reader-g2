@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.4.3] - 2026-05-15
+
+### Changed
+- **Menu selection box now adapts to the available options.** All five on-glasses list views (`mainMenu`, `settings`, `settingEditor`, `bookPicker`, `chapterList`) share one helper (`rebuildSlots` in `src/even-client.ts`), which previously rendered a fixed 4-row 576-px-wide grid regardless of how many actual options existed. As a result the highlighted row was a full-width banner even for two-letter labels like `"ON"`, and three-item menus rendered with a dead fourth row at the bottom. The helper now (a) trims trailing empty slots so a partial page renders only its real items, (b) vertically centers the remaining rows around the display center, and (c) sizes every row's width to the longest label on the page (clamped to ~160 px floor, `DISPLAY_WIDTH - 32 px` ceiling) with the label space-centered inside the box. Swipe routing is preserved by a new full-screen invisible `isEventCapture=1` overlay declared as container 1 — every swipe lands somewhere inside it regardless of where on the temple the user gestures, so no first-swipe is lost. Fixes the Even Hub marketplace tester feedback "selection box UI does not properly adapt to the size of the available options."
+- **`v1.4.0` decision Q3 ("stable 3-slot main menu") clarified in code comments.** The three semantic main-menu choices (`Continue` / `Library (N)` / `Settings`) remain fixed; what was removed is only the implementation-side trailing empty slot in `labels` that `rebuildSlots` now trims. Stale comments in `showMainMenu` and `nextMainMenuSlot` updated to reflect the new render path.
+
+### Added
+- **`src/layout.ts`** — pure helpers for menu geometry: `computeBoxWidthPx`, `trimTrailingEmptySlots`, `computeRowOffsets`, `centerLabel`. Shared constants (`ITEMS_PER_PAGE`, `ROW_HEIGHT`, `CHAR_PITCH_PX`, `MIN_BOX_PX`, `EDGE_MARGIN`, `BORDER_INSET`) live here so the rendering math is one import for `even-client.ts` and unit-testable in isolation.
+- **`tests/layout.test.ts`** — 19 tests pinning the layout contract: clamping at min/max box width, all-empty input, trailing-only trimming (preserves `selectedSlot` indexing), vertical centering for `n ∈ {1, 2, 3, 4}`, label centering / longer-than-box passthrough.
+
+### Fixed
+- **`SCROLL_SUPPRESS_AFTER_TEXT_MS` comments in `rebuildSlots`** said "80 ms" — corrected to "40 ms" to match the v1.4.2 patch.
+
 ## [v1.4.2] - 2026-05-04
 
 ### Fixed
