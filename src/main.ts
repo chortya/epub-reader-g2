@@ -79,11 +79,14 @@ async function main() {
       try {
         setStatus(`Loading: ${meta.title}...`);
         const recent = await getRecentBooksFromDB(bridge as any);
-        const cached = recent.find((r) =>
-          r.title === meta.title ||
-          r.filename === meta.filename ||
-          makeBookId(r.filename, r.title) === meta.bookId,
-        );
+        // Match by bookId first (strongest signal — see resolveLastBook in
+        // book-id.ts), then filename, then title as a last resort for legacy
+        // cache entries. Title-first matching opened the wrong book when two
+        // books shared a title.
+        const cached =
+          recent.find((r) => makeBookId(r.filename, r.title) === meta.bookId) ??
+          recent.find((r) => r.filename === meta.filename) ??
+          recent.find((r) => r.title === meta.title);
         if (!cached) {
           setStatus(`Book not available locally: ${meta.title}`);
           return;
@@ -279,7 +282,10 @@ async function main() {
         books.forEach((b) => {
           const div = document.createElement('div');
           div.className = 'gut-item';
-          div.innerHTML = `<span>${b.title}</span> <button class="btn btn-ghost btn-sm">Read</button>`;
+          // textContent (not innerHTML) — titles are remote content.
+          div.innerHTML = '<span></span> <button class="btn btn-ghost btn-sm">Read</button>';
+          const titleSpan = div.querySelector('span');
+          if (titleSpan) titleSpan.textContent = b.title;
 
           div.querySelector('button')?.addEventListener('click', async () => {
             try {
@@ -346,15 +352,21 @@ async function main() {
         const date = new Date(meta.uploadedAt);
         const dateStr = date.toLocaleDateString('en', { month: 'short', day: 'numeric' });
 
+        // Static skeleton via innerHTML; title/meta set with textContent so a
+        // crafted EPUB title can't inject markup into the WebView.
         item.innerHTML = `
           <div class="info">
             <div class="title-row">
-              <div class="title">${meta.title}</div>
+              <div class="title"></div>
             </div>
-            <div class="meta">${posText} &middot; ${dateStr}</div>
+            <div class="meta"></div>
           </div>
           <button class="del" title="Delete">&times;</button>
         `;
+        const titleEl = item.querySelector('.title');
+        if (titleEl) titleEl.textContent = meta.title;
+        const metaEl = item.querySelector('.meta');
+        if (metaEl) metaEl.textContent = `${posText} · ${dateStr}`;
 
         item.querySelector('.info')?.addEventListener('click', async () => {
           try {

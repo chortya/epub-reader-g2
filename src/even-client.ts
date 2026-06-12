@@ -219,7 +219,7 @@ export class EvenEpubClient {
       this.cachedBookList.push({
         bookId: this.currentBookId,
         title: book.title,
-        filename: book.title + '.epub',
+        filename: this.currentBookFilename ?? book.title + '.epub',
         uploadedAt: Date.now(),
       });
       this.bridge.setLocalStorage(BOOK_LIST_KEY, JSON.stringify(this.cachedBookList)).catch(() => {});
@@ -891,7 +891,13 @@ export class EvenEpubClient {
     }
     notifyTextUpdate();
 
-    await this.saveFlowPosition();
+    // While flow is running, hit the bridge only on page boundaries — a save
+    // is up to 5 sequential bridge round-trips, and doing that on every word
+    // tick (10/s at 600 wpm) both floods the bridge and stretches the tick
+    // past the requested WPM interval (flowTick awaits this render). Pauses,
+    // chapter jumps, foreground-exit, and shutdown all still save in full.
+    const persistToBridge = !this.isFlowRunning || this.flowWordIndex === 0;
+    await this.saveFlowPosition(persistToBridge);
     this.startClockTicker();
     setStatus(
       `Flow ${this.isFlowRunning ? 'running' : 'paused'} | Ch ${this.chapterIndex + 1}/${this.book.chapters.length} | Pg ${this.pageIndex + 1}/${chapterTotalPages} | Word ${this.flowWordIndex + 1}/${totalPageWords} | ${config.flowSpeedWpm} WPM`,
@@ -1435,12 +1441,11 @@ export class EvenEpubClient {
   // --- Clock ticker (Stage 4) ---
 
   private startClockTicker(): void {
-    // Belt-and-suspenders: clear any existing timer so a double-call never
-    // leaks an interval (§12.1 risk list, mitigation).
-    if (this.clockTickerId !== null) {
-      window.clearInterval(this.clockTickerId);
-      this.clockTickerId = null;
-    }
+    // Idempotent: showFlowFrame calls this on every word tick (up to 10/s at
+    // 600 wpm) — keep the existing interval rather than tearing it down and
+    // re-arming, which also kept resetting its 10 s phase. A single guarded
+    // interval can never leak (§12.1 risk list, mitigation).
+    if (this.clockTickerId !== null) return;
     this.lastMinuteString = this.formatHHMM(new Date());
     this.clockTickerId = window.setInterval(() => {
       this.tickClock().catch((e) => console.warn('clock tick failed:', e));
@@ -1605,7 +1610,11 @@ export class EvenEpubClient {
         if (!raw) continue;
 
         const pos: ReadingPosition = JSON.parse(raw);
-        if (pos.chapterIndex >= 0 && pos.chapterIndex < this.chapterPages.length && pos.pageIndex >= 0) {
+        if (
+          Number.isInteger(pos.chapterIndex) &&
+          Number.isInteger(pos.pageIndex) &&
+          pos.chapterIndex >= 0 && pos.chapterIndex < this.chapterPages.length && pos.pageIndex >= 0
+        ) {
           pos.pageIndex = Math.min(pos.pageIndex, Math.max(0, (this.chapterPages[pos.chapterIndex]?.length ?? 1) - 1));
           return pos;
         }
@@ -1615,7 +1624,7 @@ export class EvenEpubClient {
     return null;
   }
 
-  private async saveFlowPosition(): Promise<void> {
+  private async saveFlowPosition(persistToBridge = true): Promise<void> {
     if (!this.book) return;
     try {
       const pos: ReadingPosition = {
@@ -1624,17 +1633,19 @@ export class EvenEpubClient {
         wordIndex: this.flowWordIndex,
       };
       const json = JSON.stringify(pos);
-      if (this.currentBookId) {
-        await this.bridge.setLocalStorage(`${STORAGE_KEY_FLOW_POSITION}-${this.currentBookId}`, json);
-      }
-      await this.bridge.setLocalStorage(`${STORAGE_KEY_FLOW_POSITION}-${this.book.title}`, json);
-      await this.bridge.setLocalStorage(STORAGE_KEY_BOOK_TITLE, this.book.title);
-      // L3 invariant I1 (design §8.5): title, bookId, filename written together.
-      if (this.currentBookId) {
-        await this.bridge.setLocalStorage(STORAGE_KEY_LAST_BOOK_ID, this.currentBookId);
-      }
-      if (this.currentBookFilename) {
-        await this.bridge.setLocalStorage(STORAGE_KEY_LAST_BOOK_FILENAME, this.currentBookFilename);
+      if (persistToBridge) {
+        if (this.currentBookId) {
+          await this.bridge.setLocalStorage(`${STORAGE_KEY_FLOW_POSITION}-${this.currentBookId}`, json);
+        }
+        await this.bridge.setLocalStorage(`${STORAGE_KEY_FLOW_POSITION}-${this.book.title}`, json);
+        await this.bridge.setLocalStorage(STORAGE_KEY_BOOK_TITLE, this.book.title);
+        // L3 invariant I1 (design §8.5): title, bookId, filename written together.
+        if (this.currentBookId) {
+          await this.bridge.setLocalStorage(STORAGE_KEY_LAST_BOOK_ID, this.currentBookId);
+        }
+        if (this.currentBookFilename) {
+          await this.bridge.setLocalStorage(STORAGE_KEY_LAST_BOOK_FILENAME, this.currentBookFilename);
+        }
       }
       // Browser localStorage fallback
       try {
@@ -1659,10 +1670,11 @@ export class EvenEpubClient {
         if (!raw) continue;
 
         const pos: ReadingPosition = JSON.parse(raw);
-        const pageIndex = pos.pageIndex ?? 0;
-        const wordIndex = pos.wordIndex ?? 0;
+        const pageIndex = Number.isInteger(pos.pageIndex) ? pos.pageIndex : 0;
+        const wordIndex = Number.isInteger(pos.wordIndex) ? pos.wordIndex! : 0;
         const chapterPages = this.flowPageData[pos.chapterIndex];
         if (
+          Number.isInteger(pos.chapterIndex) &&
           pos.chapterIndex >= 0 &&
           pos.chapterIndex < this.flowPageData.length &&
           pageIndex >= 0 &&

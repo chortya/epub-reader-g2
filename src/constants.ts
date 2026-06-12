@@ -288,7 +288,10 @@ export function formatStatusLine(args: {
   // ("RUN 600wpm Ch 12/99 Pg 123/256") which is already 32 cells of infoText
   // — 10 bar cells keeps the rendered worst case safely under 59 even when
   // the box glyphs take ~1.5 cell-widths.
-  const barLen = Math.max(5, Math.min(10, rawBarLen));
+  // No lower clamp above rawBarLen: forcing a 5-cell minimum when only 1–4
+  // cells remain pushed the line past maxChars — the same footer-wrap bug
+  // class fixed in v1.4.1. A short bar beats a wrapped footer.
+  const barLen = Math.min(10, rawBarLen);
   const filled = Math.round(barLen * clampedProgress);
   const empty = barLen - filled;
   const bar = '━'.repeat(filled) + '─'.repeat(empty);

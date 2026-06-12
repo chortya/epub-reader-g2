@@ -61,3 +61,14 @@ test("formatStatusLine: bar never renders at negative width when infoText is lon
   assert.ok(typeof out === 'string', 'must return a string');
   assert.ok(out.length > 0, 'must not be empty');
 });
+
+test('formatStatusLine: never exceeds maxChars when only 1-4 bar cells remain', () => {
+  // rawBarLen = maxChars - 7 (clock) - infoText - 2 (brackets). Sweep the
+  // cramped range where the old Math.max(5, ...) clamp overflowed the line
+  // and wrapped the footer (v1.4.1 bug class).
+  for (let rawBarLen = 1; rawBarLen <= 4; rawBarLen++) {
+    const infoText = 'X'.repeat(59 - 7 - 2 - rawBarLen);
+    const out = formatStatusLine({ now: at(12, 0), infoText, maxChars: 59, progress: 0.5 });
+    assert.ok(out.length <= 59, `rawBarLen=${rawBarLen}: length ${out.length} > 59: ${JSON.stringify(out)}`);
+  }
+});
