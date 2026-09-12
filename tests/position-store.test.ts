@@ -281,3 +281,28 @@ test('migrateLegacyPositionKeys: mirrors to the browser fallback lane', async ()
 
   assert.equal(browser.data.get(`${STORAGE_KEY_POSITION}-epub-abc`), paged);
 });
+
+test('savePagedPosition: content-ID books skip the title lane on bridge and browser', async () => {
+  const bridge = makeBridge();
+  const browser = makeBrowserStore();
+  const pos: ReadingPosition = { chapterIndex: 1, pageIndex: 2 };
+  const contentId = 'epub-' + 'a'.repeat(64);
+  await savePagedPosition(bridge, { title: 'Same', bookId: contentId, filename: 'x.epub' }, pos, browser);
+
+  assert.ok(bridge.store.has(`${STORAGE_KEY_POSITION}-${contentId}`));
+  assert.ok(!bridge.store.has(`${STORAGE_KEY_POSITION}-Same`));
+  assert.ok(browser.data.has(`${STORAGE_KEY_POSITION}-${contentId}`));
+  assert.ok(!browser.data.has(`${STORAGE_KEY_POSITION}-Same`));
+  // L3 keys still written
+  assert.equal(bridge.store.get(STORAGE_KEY_BOOK_TITLE), 'Same');
+});
+
+test('saveFlowPosition: content-ID books skip the title lane', async () => {
+  const bridge = makeBridge();
+  const pos: ReadingPosition = { chapterIndex: 0, pageIndex: 0, wordIndex: 3 };
+  const contentId = 'epub-' + 'b'.repeat(64);
+  await saveFlowPosition(bridge, { title: 'Same', bookId: contentId }, pos, true);
+
+  assert.ok(bridge.store.has(`${STORAGE_KEY_FLOW_POSITION}-${contentId}`));
+  assert.ok(!bridge.store.has(`${STORAGE_KEY_FLOW_POSITION}-Same`));
+});

@@ -116,6 +116,11 @@ export async function migrateLegacyPositionKeys(
  * Persist a paged reading position: the position JSON under both keys, plus the
  * L3 last-book keys. Mirrors to a browser-localStorage fallback when provided
  * so a cold WebView reload can still recover.
+ *
+ * The title lane is only written for legacy (non-content) identities: the read
+ * path skips it for content IDs (same-titled books must never inherit one
+ * another's position), so writing it would be waste plus cross-book pollution.
+ * 1.4.6 rollback stays safe either way — it restores from the bookId key.
  */
 export async function savePagedPosition(
   bridge: PositionBridge,
@@ -124,15 +129,20 @@ export async function savePagedPosition(
   browserFallback?: Storage,
 ): Promise<void> {
   const json = JSON.stringify(pos);
+  const titleLane = !isContentBookId(ref.bookId);
   if (ref.bookId) {
     await bridge.setLocalStorage(`${STORAGE_KEY_POSITION}-${ref.bookId}`, json);
   }
-  await bridge.setLocalStorage(`${STORAGE_KEY_POSITION}-${ref.title}`, json);
+  if (titleLane) {
+    await bridge.setLocalStorage(`${STORAGE_KEY_POSITION}-${ref.title}`, json);
+  }
   await writeLastBookKeys(bridge, ref);
 
   if (browserFallback) {
     try {
-      browserFallback.setItem(`${STORAGE_KEY_POSITION}-${ref.title}`, json);
+      if (titleLane) {
+        browserFallback.setItem(`${STORAGE_KEY_POSITION}-${ref.title}`, json);
+      }
       if (ref.bookId) {
         browserFallback.setItem(`${STORAGE_KEY_POSITION}-${ref.bookId}`, json);
       }
@@ -154,16 +164,21 @@ export async function saveFlowPosition(
   browserFallback?: Storage,
 ): Promise<void> {
   const json = JSON.stringify(pos);
+  const titleLane = !isContentBookId(ref.bookId);
   if (persistToBridge) {
     if (ref.bookId) {
       await bridge.setLocalStorage(`${STORAGE_KEY_FLOW_POSITION}-${ref.bookId}`, json);
     }
-    await bridge.setLocalStorage(`${STORAGE_KEY_FLOW_POSITION}-${ref.title}`, json);
+    if (titleLane) {
+      await bridge.setLocalStorage(`${STORAGE_KEY_FLOW_POSITION}-${ref.title}`, json);
+    }
     await writeLastBookKeys(bridge, ref);
   }
   if (browserFallback) {
     try {
-      browserFallback.setItem(`${STORAGE_KEY_FLOW_POSITION}-${ref.title}`, json);
+      if (titleLane) {
+        browserFallback.setItem(`${STORAGE_KEY_FLOW_POSITION}-${ref.title}`, json);
+      }
       if (ref.bookId) {
         browserFallback.setItem(`${STORAGE_KEY_FLOW_POSITION}-${ref.bookId}`, json);
       }
