@@ -221,3 +221,49 @@ test('DISPLAY_HEIGHT / LINE_HEIGHT_PX ratio yields the documented 9/10 line budg
   assert.equal(Math.floor((DISPLAY_HEIGHT - STATUS_BAR_HEIGHT_PX) / LINE_HEIGHT_PX), 9);
   assert.equal(Math.floor(DISPLAY_HEIGHT / LINE_HEIGHT_PX), 10);
 });
+
+// --- Phase 2: offset tracking (position format v2 foundation) ---
+
+test('paginateTextWithOffsets: page text identical to paginateText; starts monotonic', async () => {
+  const { paginateText, paginateTextWithOffsets, pageForOffset } = await import('../src/paginator.ts');
+  const text = Array.from({ length: 40 }, (_, i) => `Word${i} filler text for wrapping`).join(' ');
+  const pages = paginateText(text, 40, 5);
+  const withOffsets = paginateTextWithOffsets(text, 40, 5);
+
+  assert.deepEqual(withOffsets.pages, pages);
+  assert.equal(withOffsets.pageStarts.length, pages.length);
+  assert.equal(withOffsets.pageStarts[0], 0);
+  for (let i = 1; i < withOffsets.pageStarts.length; i++) {
+    assert.ok(withOffsets.pageStarts[i] > withOffsets.pageStarts[i - 1], 'starts strictly increase');
+  }
+
+  // Every page start maps back to its own page.
+  withOffsets.pageStarts.forEach((start, i) => {
+    assert.equal(pageForOffset(withOffsets.pageStarts, start), i);
+  });
+  // Mid-page offsets resolve to the same page.
+  const mid = Math.floor((withOffsets.pageStarts[1] + withOffsets.pageStarts[0]) / 2);
+  assert.equal(pageForOffset(withOffsets.pageStarts, mid), 0);
+});
+
+test('pageForOffset: clamps and handles empty input', async () => {
+  const { pageForOffset } = await import('../src/paginator.ts');
+  assert.equal(pageForOffset([], 100), 0);
+  assert.equal(pageForOffset([0, 10, 20], 999), 2);
+  assert.equal(pageForOffset([0, 10, 20], 0), 0);
+});
+
+test('flow offset helpers round-trip wordIndex through page text', async () => {
+  const { flowOffsetForWord, flowWordForOffset } = await import('../src/paginator.ts');
+  const page = 'one two  three\nfour';
+  // words: one@0 two@4 three@9 three is followed by \n then four@15
+  assert.equal(flowOffsetForWord(page, 0), 0);
+  assert.equal(flowOffsetForWord(page, 1), 4);
+  assert.equal(flowOffsetForWord(page, 2), 9);
+  assert.equal(flowOffsetForWord(page, 3), 15);
+  assert.equal(flowOffsetForWord(page, 99), 0, 'beyond page clamps to page start');
+  assert.equal(flowWordForOffset(page, 0), 0);
+  assert.equal(flowWordForOffset(page, 5), 2, 'mid-word offset resumes at the next word');
+  assert.equal(flowWordForOffset(page, 15), 3, 'offset at word start counts preceding words');
+  assert.equal(flowWordForOffset(page, 999), 4);
+});

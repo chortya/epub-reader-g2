@@ -24,41 +24,98 @@ export function paginateText(
   maxChars = wideGlyphs ? 48 : 59,
   maxLines = getTextLayout().maxLines,
 ): string[] {
-  if (!text || text.trim().length === 0) return ['(empty)'];
+  return paginateTextWithOffsets(text, maxChars, maxLines).pages;
+}
 
-  const wrappedLines = wordWrap(text, maxChars);
+export interface PaginatedChapter {
+  pages: string[];
+  /** Source offset of each page's first character within `text`. Parallel to pages. */
+  pageStarts: number[];
+}
+
+/** Bump when the pagination algorithm/geometry changes meaningfully (plan §5). */
+export const PAGINATION_VERSION = 1;
+
+/**
+ * paginateText plus per-page source offsets. Offsets let a saved position
+ * survive repagination (text-height changes, future pixel-accurate wrapping):
+ * save the page's start offset, restore by finding the page containing it.
+ */
+export function paginateTextWithOffsets(
+  text: string,
+  maxChars = wideGlyphs ? 48 : 59,
+  maxLines = getTextLayout().maxLines,
+): PaginatedChapter {
+  if (!text || text.trim().length === 0) {
+    return { pages: ['(empty)'], pageStarts: [0] };
+  }
+
+  const wrapped = wordWrapWithOffsets(text, maxChars);
 
   const pages: string[] = [];
-  for (let i = 0; i < wrappedLines.length; i += maxLines) {
-    const pageLines = wrappedLines.slice(i, i + maxLines);
-    const page = pageLines.join('\n').trimEnd();
+  const pageStarts: number[] = [];
+  for (let i = 0; i < wrapped.length; i += maxLines) {
+    const pageLines = wrapped.slice(i, i + maxLines);
+    const page = pageLines.map((l) => l.text).join('\n').trimEnd();
     if (page.length > 0) {
       pages.push(page);
+      pageStarts.push(pageLines[0].start);
     }
   }
 
-  return pages.length > 0 ? pages : ['(empty)'];
+  return pages.length > 0 ? { pages, pageStarts } : { pages: ['(empty)'], pageStarts: [0] };
 }
 
-function wordWrap(text: string, maxChars: number): string[] {
-  const lines: string[] = [];
-  const paragraphs = text.split('\n');
+/**
+ * Find the page containing `offset` (binary search over page starts).
+ * Offsets past the last page clamp to it.
+ */
+export function pageForOffset(pageStarts: number[], offset: number): number {
+  if (pageStarts.length === 0) return 0;
+  let lo = 0;
+  let hi = pageStarts.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (pageStarts[mid] <= offset) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
 
-  for (const para of paragraphs) {
+interface WrappedLine {
+  text: string;
+  start: number;
+}
+
+function wordWrapWithOffsets(text: string, maxChars: number): WrappedLine[] {
+  const lines: WrappedLine[] = [];
+  let cursor = 0;
+
+  for (const para of text.split('\n')) {
+    const paraStart = cursor;
     const trimmed = para.trimEnd();
     if (trimmed.length === 0) {
-      lines.push('');
+      lines.push({ text: '', start: paraStart });
+      cursor += para.length + 1;
       continue;
     }
-    wrapParagraph(trimmed, maxChars, lines);
+    wrapParagraphWithOffsets(trimmed, maxChars, lines, paraStart);
+    cursor += para.length + 1;
   }
 
   return lines;
 }
 
-function wrapParagraph(text: string, maxChars: number, lines: string[]): void {
+function wrapParagraphWithOffsets(
+  text: string,
+  maxChars: number,
+  lines: WrappedLine[],
+  paraStart: number,
+): void {
   const words = text.split(/( +)/);
   let currentLine = '';
+  let currentLineStart = paraStart;
+  let cursor = paraStart;
 
   for (let i = 0; i < words.length; i++) {
     const word = words[i];
@@ -68,13 +125,16 @@ function wrapParagraph(text: string, maxChars: number, lines: string[]): void {
       if (currentLine.length > 0) {
         currentLine += word;
       }
+      cursor += word.length;
       continue;
     }
 
     const testLine = currentLine.length > 0 ? currentLine + word : word;
 
     if (testLine.length <= maxChars) {
+      if (currentLine.length === 0) currentLineStart = cursor;
       currentLine = testLine;
+      cursor += word.length;
       continue;
     }
 
@@ -83,41 +143,54 @@ function wrapParagraph(text: string, maxChars: number, lines: string[]): void {
       const remaining = maxChars - currentLine.length;
       const hyphenated = tryHyphenate(word, remaining);
       if (hyphenated) {
+        if (currentLine.length === 0) currentLineStart = cursor;
         currentLine += hyphenated.head + '-';
-        lines.push(currentLine);
+        lines.push({ text: currentLine, start: currentLineStart });
         currentLine = hyphenated.tail;
+        currentLineStart = cursor + hyphenated.head.length;
+        cursor += word.length;
         continue;
       }
     }
 
     // Push current line, move word to next line.
     if (currentLine.trimEnd().length > 0) {
-      lines.push(currentLine.trimEnd());
+      lines.push({ text: currentLine.trimEnd(), start: currentLineStart });
+      currentLine = '';
     }
 
     // If word is longer than a full line, hyphenate across lines
     if (word.length > maxChars) {
       let rest = word;
+      let restStart = cursor;
+      currentLineStart = cursor;
       while (rest.length > maxChars) {
         if (config.hyphenation && hyphenator) {
           const hyp = tryHyphenate(rest, maxChars);
           if (hyp) {
-            lines.push(hyp.head + '-');
+            lines.push({ text: hyp.head + '-', start: restStart });
             rest = hyp.tail;
+            restStart += hyp.head.length;
+            currentLineStart = restStart;
             continue;
           }
         }
-        lines.push(rest.slice(0, maxChars - 1) + '-');
+        const slice = rest.slice(0, maxChars - 1);
+        lines.push({ text: slice + '-', start: restStart });
         rest = rest.slice(maxChars - 1);
+        restStart += slice.length;
+        currentLineStart = restStart;
       }
       currentLine = rest;
     } else {
       currentLine = word;
+      currentLineStart = cursor;
     }
+    cursor += word.length;
   }
 
   if (currentLine.trimEnd().length > 0) {
-    lines.push(currentLine.trimEnd());
+    lines.push({ text: currentLine.trimEnd(), start: currentLineStart });
   }
 }
 
@@ -158,4 +231,26 @@ function tryHyphenate(
 
   const tail = syllables.slice(bestSplit + 1).join('') + suffix;
   return { head, tail };
+}
+
+/** Char offset (page-relative) of the `wordIndex`-th non-whitespace token. */
+export function flowOffsetForWord(pageText: string, wordIndex: number): number {
+  let seenWords = 0;
+  for (const m of pageText.matchAll(/\S+|\s+/g)) {
+    if (/\S/.test(m[0])) {
+      if (seenWords === wordIndex) return m.index ?? 0;
+      seenWords++;
+    }
+  }
+  return 0;
+}
+
+/** Inverse: count words that begin strictly before `offset` (page-relative). */
+export function flowWordForOffset(pageText: string, offset: number): number {
+  let wordIndex = 0;
+  for (const m of pageText.matchAll(/\S+|\s+/g)) {
+    if ((m.index ?? 0) >= offset) break;
+    if (/\S/.test(m[0])) wordIndex++;
+  }
+  return wordIndex;
 }

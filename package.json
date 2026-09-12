@@ -21,7 +21,7 @@
   "dependencies": {
     "@evenrealities/even_hub_sdk": "^0.0.10",
     "@evenrealities/evenhub-cli": "^0.1.13",
-    "even-toolkit": "^1.7.2",
+    "even-toolkit": "1.7.7",
     "hyphenation.de": "^0.2.1",
     "hyphenation.en-us": "^0.2.1",
     "hyphenation.es": "^0.2.1",

@@ -28,6 +28,16 @@ export type ReadingPosition = {
   chapterIndex: number;
   pageIndex: number;
   wordIndex?: number;
+  /**
+   * Position format v2 (Phase 2): `offset` is the saved position's character
+   * offset into the chapter's cleaned text (paged: page start; flow: word
+   * start), valid when `paginationVersion` matches the running paginator.
+   * chapterIndex/pageIndex/wordIndex remain as hints — 1.4.6 (rollback) reads
+   * them and ignores the v2 fields.
+   */
+  v?: number;
+  offset?: number;
+  paginationVersion?: number;
 };
 
 export type CachedBookMeta = {

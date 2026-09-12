@@ -17,7 +17,7 @@ import type { LaunchIntent } from './launch';
 import { pickInitialView } from './launch';
 import { resolveLastBook } from './book-id';
 import { formatBookPickerLabel } from './book-selection';
-import { paginateText } from './paginator';
+import { paginateText, paginateTextWithOffsets, pageForOffset, flowOffsetForWord, flowWordForOffset, PAGINATION_VERSION } from './paginator';
 import {
   config,
   DISPLAY_HEIGHT,
@@ -61,7 +61,6 @@ import {
 import {
   computePagedProgress,
   computeFlowProgress,
-  rescalePageIndex,
   routeGoBack,
   toggleStatusBarPosition,
 } from './reading-progress';
@@ -129,6 +128,8 @@ export class EvenEpubClient {
   private view: ViewState = 'welcome'; // Starts as welcome, transitions after init
   private book: Book | null = null;
   private chapterPages: string[][] = [];
+  /** Parallel to chapterPages: source offset of each page's first char (position v2). */
+  private chapterPageStarts: number[][] = [];
   private flowPageData: FlowPageData[][] = [];
   private chapterIndex = 0;
   private pageIndex = 0;
@@ -231,8 +232,10 @@ export class EvenEpubClient {
       bookId: this.currentBookId,
       filename: this.currentBookFilename,
     });
-    this.chapterPages = book.chapters.map((ch) => paginateText(ch.text));
-    this.flowPageData = this.buildFlowPageData(this.chapterPages);
+    this.chapterPages = [];
+    this.chapterPageStarts = [];
+    this.repaginateForLayout();
+
 
     // L3 "last book" keys change only when the open book changes — write them
     // here, once per open, instead of on every page turn (invariant I1).
@@ -291,15 +294,36 @@ export class EvenEpubClient {
 
   async applySettings(): Promise<void> {
     if (this.book && this.chapterPages.length > 0) {
-      const oldTotalPages = this.chapterPages[this.chapterIndex]?.length || 1;
-      this.chapterPages = this.book.chapters.map((ch) => paginateText(ch.text));
-      this.flowPageData = this.buildFlowPageData(this.chapterPages);
-      const newTotalPages = this.chapterPages[this.chapterIndex]?.length || 1;
-      this.pageIndex = rescalePageIndex(this.pageIndex, oldTotalPages, newTotalPages);
+      // Capture the current position as a source offset BEFORE repagination;
+      // offset mapping is exact where the old page-count ratio was an estimate.
+      const wasFlow = this.view === 'flowReading';
+      const oldOffset = wasFlow
+        ? (this.chapterPageStarts[this.chapterIndex]?.[this.pageIndex] ?? 0) +
+          flowOffsetForWord(
+            this.chapterPages[this.chapterIndex]?.[this.pageIndex] ?? '',
+            this.flowWordIndex,
+          )
+        : (this.chapterPageStarts[this.chapterIndex]?.[this.pageIndex] ?? 0);
 
-      const flowPage = this.flowPageData[this.chapterIndex]?.[this.pageIndex];
-      const maxWordIndex = Math.max(0, (flowPage?.wordCount ?? 1) - 1);
-      this.flowWordIndex = clamp(this.flowWordIndex, 0, maxWordIndex);
+      this.chapterPages = [];
+      this.chapterPageStarts = [];
+      this.repaginateForLayout();
+
+      const starts = this.chapterPageStarts[this.chapterIndex] ?? [0];
+      this.pageIndex = pageForOffset(starts, oldOffset);
+      if (wasFlow) {
+        const pageText = this.chapterPages[this.chapterIndex]?.[this.pageIndex] ?? '';
+        const pageWords = this.flowPageData[this.chapterIndex]?.[this.pageIndex]?.wordCount ?? 1;
+        this.flowWordIndex = clamp(
+          flowWordForOffset(pageText, Math.max(0, oldOffset - starts[this.pageIndex])),
+          0,
+          Math.max(0, pageWords - 1),
+        );
+      } else {
+        const flowPage = this.flowPageData[this.chapterIndex]?.[this.pageIndex];
+        const maxWordIndex = Math.max(0, (flowPage?.wordCount ?? 1) - 1);
+        this.flowWordIndex = clamp(this.flowWordIndex, 0, maxWordIndex);
+      }
 
       // Stage 6 guard: when the user edited a setting from the on-device
       // settings UI, we only repaginate — we do NOT auto-switch into the
@@ -1050,8 +1074,20 @@ export class EvenEpubClient {
     await this.showPage();
   }
 
-  private buildFlowPageData(chapters: string[][]): FlowPageData[][] {
-    return chapters.map((pages) =>
+  /**
+   * Repaginate every chapter for the current config, keeping the parallel
+   * pageStarts used by position format v2 (offset-accurate resume across
+   * layout changes).
+   */
+  private repaginateForLayout(): void {
+    if (!this.book) return;
+    const paginated = this.book.chapters.map((ch) => paginateTextWithOffsets(ch.text));
+    this.chapterPages = paginated.map((p) => p.pages);
+    this.chapterPageStarts = paginated.map((p) => p.pageStarts);
+    this.flowPageData = this.buildFlowPageData(this.chapterPages);
+  }
+
+  private buildFlowPageData(chapters: string[][]): FlowPageData[][] {    return chapters.map((pages) =>
       pages.map((page) => {
         const tokens = this.tokenizeFlowPage(page);
         const wordCount = Math.max(1, tokens.filter((token) => /\S/.test(token)).length);
@@ -1632,9 +1668,14 @@ export class EvenEpubClient {
 
   private async savePagedPosition(immediate = false): Promise<void> {
     if (!this.book) return;
+    const offset = this.chapterPageStarts[this.chapterIndex]?.[this.pageIndex];
     const pos: ReadingPosition = {
       chapterIndex: this.chapterIndex,
       pageIndex: this.pageIndex,
+      // v2: offset survives repagination; hints keep 1.4.6 rollback working.
+      v: 2,
+      offset: typeof offset === 'number' ? offset : 0,
+      paginationVersion: PAGINATION_VERSION,
     };
     this.persister.savePaged(pos, { immediate });
     this.onPositionChanged?.(this.chapterIndex, this.pageIndex);
@@ -1656,6 +1697,24 @@ export class EvenEpubClient {
     );
     if (!pos) return null;
     if (pos.chapterIndex >= this.chapterPages.length) return null;
+
+    // v2 path: offset-accurate resume when the pagination version matches.
+    if (
+      pos.v === 2 &&
+      typeof pos.offset === 'number' &&
+      pos.paginationVersion === PAGINATION_VERSION
+    ) {
+      const starts = this.chapterPageStarts[pos.chapterIndex];
+      if (starts && starts.length > 0) {
+        const page = pageForOffset(starts, pos.offset);
+        return {
+          chapterIndex: pos.chapterIndex,
+          pageIndex: Math.min(page, Math.max(0, starts.length - 1)),
+        };
+      }
+    }
+
+    // Fallback: page-index hints (v1 positions or pagination version drift).
     pos.pageIndex = Math.min(
       pos.pageIndex,
       Math.max(0, (this.chapterPages[pos.chapterIndex]?.length ?? 1) - 1),
@@ -1665,10 +1724,15 @@ export class EvenEpubClient {
 
   private async saveFlowPosition(persistToBridge = true, immediate = false): Promise<void> {
     if (!this.book) return;
+    const pageStart = this.chapterPageStarts[this.chapterIndex]?.[this.pageIndex] ?? 0;
+    const pageText = this.chapterPages[this.chapterIndex]?.[this.pageIndex] ?? '';
     const pos: ReadingPosition = {
       chapterIndex: this.chapterIndex,
       pageIndex: this.pageIndex,
       wordIndex: this.flowWordIndex,
+      v: 2,
+      offset: pageStart + flowOffsetForWord(pageText, this.flowWordIndex),
+      paginationVersion: PAGINATION_VERSION,
     };
     this.persister.saveFlow(pos, persistToBridge, { immediate });
     this.onPositionChanged?.(this.chapterIndex, this.pageIndex);
@@ -1683,9 +1747,31 @@ export class EvenEpubClient {
     if (!pos) return null;
     if (pos.chapterIndex >= this.flowPageData.length) return null;
 
+    const chapterPages = this.flowPageData[pos.chapterIndex];
+
+    // v2 path: map the saved char offset to the containing page + word.
+    if (
+      pos.v === 2 &&
+      typeof pos.offset === 'number' &&
+      pos.paginationVersion === PAGINATION_VERSION
+    ) {
+      const starts = this.chapterPageStarts[pos.chapterIndex];
+      if (starts && starts.length > 0) {
+        const page = pageForOffset(starts, pos.offset);
+        const pageText = this.chapterPages[pos.chapterIndex]?.[page] ?? '';
+        const rel = Math.max(0, pos.offset - starts[page]);
+        const pageWords = chapterPages?.[page]?.wordCount ?? 1;
+        return {
+          chapterIndex: pos.chapterIndex,
+          pageIndex: page,
+          wordIndex: Math.min(flowWordForOffset(pageText, rel), Math.max(0, pageWords - 1)),
+        };
+      }
+    }
+
+    // Fallback: hints.
     const pageIndex = Number.isInteger(pos.pageIndex) ? pos.pageIndex : 0;
     const wordIndex = Number.isInteger(pos.wordIndex) ? pos.wordIndex! : 0;
-    const chapterPages = this.flowPageData[pos.chapterIndex];
     if (pageIndex >= 0 && pageIndex < (chapterPages?.length ?? 0)) {
       return {
         chapterIndex: pos.chapterIndex,
