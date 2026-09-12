@@ -2,11 +2,11 @@
   "package_id": "me.proton.evendev.epubreader",
   "edition": "202601",
   "name": "epub-reader",
-  "version": "1.4.6",
+  "version": "1.5.0",
   "min_app_version": "0.1.0",
   "min_sdk_version": "0.0.15",
   "tagline": "Read EPUB books on your Even G2 glasses",
-  "description": "Read EPUB books directly on your Even Realities G2 smart glasses. Upload books from your phone or browse the Project Gutenberg Top 100 catalog, then read hands-free on the glasses.\n\nFeatures:\n- Local library: books cached on-device for offline reading\n- Two reading modes: Paged (swipe to turn pages) and Flow (word-by-word speed reading, 120-600 WPM)\n- Automatic hyphenation in 9 languages: English, German, Spanish, French, Dutch, Polish, Portuguese, Russian, Ukrainian\n- Splash screen with ePub Reader logo on startup\n- Book picker on glasses: browse and resume books without the phone app\n- Configurable status bar with reading progress\n- Automatic position saving across app restarts\n- Project Gutenberg integration\n\nControls:\n- Swipe down/up: Next/previous page or browse chapters/books\n- Tap: Select chapter/book or hide/show reading info in paged mode; play/pause in flow mode\n- Double tap: Return to chapter list, book picker, or exit app",
+  "description": "Read EPUB books directly on your Even Realities G2 smart glasses. Upload books from your phone or browse the Project Gutenberg Top 100 catalog, then read hands-free on the glasses.\n\nFeatures:\n- Local library: books cached on-device for offline reading (searchable companion UI)\n- Two reading modes: Paged (swipe to turn pages) and Flow (word-by-word speed reading, 120-600 WPM)\n- Native contextual menu on glasses: Contents, mode switch, bookmarks, flow speed\n- Interruption recovery: sentence rewind during Flow, auto-rewind on resume, chapter time-left\n- Flicker-free page turns and configurable text brightness\n- Automatic hyphenation in 9 languages: English, German, Spanish, French, Dutch, Polish, Portuguese, Russian, Ukrainian\n- Configurable status bar with clock and reading progress\n- Automatic position saving across app restarts\n- Project Gutenberg integration\n\nControls:\n- Swipe down/up: Next/previous page, or sentence navigation in running Flow\n- Tap: Hide/show reading info in paged mode; play/pause in Flow\n- Double tap: Back one level\n- Hold: Contextual menu (Contents, mode, bookmark, speed)",
   "author": "Andriy <evendev@proton.me>",
   "entrypoint": "index.html",
   "supported_languages": [

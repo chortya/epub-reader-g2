@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.5.0] - 2026-09-12
+
+Single release covering the three planned phases (docs/1.5.0-release-plan.md).
+Transition formats are dual-written: v2 positions carry v1 hints (1.4.6 reads
+them), and the split bridge library still mirrors the legacy single-blob key.
+
+### Added
+- **Native contextual menu on the glasses (SDK 0.0.14+ `menuObject`).** Hold to open while reading: Paged shows Contents / Switch to Flow / Set bookmark / Go to bookmark / Main menu; Flow adds Faster / Slower and Switch to Paged. Static verb labels, stale-click guarded, menu views keep the OS default.
+- **Interruption recovery.** Swipe while Flow runs now moves one sentence back/forward (chapter jumps moved to Contents/menu — temple touches are the most common accidental input); resuming Flow auto-rewinds to the sentence start (or ~8 words) so you never lose the thread; the Flow footer can show chapter time-left from measured session pace.
+- **Quick bookmarks.** One bookmark per book, stored as a position-v2 offset so it survives repagination.
+- **Text brightness setting** (1-4, SDK 0.0.14+ `textColor`): body text at your chosen level, footer dimmed to 3 for hierarchy. Editable on-device and persisted.
+- **Chapter time-left** in the Flow footer, computed from real measured pace only (needs ≥60 s of active reading; never fabricated).
+- **Searchable companion library** with visible filenames and a collision-aware on-glasses book picker (v1.4.6 baseline).
+
+### Changed
+- **Page turns are flicker-free.** Paged and Flow both render through `textContainerUpgrade` when the container topology is unchanged — no rebuild, no flicker, no phantom scroll on the common path.
+- **Tap in Paged reading no longer repaginates.** Toggling reading info swaps cached page arrays (LRU-2 layout cache) and remaps your position by character offset.
+- **Positions are format v2** (`{v, chapterIndex, pageIndex, wordIndex, offset, paginationVersion}`): character offsets into the cleaned chapter text survive repagination exactly; v1 hints remain for 1.4.6 rollback.
+- **Bridge library storage split**: small metadata index + one payload key per book — uploads no longer rewrite every book's bytes. The legacy single-blob key is still mirrored for rollback.
+- **Dependencies**: `@evenrealities/even_hub_sdk` 0.0.10 → 0.0.15 (pinned; Even App 2.2.10+ required), `even-toolkit` 1.7.2 → 1.7.7 (patch regenerated), `@evenrealities/evenhub-simulator` 0.7.3 → 0.9.5, `@evenrealities/evenhub-cli` 0.1.13 → 0.1.14.
+- **`min_sdk_version` 0.0.15** in `app.json` (test-enforced sync).
+
+### Fixed
+- Position keys now migrate when a legacy-identity book is re-keyed to its content ID (no more one-time position loss on re-upload).
+- Content-ID books no longer write the stale title-lane position key.
+- `setLocalStorage` returning `false` is now treated as the failure it is and surfaced ("Position save failed") instead of silently ignored.
+- Returning from a menu/background visit to `mainMenu`/`settings`/`settingEditor` no longer lands on the wrong screen (`refreshCurrentView` is exhaustive per view).
+- Rapid swipes can no longer interleave SDK calls (gesture dispatch is serialized; lifecycle exits preempt).
+- Footer/status labels are pixel-fitted with the firmware font metrics (`@evenrealities/pretext`) — a 59-char line measured 593 px > 576 px, the root cause of the v1.4.1 footer-wrap class.
+- L3 "last book" keys are written once per book open instead of on every page turn (up to 5 sequential bridge writes per turn → 2 debounced writes).
 ## [v1.4.6] - 2026-07-19
 
 ### Added

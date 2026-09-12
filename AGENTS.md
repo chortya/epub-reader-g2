@@ -48,7 +48,7 @@ Verify any change with `npm run build` then `npm run test`. For integration area
 - That event-capture container must cover the full tap area or swipes are lost. This is why the text container always fills the full height even with the "Text height" crop — the crop is rendered by prepending blank leading lines (`getTextLayout()` in constants.ts), not by shrinking the container.
 - Startup phase (`createStartUpPageContainer`) is text-only; images only work in `rebuildPageContainer`.
 - `textContainerUpgrade` = flicker-free text content swap. `rebuildPageContainer` = layout changes, causes brief flicker. **Always call `notifyTextUpdate()` after `rebuildPageContainer()`**, and call it before arming gesture scroll — order matters (it arms the phantom-suppression window).
-- Only **4** SDK gestures exist: `CLICK`, `DOUBLE_CLICK`, `SCROLL_TOP`, `SCROLL_BOTTOM`. No long-press, triple-tap, or temple-swipe. Double-tap = back one level (reading -> chapters -> mainMenu -> exit app).
+- Core gestures: `CLICK`, `DOUBLE_CLICK`, `SCROLL_TOP`, `SCROLL_BOTTOM`. SDK 0.0.14+ adds `LONG_PRESS`/`LONG_PRESS_RELEASE` (9/10) and the native contextual menu (`menuObject`) — the reader uses the native menu on reading views (hold to open) and treats direct long-press as non-essential. Double-tap = back one level (reading -> chapters -> mainMenu -> exit app).
 
 ## Storage & persistence
 - IndexedDB keeps the full local library for fast browser/WebView reload. Books use a SHA-256 content identity, so same-named EPUBs cannot overwrite one another; the v3 schema migrates surviving filename-keyed rows.
