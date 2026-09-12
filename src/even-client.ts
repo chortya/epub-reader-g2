@@ -234,6 +234,7 @@ export class EvenEpubClient {
     });
     this.chapterPages = [];
     this.chapterPageStarts = [];
+    this.layoutCache.clear();
     this.repaginateForLayout();
 
 
@@ -305,9 +306,7 @@ export class EvenEpubClient {
           )
         : (this.chapterPageStarts[this.chapterIndex]?.[this.pageIndex] ?? 0);
 
-      this.chapterPages = [];
-      this.chapterPageStarts = [];
-      this.repaginateForLayout();
+      this.activateLayout();
 
       const starts = this.chapterPageStarts[this.chapterIndex] ?? [0];
       this.pageIndex = pageForOffset(starts, oldOffset);
@@ -329,10 +328,10 @@ export class EvenEpubClient {
       // settings UI, we only repaginate — we do NOT auto-switch into the
       // reading view. commitEditor() will route the user back to the
       // settings list; the user chooses when to return to reading via
-      // mainMenu -> Continue. Also invalidate flowLayoutReady so the next
-      // re-entry into flow does a full rebuild.
+      // mainMenu -> Continue. Also invalidate the reading render signature so
+      // the next re-entry into reading/flow does a full rebuild.
       if (this.view === 'settings' || this.view === 'settingEditor') {
-        this.flowLayoutReady = false;
+        this.readingRenderSig = null;
       } else if (config.readingMode === 'flow' && this.view === 'reading') {
         this.flowWordIndex = 0;
         await this.showFlowReading(false);
@@ -340,7 +339,7 @@ export class EvenEpubClient {
         this.stopFlow();
         await this.showPage();
       } else {
-        this.flowLayoutReady = false;
+        this.readingRenderSig = null;
         await this.refreshCurrentView();
       }
       if (this.view === 'flowReading' && this.isFlowRunning) {
@@ -699,6 +698,7 @@ export class EvenEpubClient {
     this.stopFlow();
     this.stopClockTicker();
     this.view = 'welcome';
+    this.readingRenderSig = null; // welcome rebuilds the page — stale upgrades must not fire
 
     await this.bridge.rebuildPageContainer(
       new RebuildPageContainer({
@@ -821,12 +821,26 @@ export class EvenEpubClient {
       textObjects.push(footerContainer);
     }
 
-    await this.bridge.rebuildPageContainer(
-      new RebuildPageContainer({
-        containerTotalNum: textObjects.length,
-        textObject: textObjects,
-      }),
-    );
+    if (this.readingRenderSig === this.computeReadingRenderSig()) {
+      // Same topology as the last render: flicker-free content swap. This is
+      // the common page-turn path — no rebuild, no flicker, no phantom scroll.
+      await this.bridge.textContainerUpgrade(
+        new TextContainerUpgrade({ containerID: 1, containerName: 'text', content: paddedPage }),
+      );
+      if (hasBottomBar) {
+        await this.bridge.textContainerUpgrade(
+          new TextContainerUpgrade({ containerID: 2, containerName: 'footer', content: label }),
+        );
+      }
+    } else {
+      await this.bridge.rebuildPageContainer(
+        new RebuildPageContainer({
+          containerTotalNum: textObjects.length,
+          textObject: textObjects,
+        }),
+      );
+      this.readingRenderSig = this.computeReadingRenderSig();
+    }
     notifyTextUpdate();
 
     await this.savePagedPosition();
@@ -838,12 +852,24 @@ export class EvenEpubClient {
     );
   }
 
-  private flowLayoutReady = false;
+  /**
+   * Signature of the reading-view container topology (both paged and flow use
+   * [text(capture), footer?]). When it matches the last render, page turns and
+   * flow frames use flicker-free textContainerUpgrade instead of a rebuild;
+   * any other view's rebuild invalidates it so a stale upgrade can never
+   * target menu containers.
+   */
+  private readingRenderSig: string | null = null;
+
+  private computeReadingRenderSig(): string {
+    const layout = getTextLayout();
+    return `${config.statusBarPosition}|${layout.maxLines}|${layout.topBlankLines}`;
+  }
 
   private async showFlowReading(autoStart: boolean): Promise<void> {
     if (!this.book || this.flowPageData.length === 0) return;
     this.view = 'flowReading';
-    this.flowLayoutReady = false; // force full rebuild on entry
+    this.readingRenderSig = null; // force full rebuild on entry
     const pageData = this.getCurrentFlowPageData();
     if (!pageData) return;
     this.flowWordIndex = clamp(this.flowWordIndex, 0, Math.max(0, pageData.wordCount - 1));
@@ -921,8 +947,8 @@ export class EvenEpubClient {
       );
     }
 
-    if (this.flowLayoutReady) {
-      // Use textContainerUpgrade for flicker-free in-place updates (per SDK docs)
+    if (this.readingRenderSig === this.computeReadingRenderSig()) {
+      // Flicker-free in-place updates (per SDK docs)
       await this.bridge.textContainerUpgrade(
         new TextContainerUpgrade({
           containerID: 1,
@@ -947,7 +973,7 @@ export class EvenEpubClient {
           textObject: textObjects,
         }),
       );
-      this.flowLayoutReady = true;
+      this.readingRenderSig = this.computeReadingRenderSig();
     }
     notifyTextUpdate();
 
@@ -965,6 +991,9 @@ export class EvenEpubClient {
   }
 
   private async rebuildSlots(labels: string[], selectedSlot: number): Promise<void> {
+    // Menu/list views replace the reading containers — invalidate the reading
+    // render signature so returning to reading rebuilds instead of upgrading.
+    this.readingRenderSig = null;
     // v1.4.3 layout: trim trailing empty slots so a partial page (3-item main
     // menu, 2-option binary editors, last page of a paginated settings list)
     // doesn't render dead rows; vertically center what remains; size every row
@@ -1085,6 +1114,57 @@ export class EvenEpubClient {
     this.chapterPages = paginated.map((p) => p.pages);
     this.chapterPageStarts = paginated.map((p) => p.pageStarts);
     this.flowPageData = this.buildFlowPageData(this.chapterPages);
+  }
+
+  /**
+   * Layout cache (Phase 2): pagination results per layout signature, so
+   * toggling reading info (footer on/off) swaps page arrays instead of
+   * repaginating the whole book. LRU-capped at 2 entries: the current layout
+   * plus the one the user just left. Cache is cleared when a new book loads.
+   */
+  private layoutCache = new Map<string, {
+    pages: string[][];
+    starts: number[][];
+    flow: FlowPageData[][];
+  }>();
+
+  private layoutCacheKey(): string {
+    return `${config.hyphenation ? 'h' : 'n'}|${config.textHeightPercent}|${config.statusBarPosition}`;
+  }
+
+  private activateLayout(): void {
+    if (!this.book) return;
+    const key = this.layoutCacheKey();
+    const cached = this.layoutCache.get(key);
+    if (cached) {
+      // Refresh LRU recency.
+      this.layoutCache.delete(key);
+      this.layoutCache.set(key, cached);
+      this.chapterPages = cached.pages;
+      this.chapterPageStarts = cached.starts;
+      this.flowPageData = cached.flow;
+      return;
+    }
+    this.repaginateForLayout();
+    this.layoutCache.set(key, {
+      pages: this.chapterPages,
+      starts: this.chapterPageStarts,
+      flow: this.flowPageData,
+    });
+    if (this.layoutCache.size > 2) {
+      const oldest = this.layoutCache.keys().next().value;
+      if (oldest !== undefined) this.layoutCache.delete(oldest);
+    }
+  }
+
+  /** Source offset of the current position (paged: page start; flow: word). */
+  private currentOffset(): number {
+    const pageStart = this.chapterPageStarts[this.chapterIndex]?.[this.pageIndex] ?? 0;
+    if (this.view === 'flowReading') {
+      const pageText = this.chapterPages[this.chapterIndex]?.[this.pageIndex] ?? '';
+      return pageStart + flowOffsetForWord(pageText, this.flowWordIndex);
+    }
+    return pageStart;
   }
 
   private buildFlowPageData(chapters: string[][]): FlowPageData[][] {    return chapters.map((pages) =>
@@ -1517,11 +1597,35 @@ export class EvenEpubClient {
   /**
    * Toggle the 30 px footer. Hidden mode uses 10 text lines instead of 9.
    * Paged reading maps this to the otherwise-unused tap gesture.
+   *
+   * Phase 2: switches via the layout cache and an offset remap — no full-book
+   * repagination on toggle (the page arrays are swapped; the first toggle to a
+   * not-yet-cached geometry still computes once). The footer's
+   * appearance/disappearance changes container topology, so the render
+   * rebuilds (sig mismatch) — one flicker per toggle, none per page turn.
    */
   public async toggleReadingInfo(): Promise<void> {
+    const wasFlow = this.view === 'flowReading';
+    const oldOffset = this.currentOffset();
+
     config.statusBarPosition = toggleStatusBarPosition(config.statusBarPosition);
     saveSettings();
-    await this.applySettings();
+    this.activateLayout();
+
+    // Offset-accurate remap into the new geometry.
+    const starts = this.chapterPageStarts[this.chapterIndex] ?? [0];
+    this.pageIndex = pageForOffset(starts, oldOffset);
+    if (wasFlow) {
+      const pageText = this.chapterPages[this.chapterIndex]?.[this.pageIndex] ?? '';
+      const pageWords = this.flowPageData[this.chapterIndex]?.[this.pageIndex]?.wordCount ?? 1;
+      this.flowWordIndex = clamp(
+        flowWordForOffset(pageText, Math.max(0, oldOffset - starts[this.pageIndex])),
+        0,
+        Math.max(0, pageWords - 1),
+      );
+    }
+
+    await (wasFlow ? this.showFlowFrame() : this.showPage());
     await saveSettingsToBridge(this.bridge);
     resetGestureState();
     const lines = getTextLayout().maxLines;
