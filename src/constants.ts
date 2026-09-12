@@ -7,6 +7,8 @@
 // - containerName max: 16 characters
 // - **IMAGES FORBIDDEN IN STARTUP PHASE** (createStartUpPageContainer)
 // - Images ONLY work in rebuildPageContainer (post-startup pages)
+import { measureWidth, pxTruncate } from './text-metrics.ts';
+
 export const DISPLAY_WIDTH = 576;  // SDK maximum X range
 export const DISPLAY_HEIGHT = 288; // SDK maximum Y range
 
@@ -265,11 +267,19 @@ export function formatStatusLine(args: {
   infoText: string;
   maxChars: number;
   progress: number;
+  /** When set, the label is pixel-fitted to this width (firmware metrics). */
+  maxPx?: number;
 }): string {
-  const { now, infoText, maxChars, progress } = args;
+  const { now, infoText, maxChars, progress, maxPx } = args;
   const hhmm = `${zeroPad2(now.getHours())}:${zeroPad2(now.getMinutes())}`;
   const prefix = `${hhmm}  `;
   const clampedProgress = Math.max(0, Math.min(1, progress));
+
+  if (maxPx !== undefined) {
+    return formatStatusLinePx({ prefix, infoText, progress: clampedProgress, maxPx });
+  }
+
+  // Legacy char-budget path (kept for callers/tests without pixel metrics).
 
   // Reserve brackets. Bar width is whatever remains after clock + infoText.
   const BRACKETS = 2;
@@ -296,6 +306,44 @@ export function formatStatusLine(args: {
   const empty = barLen - filled;
   const bar = '━'.repeat(filled) + '─'.repeat(empty);
   return `${prefix}${infoText}[${bar}]`;
+}
+
+/**
+ * Pixel-fitted status line (Phase 2). Same shape as the legacy path, but the
+ * bar length is chosen by measured firmware font metrics so the label can
+ * never exceed the footer's inner width — the char-count heuristic measured a
+ * 59-char line at 593 px (> 576 px), which is what wrapped footers.
+ */
+function formatStatusLinePx(args: {
+  prefix: string;
+  infoText: string;
+  progress: number;
+  maxPx: number;
+}): string {
+  const { prefix, infoText, progress, maxPx } = args;
+  const base = `${prefix}${infoText}`;
+  const bracketW = measureWidth('[]');
+  const budget = maxPx - measureWidth(base) - bracketW;
+
+  const buildBar = (len: number): string => {
+    const filled = Math.round(len * progress);
+    return '━'.repeat(filled) + '─'.repeat(len - filled);
+  };
+
+  // Cap at 10 cells (unchanged from the char path). Start from the largest
+  // length the per-glyph advance allows, then verify against the measured
+  // whole-label width — box glyphs kern against neighbours.
+  const advW = measureWidth('━');
+  let barLen = Math.min(10, Math.floor(budget / Math.max(1, advW)));
+  while (barLen > 0 && measureWidth(`${base}[${buildBar(barLen)}]`) > maxPx) {
+    barLen--;
+  }
+  if (barLen <= 0) {
+    // No bar fits: drop it rather than wrap. pxTruncate guards pathological
+    // infoText (longer than the bar itself).
+    return pxTruncate(base, maxPx);
+  }
+  return `${base}[${buildBar(barLen)}]`;
 }
 
 /**

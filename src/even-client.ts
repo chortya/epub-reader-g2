@@ -39,6 +39,7 @@ import {
 } from './constants';
 import { clamp, setStatus, truncateForList, appendEventLog } from './utils';
 import { createSerialExecutor, type SerialExecutor } from './operation-queue';
+import { measureWidth, FOOTER_INNER_WIDTH } from './text-metrics';
 import { createSplashBridgeAdapter } from './splash-bridge';
 import {
   ITEMS_PER_PAGE,
@@ -778,6 +779,7 @@ export class EvenEpubClient {
       now: new Date(),
       infoText,
       maxChars: 59,
+        maxPx: FOOTER_INNER_WIDTH,
       progress,
     });
 
@@ -908,6 +910,7 @@ export class EvenEpubClient {
       now: new Date(),
       infoText,
       maxChars: 59,
+        maxPx: FOOTER_INNER_WIDTH,
       progress,
     });
 
@@ -1001,7 +1004,7 @@ export class EvenEpubClient {
     // box rather than a full-width banner.
     const visibleLabels = trimTrailingEmptySlots(labels);
     const n = visibleLabels.length;
-    const boxWidthPx = computeBoxWidthPx(visibleLabels);
+    const boxWidthPx = computeBoxWidthPx(visibleLabels, measureWidth);
     const boxChars = Math.floor(boxWidthPx / CHAR_PITCH_PX);
     const xPosition = Math.floor((DISPLAY_WIDTH - boxWidthPx) / 2);
     const yPositions = computeRowOffsets(n);
@@ -1749,7 +1752,7 @@ export class EvenEpubClient {
         pageIndex: this.pageIndex,
         totalChapters: this.book.chapters.length,
       });
-      return formatStatusLine({ now: new Date(), infoText, maxChars: 59, progress });
+      return formatStatusLine({ now: new Date(), infoText, maxChars: 59, maxPx: FOOTER_INNER_WIDTH, progress });
     }
     // flowReading
     const pageData = this.flowPageData[this.chapterIndex]?.[this.pageIndex];
@@ -1765,7 +1768,7 @@ export class EvenEpubClient {
       flowSpeedWpm: config.flowSpeedWpm,
       isFlowRunning: this.isFlowRunning,
     });
-    return formatStatusLine({ now: new Date(), infoText, maxChars: 59, progress });
+    return formatStatusLine({ now: new Date(), infoText, maxChars: 59, maxPx: FOOTER_INNER_WIDTH, progress });
   }
 
   // --- Persistence ---

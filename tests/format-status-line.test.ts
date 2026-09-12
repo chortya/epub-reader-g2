@@ -72,3 +72,26 @@ test('formatStatusLine: never exceeds maxChars when only 1-4 bar cells remain', 
     assert.ok(out.length <= 59, `rawBarLen=${rawBarLen}: length ${out.length} > 59: ${JSON.stringify(out)}`);
   }
 });
+
+// --- Phase 2: pixel-fitted status line (firmware metrics) ---
+
+test('formatStatusLine: maxPx path never exceeds the pixel budget', async () => {
+  const { formatStatusLine } = await import('../src/constants.ts');
+  const { getTextWidth } = await import('../src/text-metrics.ts');
+  const now = new Date(2026, 0, 1, 12, 34);
+  // The binding case from v1.4.1: long flow label + clock.
+  const infoText = 'RUN 600wpm Ch 12/99 Pg 123/256 ';
+  const out = formatStatusLine({ now, infoText, maxChars: 59, progress: 0.5, maxPx: 576 });
+  assert.ok(getTextWidth(out) <= 576, `measured ${getTextWidth(out)}px for ${JSON.stringify(out)}`);
+  assert.ok(out.includes('[') && out.includes(']'), 'bar present when it fits');
+});
+
+test('formatStatusLine: maxPx path drops the bar when nothing fits, truncating safely', async () => {
+  const { formatStatusLine } = await import('../src/constants.ts');
+  const { getTextWidth } = await import('../src/text-metrics.ts');
+  const now = new Date(2026, 0, 1, 12, 34);
+  const infoText = 'Ch 12/99 Pg 123/2560 of a pathologically long chapter page label that goes on ';
+  const out = formatStatusLine({ now, infoText, maxChars: 59, progress: 1, maxPx: 200 });
+  assert.ok(!out.includes('['), 'no bar when budget exhausted');
+  assert.ok(getTextWidth(out) <= 200, `measured ${getTextWidth(out)}px`);
+});

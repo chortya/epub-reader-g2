@@ -138,3 +138,15 @@ test('centerLabel: label longer than box returns unchanged', () => {
 test('centerLabel: empty label produces only padding up to half the box', () => {
   assert.equal(centerLabel('', 6), '   ');
 });
+
+test('computeBoxWidthPx: injected measure drives box width within clamps', async () => {
+  const { computeBoxWidthPx, MIN_BOX_PX, EDGE_MARGIN } = await import('../src/layout.ts');
+  const { DISPLAY_WIDTH } = await import('../src/constants.ts');
+  const stub = (s: string) => s.length * 10; // deterministic stub
+  // 20-char label → 200px + padding/inset
+  const w1 = computeBoxWidthPx(['A'.repeat(20)], stub);
+  assert.ok(w1 > 200 && w1 < 260, `got ${w1}`);
+  assert.equal(computeBoxWidthPx([], stub), MIN_BOX_PX);
+  const huge = computeBoxWidthPx(['A'.repeat(200)], stub);
+  assert.equal(huge, DISPLAY_WIDTH - 2 * EDGE_MARGIN, 'clamped to display');
+});

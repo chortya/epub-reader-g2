@@ -23,15 +23,35 @@ export const EDGE_MARGIN = 16;
 export const BORDER_INSET = 4;
 export const BOX_TEXT_PADDING_CELLS = 2;
 
-export function computeBoxWidthPx(labels: readonly string[]): number {
-  const lengths = labels.filter((s) => s.length > 0).map((s) => s.length);
+/**
+ * Width of the selection box for a page of labels, in px.
+ *
+ * `measure` is injectable so the geometry stays pure and unit-testable with a
+ * deterministic stub; production passes the firmware-exact metrics adapter
+ * (`measureWidth` from text-metrics.ts). Legacy callers that omit `measure`
+ * keep the char-pitch estimate.
+ */
+export function computeBoxWidthPx(
+  labels: readonly string[],
+  measure?: (text: string) => number,
+): number {
+  const visible = labels.filter((s) => s.length > 0);
   // Math.max() with no args returns -Infinity; guard with a 0 sentinel so an
   // all-empty input falls through to MIN_BOX_PX rather than NaN.
-  const longest = Math.max(0, ...lengths);
-  // Reserve a full cell on each side. The G2 font is proportional and some
-  // labels render wider than the nominal pitch; the previous exact-fit math
-  // visibly clipped the closing parenthesis in "(No recent book)".
-  const raw = Math.ceil((longest + BOX_TEXT_PADDING_CELLS) * CHAR_PITCH_PX) + 2 * BORDER_INSET;
+  const raw = (() => {
+    if (visible.length === 0) return 0;
+    if (measure) {
+      const widest = Math.max(0, ...visible.map((s) => measure(s)));
+      // Reserve BOX_TEXT_PADDING_CELLS worth of space around the text, plus
+      // the border inset on each side.
+      return Math.ceil(widest + BOX_TEXT_PADDING_CELLS * CHAR_PITCH_PX) + 2 * BORDER_INSET;
+    }
+    const longest = Math.max(0, ...visible.map((s) => s.length));
+    // Reserve a full cell on each side. The G2 font is proportional and some
+    // labels render wider than the nominal pitch; the previous exact-fit math
+    // visibly clipped the closing parenthesis in "(No recent book)".
+    return Math.ceil((longest + BOX_TEXT_PADDING_CELLS) * CHAR_PITCH_PX) + 2 * BORDER_INSET;
+  })();
   return clamp(raw, MIN_BOX_PX, DISPLAY_WIDTH - 2 * EDGE_MARGIN);
 }
 
