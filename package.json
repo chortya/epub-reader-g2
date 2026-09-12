@@ -19,7 +19,7 @@
     "postinstall": "patch-package"
   },
   "dependencies": {
-    "@evenrealities/even_hub_sdk": "^0.0.10",
+    "@evenrealities/even_hub_sdk": "0.0.15",
     "@evenrealities/evenhub-cli": "^0.1.13",
     "even-toolkit": "1.7.7",
     "hyphenation.de": "^0.2.1",
