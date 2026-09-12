@@ -61,7 +61,12 @@ export type SettingKey =
   | 'statusBarPosition'
   | 'readingMode'
   | 'flowSpeedWpm'
-  | 'textHeightPercent';
+  | 'textHeightPercent'
+  | 'textBrightness';
+
+/** Firmware-supported text brightness range (SDK 0.0.14+): 0 is invisible-dim, so 1..4. */
+export const TEXT_BRIGHTNESS_VALUES = [1, 2, 3, 4] as const;
+export const TEXT_BRIGHTNESS_DEFAULT = 4;
 
 export type AppConfig = {
     hyphenation: boolean;
@@ -69,6 +74,7 @@ export type AppConfig = {
     readingMode: 'paged' | 'flow';
     flowSpeedWpm: number;
     textHeightPercent: number;
+    textBrightness: number;
 };
 
 export const config: AppConfig = {
@@ -77,6 +83,7 @@ export const config: AppConfig = {
     readingMode: 'paged',
     flowSpeedWpm: 240,
     textHeightPercent: TEXT_HEIGHT_MAX_PERCENT,
+    textBrightness: TEXT_BRIGHTNESS_DEFAULT,
 };
 
 /**
@@ -129,6 +136,14 @@ export function loadSettings(raw: string | null): Partial<AppConfig> {
         out.textHeightPercent = Math.max(
             TEXT_HEIGHT_MIN_PERCENT,
             Math.min(TEXT_HEIGHT_MAX_PERCENT, Math.round(parsed.textHeightPercent)),
+        );
+    }
+    if (typeof parsed.textBrightness === 'number' && Number.isFinite(parsed.textBrightness)) {
+        // Level 0 is the dimmest level, not "unset" — it can render effectively
+        // invisible (docs). Clamp to the usable 1..4 band.
+        out.textBrightness = Math.max(
+            1,
+            Math.min(TEXT_BRIGHTNESS_DEFAULT, Math.round(parsed.textBrightness)),
         );
     }
 
@@ -362,6 +377,8 @@ export function formatSettingsRow(key: SettingKey, cfg: AppConfig): string {
       return `Flow speed: ${cfg.flowSpeedWpm} wpm`;
     case 'textHeightPercent':
       return `Text height: ${cfg.textHeightPercent}%`;
+    case 'textBrightness':
+      return `Brightness: ${cfg.textBrightness}/4`;
   }
 }
 
@@ -393,6 +410,11 @@ export function applyEditorValue(cfg: AppConfig, key: SettingKey, index: number)
     case 'textHeightPercent': {
       const i = Math.max(0, Math.min(TEXT_HEIGHT_VALUES.length - 1, index));
       cfg.textHeightPercent = TEXT_HEIGHT_VALUES[i];
+      return;
+    }
+    case 'textBrightness': {
+      const i = Math.max(0, Math.min(TEXT_BRIGHTNESS_VALUES.length - 1, index));
+      cfg.textBrightness = TEXT_BRIGHTNESS_VALUES[i];
       return;
     }
   }

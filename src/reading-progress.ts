@@ -31,6 +31,8 @@ export interface FlowProgressInput {
   chapterTotalPages: number;
   flowSpeedWpm: number;
   isFlowRunning: boolean;
+  /** Measured pace (wpm) from the active session; null = not enough data yet. */
+  paceWpm?: number | null;
 }
 
 export interface ProgressResult {
@@ -73,9 +75,27 @@ export function computeFlowProgress(input: FlowProgressInput): ProgressResult {
   }
   const progress = totalBookWords > 1 ? currentAbsoluteWord / totalBookWords : 1;
   const flowState = input.isFlowRunning ? 'RUN' : 'PAUSE';
+
+  // Time-to-finish for the current chapter (plan §3.5): real measured pace
+  // only — no fabricated estimates. The label is pixel-fitted downstream, so
+  // a tight fit just shortens the bar.
+  let eta = '';
+  if (input.paceWpm && input.paceWpm >= 100) {
+    let chapterRemaining = 0;
+    const counts = input.flowWordCounts[input.chapterIndex] ?? [];
+    for (let pg = 0; pg < counts.length; pg++) {
+      chapterRemaining += counts[pg]!;
+    }
+    for (let pg = 0; pg < input.pageIndex; pg++) chapterRemaining -= counts[pg] ?? 0;
+    chapterRemaining -= input.flowWordIndex;
+    if (chapterRemaining > 0) {
+      eta = `~${Math.max(1, Math.round(chapterRemaining / input.paceWpm))}m `;
+    }
+  }
+
   const infoText =
     `${flowState} ${input.flowSpeedWpm}wpm Ch ${input.chapterIndex + 1}/${input.totalChapters} ` +
-    `Pg ${input.pageIndex + 1}/${input.chapterTotalPages} `;
+    `${eta}Pg ${input.pageIndex + 1}/${input.chapterTotalPages} `;
   return { infoText, progress };
 }
 

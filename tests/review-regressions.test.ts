@@ -214,3 +214,29 @@ test('bridge library split: legacy-blob fallback loads when the index is missing
   assert.equal(loaded.length, 1);
   assert.equal(loaded[0].bookId, 'legacy-1');
 });
+
+// --- Phase 3.5: chapter time-left uses real measured pace only ---
+
+test('computeFlowProgress: ETA appears only with a measured pace and real remaining words', async () => {
+  const { computeFlowProgress } = await import('../src/reading-progress.ts');
+  const base = {
+    flowWordCounts: [[10, 10], [10, 10]],
+    chapterIndex: 0,
+    pageIndex: 0,
+    flowWordIndex: 0,
+    totalChapters: 2,
+    chapterTotalPages: 2,
+    flowSpeedWpm: 240,
+    isFlowRunning: true,
+  };
+  const noPace = computeFlowProgress(base);
+  assert.ok(!noPace.infoText.includes('~'), 'no fabricated ETA without pace');
+  const withPace = computeFlowProgress({ ...base, paceWpm: 200 });
+  assert.ok(withPace.infoText.includes('~1m '), `got ${withPace.infoText}`);
+  // 19 remaining words at 200 wpm → ~0m clamps to 1m.
+  const almostDone = computeFlowProgress({ ...base, pageIndex: 1, flowWordIndex: 9, paceWpm: 200 });
+  assert.ok(almostDone.infoText.includes('~1m '), `got ${almostDone.infoText}`);
+  // Sub-100 wpm pace is treated as noise → no ETA.
+  const noisy = computeFlowProgress({ ...base, paceWpm: 42 });
+  assert.ok(!noisy.infoText.includes('~'));
+});

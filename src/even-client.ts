@@ -2,6 +2,8 @@
 import {
   CreateStartUpPageContainer,
   DeviceConnectType,
+  MenuContainerProperty,
+  MenuItemProperty,
   OsEventTypeList,
   RebuildPageContainer,
   TextContainerProperty,
@@ -29,6 +31,7 @@ import {
   STORAGE_KEY_LAST_BOOK_FILENAME,
   STORAGE_KEY_LAST_BOOK_ID,
   TEXT_HEIGHT_VALUES,
+  TEXT_BRIGHTNESS_VALUES,
   applyEditorValue,
   formatSettingsRow,
   formatStatusLine,
@@ -39,6 +42,20 @@ import {
 } from './constants';
 import { clamp, setStatus, truncateForList, appendEventLog } from './utils';
 import { createSerialExecutor, type SerialExecutor } from './operation-queue';
+import {
+  reduceLifecycle,
+  PAGED_MENU_ITEMS,
+  FLOW_MENU_ITEMS,
+  MENU_CONTENTS,
+  MENU_SWITCH_MODE,
+  MENU_SET_BOOKMARK,
+  MENU_GO_BOOKMARK,
+  MENU_MAIN_MENU,
+  MENU_FASTER,
+  MENU_SLOWER,
+  type LifecycleState,
+} from './lifecycle';
+import { sentenceStartBefore, nextSentenceStart } from './sentences';
 import { measureWidth, FOOTER_INNER_WIDTH } from './text-metrics';
 import { createSplashBridgeAdapter } from './splash-bridge';
 import {
@@ -83,6 +100,7 @@ const SETTINGS_MENU_KEYS: readonly SettingKey[] = [
   'readingMode',
   'flowSpeedWpm',
   'textHeightPercent',
+  'textBrightness',
 ];
 
 // Value arrays for each key's editor. Enums/booleans are inlined; numeric
@@ -93,6 +111,7 @@ const EDITOR_VALUE_LABELS: Record<SettingKey, readonly string[]> = {
   readingMode: ['Paged', 'Flow'],
   flowSpeedWpm: FLOW_SPEED_VALUES.map((v) => `${v} wpm`),
   textHeightPercent: TEXT_HEIGHT_VALUES.map((v) => `${v}%`),
+  textBrightness: TEXT_BRIGHTNESS_VALUES.map((v) => `${v}/4`),
 };
 
 function currentEditorIndex(key: SettingKey): number {
@@ -118,6 +137,15 @@ function currentEditorIndex(key: SettingKey): number {
       let bestDist = Infinity;
       for (let i = 0; i < TEXT_HEIGHT_VALUES.length; i++) {
         const d = Math.abs(TEXT_HEIGHT_VALUES[i] - config.textHeightPercent);
+        if (d < bestDist) { best = i; bestDist = d; }
+      }
+      return best;
+    }
+    case 'textBrightness': {
+      let best = 0;
+      let bestDist = Infinity;
+      for (let i = 0; i < TEXT_BRIGHTNESS_VALUES.length; i++) {
+        const d = Math.abs(TEXT_BRIGHTNESS_VALUES[i] - config.textBrightness);
         if (d < bestDist) { best = i; bestDist = d; }
       }
       return best;
@@ -156,6 +184,16 @@ export class EvenEpubClient {
   private persister: PositionPersister;
   // FIFO queue for gesture-driven SDK work (Phase 1.6): swipes never overlap.
   private serialGesture: SerialExecutor;
+  // Foreground lifecycle (Phase 3): disambiguates menu ENTER/EXIT from real
+  // background/foreground; holds a menu click until the overlay closes.
+  private lifecycleState: LifecycleState = 'active';
+  private pendingMenuAction: number | null = null;
+  // Reading-view brightness (Phase 3): body text 1-4, secondary text 3.
+  private static readonly FOOTER_TEXT_COLOR = 3;
+  // Flow pace tracking (Phase 3.5): active-reading time + words, session-scoped.
+  private flowPaceWords = 0;
+  private flowPaceMs = 0;
+  private flowPaceWindowStart = 0;
 
   // Settings-menu state (Stage 6). settingsListSelectedIndex indexes into
   // SETTINGS_MENU_KEYS; editingSettingKey is non-null while the editor view
@@ -801,6 +839,7 @@ export class EvenEpubClient {
       containerName: 'text',
       content: paddedPage,
       isEventCapture: 1,
+      textColor: config.textBrightness,
     });
 
     const textObjects = [textContainer];
@@ -819,6 +858,7 @@ export class EvenEpubClient {
         containerName: 'footer',
         content: label,
         isEventCapture: 0,
+        textColor: EvenEpubClient.FOOTER_TEXT_COLOR,
       });
       textObjects.push(footerContainer);
     }
@@ -827,11 +867,21 @@ export class EvenEpubClient {
       // Same topology as the last render: flicker-free content swap. This is
       // the common page-turn path — no rebuild, no flicker, no phantom scroll.
       await this.bridge.textContainerUpgrade(
-        new TextContainerUpgrade({ containerID: 1, containerName: 'text', content: paddedPage }),
+        new TextContainerUpgrade({
+          containerID: 1,
+          containerName: 'text',
+          content: paddedPage,
+          textColor: config.textBrightness,
+        }),
       );
       if (hasBottomBar) {
         await this.bridge.textContainerUpgrade(
-          new TextContainerUpgrade({ containerID: 2, containerName: 'footer', content: label }),
+          new TextContainerUpgrade({
+            containerID: 2,
+            containerName: 'footer',
+            content: label,
+            textColor: EvenEpubClient.FOOTER_TEXT_COLOR,
+          }),
         );
       }
     } else {
@@ -839,6 +889,7 @@ export class EvenEpubClient {
         new RebuildPageContainer({
           containerTotalNum: textObjects.length,
           textObject: textObjects,
+          menuObject: this.buildMenuObject(),
         }),
       );
       this.readingRenderSig = this.computeReadingRenderSig();
@@ -903,6 +954,7 @@ export class EvenEpubClient {
       chapterTotalPages,
       flowSpeedWpm: config.flowSpeedWpm,
       isFlowRunning: this.isFlowRunning,
+      paceWpm: this.getFlowPaceWpm(),
     });
 
     const hasBottomBar = config.statusBarPosition === 'bottom';
@@ -910,7 +962,7 @@ export class EvenEpubClient {
       now: new Date(),
       infoText,
       maxChars: 59,
-        maxPx: FOOTER_INNER_WIDTH,
+      maxPx: FOOTER_INNER_WIDTH,
       progress,
     });
 
@@ -929,6 +981,7 @@ export class EvenEpubClient {
       containerName: 'flow-text',
       content: paddedContent,
       isEventCapture: 1,
+      textColor: config.textBrightness,
     });
 
     const textObjects = [textContainer];
@@ -946,6 +999,7 @@ export class EvenEpubClient {
           containerName: 'flow-footer',
           content: label,
           isEventCapture: 0,
+          textColor: EvenEpubClient.FOOTER_TEXT_COLOR,
         }),
       );
     }
@@ -957,6 +1011,7 @@ export class EvenEpubClient {
           containerID: 1,
           containerName: 'flow-text',
           content: paddedContent,
+          textColor: config.textBrightness,
         }),
       );
       if (hasBottomBar) {
@@ -965,15 +1020,18 @@ export class EvenEpubClient {
             containerID: 2,
             containerName: 'flow-footer',
             content: label,
+            textColor: EvenEpubClient.FOOTER_TEXT_COLOR,
           }),
         );
       }
     } else {
-      // Full rebuild to establish container layout
+      // Full rebuild to establish container layout; carries the contextual
+      // menu (a rebuild without menuObject clears it — plan §3.1).
       await this.bridge.rebuildPageContainer(
         new RebuildPageContainer({
           containerTotalNum: textObjects.length,
           textObject: textObjects,
+          menuObject: this.buildMenuObject(),
         }),
       );
       this.readingRenderSig = this.computeReadingRenderSig();
@@ -1215,6 +1273,7 @@ export class EvenEpubClient {
   private startFlow(): void {
     if (this.isFlowRunning) return;
     this.isFlowRunning = true;
+    this.flowPaceWindowStart = Date.now();
     appendEventLog('Flow started');
     this.onFlowStateChanged?.(true);
     this.scheduleFlowTick();
@@ -1226,9 +1285,20 @@ export class EvenEpubClient {
       window.clearTimeout(this.flowTimerId);
       this.flowTimerId = null;
     }
+    if (this.isFlowRunning && this.flowPaceWindowStart > 0) {
+      this.flowPaceMs += Date.now() - this.flowPaceWindowStart;
+      this.flowPaceWindowStart = 0;
+    }
     const wasRunning = this.isFlowRunning;
     this.isFlowRunning = false;
     if (wasRunning) this.onFlowStateChanged?.(false);
+  }
+
+  /** Measured session pace (wpm); null until ≥60 s of active reading. */
+  private getFlowPaceWpm(): number | null {
+    const ms = this.flowPaceMs;
+    if (ms < 60_000 || this.flowPaceWords < 50) return null;
+    return this.flowPaceWords / (ms / 60_000);
   }
 
   private toggleFlow(): void {
@@ -1238,8 +1308,101 @@ export class EvenEpubClient {
       appendEventLog('Flow paused');
       this.showFlowFrame().catch((e) => console.warn('Failed to render flow frame:', e));
     } else {
+      // Auto-rewind on resume (plan §3.4): an interrupted reader loses their
+      // place mid-sentence — resume at the sentence start, or ~8 words back
+      // (never before the sentence start) when the sentence start is farther.
+      const offset = this.currentOffset();
+      const text = this.book.chapters[this.chapterIndex]?.text ?? '';
+      const sentenceStart = sentenceStartBefore(text, offset);
+      const target = offset - sentenceStart <= 48
+        ? sentenceStart
+        : Math.max(sentenceStart, offset - 48);
+      this.applyOffsetToFlowPosition(target);
       this.startFlow();
     }
+  }
+
+  /** Map an absolute chapter-text offset to page + flow word index. */
+  private applyOffsetToFlowPosition(offset: number): void {
+    const starts = this.chapterPageStarts[this.chapterIndex] ?? [0];
+    this.pageIndex = pageForOffset(starts, offset);
+    const pageText = this.chapterPages[this.chapterIndex]?.[this.pageIndex] ?? '';
+    const pageWords = this.flowPageData[this.chapterIndex]?.[this.pageIndex]?.wordCount ?? 1;
+    const rel = Math.max(0, offset - starts[this.pageIndex]);
+    this.flowWordIndex = clamp(
+      flowWordForOffset(pageText, rel),
+      0,
+      Math.max(0, pageWords - 1),
+    );
+  }
+
+  /** Flow, running: rewind to the start of the current sentence ("I missed that"). */
+  private async flowSentenceBack(): Promise<void> {
+    if (!this.book) return;
+    const text = this.book.chapters[this.chapterIndex]?.text ?? '';
+    const offset = this.currentOffset();
+    const target = sentenceStartBefore(text, Math.max(0, offset - 1));
+    if (target >= offset) return; // already at the chapter's first sentence
+    this.applyOffsetToFlowPosition(target);
+    await this.showFlowFrame();
+  }
+
+  /** Flow, running: skip to the start of the next sentence. */
+  private async flowSentenceForward(): Promise<void> {
+    if (!this.book) return;
+    const text = this.book.chapters[this.chapterIndex]?.text ?? '';
+    const offset = this.currentOffset();
+    const target = nextSentenceStart(text, offset);
+    if (target >= text.length) {
+      // Last sentence of the chapter — advance if another chapter follows.
+      if (this.chapterIndex < this.book.chapters.length - 1) {
+        this.chapterIndex++;
+        this.pageIndex = 0;
+        this.flowWordIndex = 0;
+        await this.showFlowFrame();
+      }
+      return;
+    }
+    this.applyOffsetToFlowPosition(target);
+    await this.showFlowFrame();
+  }
+
+  /** Flow, paused: page-level navigation (chapter jumps moved to the menu). */
+  private async nextPageInFlow(): Promise<void> {
+    if (!this.book) return;
+    const totalPages = this.chapterPages[this.chapterIndex]?.length ?? 1;
+    if (this.pageIndex >= totalPages - 1) {
+      if (this.chapterIndex < this.book.chapters.length - 1) {
+        this.chapterIndex++;
+        this.pageIndex = 0;
+        this.flowWordIndex = 0;
+      } else {
+        appendEventLog('Already at last page');
+        return;
+      }
+    } else {
+      this.pageIndex++;
+      this.flowWordIndex = 0;
+    }
+    await this.showFlowFrame();
+  }
+
+  private async prevPageInFlow(): Promise<void> {
+    if (!this.book) return;
+    if (this.pageIndex <= 0) {
+      if (this.chapterIndex > 0) {
+        this.chapterIndex--;
+        this.pageIndex = Math.max(0, (this.chapterPages[this.chapterIndex]?.length ?? 1) - 1);
+        this.flowWordIndex = 0;
+      } else {
+        appendEventLog('Already at first page');
+        return;
+      }
+    } else {
+      this.pageIndex--;
+      this.flowWordIndex = 0;
+    }
+    await this.showFlowFrame();
   }
 
   private scheduleFlowTick(): void {
@@ -1255,6 +1418,7 @@ export class EvenEpubClient {
 
   private async flowTick(): Promise<void> {
     if (!this.book || !this.isFlowRunning) return;
+    this.flowPaceWords++;
     if (this.isFlowTickInFlight) {
       // Previous render still in flight (render time exceeded the WPM
       // interval — e.g. slow bridge at 600 WPM = 100 ms). Reschedule so
@@ -1394,20 +1558,49 @@ export class EvenEpubClient {
     // Lifecycle events bypass the gesture queue: exits must preempt in-flight
     // renders, and the enter-refresh is safe to overlap either way.
     if (sysEvent?.eventType === OsEventTypeList.SYSTEM_EXIT_EVENT) {
+      const r = reduceLifecycle(this.lifecycleState, this.pendingMenuAction, { kind: 'systemExit' });
+      this.lifecycleState = r.state;
+      this.pendingMenuAction = r.pendingMenuAction;
       await this.handleShutdown();
       return;
     }
+
+    // Native contextual menu clicks bypass gesture routing entirely (plan §3.1).
+    // The click is registered; execution waits for the overlay's EXIT.
+    if (event?.menuItemClickEvent && typeof event.menuItemClickEvent.itemID === 'number') {
+      const r = reduceLifecycle(this.lifecycleState, this.pendingMenuAction, {
+        kind: 'menuClick',
+        itemID: event.menuItemClickEvent.itemID,
+      });
+      this.lifecycleState = r.state;
+      this.pendingMenuAction = r.pendingMenuAction;
+      return;
+    }
+
     if (sysEvent?.eventType === OsEventTypeList.FOREGROUND_EXIT_EVENT) {
-      if (this.isFlowRunning) this.stopFlow();
-      this.stopClockTicker();
-      if (this.view === 'flowReading') await this.saveFlowPosition(true, true);
-      else await this.savePagedPosition(true);
+      const r = reduceLifecycle(this.lifecycleState, this.pendingMenuAction, { kind: 'foregroundExit' });
+      this.lifecycleState = r.state;
+      const wasPending = this.pendingMenuAction;
+      this.pendingMenuAction = r.pendingMenuAction;
+      if (r.effects.pauseAndFlush) {
+        if (this.isFlowRunning) this.stopFlow();
+        this.stopClockTicker();
+        if (this.view === 'flowReading') await this.saveFlowPosition(true, true);
+        else await this.savePagedPosition(true);
+      }
+      if (r.effects.runPendingMenuAction && wasPending !== null) {
+        await this.dispatchMenuAction(wasPending);
+      }
       return;
     }
     if (sysEvent?.eventType === OsEventTypeList.FOREGROUND_ENTER_EVENT) {
-      await this.refreshCurrentView();
-      if (this.view === 'reading' || this.view === 'flowReading') {
-        this.startClockTicker();
+      const r = reduceLifecycle(this.lifecycleState, this.pendingMenuAction, { kind: 'foregroundEnter' });
+      this.lifecycleState = r.state;
+      if (r.effects.restoreView) {
+        await this.refreshCurrentView();
+        if (this.view === 'reading' || this.view === 'flowReading') {
+          this.startClockTicker();
+        }
       }
       return;
     }
@@ -1416,6 +1609,115 @@ export class EvenEpubClient {
     // rebuild/upgrade SDK calls. One rejection cannot wedge the queue
     // (createSerialExecutor), and each caller still logs its own error.
     await this.serialGesture(() => this.dispatchGlassEvent(event));
+  }
+
+  /** Execute a native-menu selection (stale-guarded on the reading views). */
+  private async dispatchMenuAction(itemID: number): Promise<void> {
+    if (this.view !== 'reading' && this.view !== 'flowReading') {
+      return; // stale click: the view changed while the overlay was open
+    }
+    switch (itemID) {
+      case MENU_CONTENTS:
+        if (this.isFlowRunning) this.stopFlow();
+        this.librarySelectedIndex = this.chapterIndex;
+        await this.showChapterList();
+        break;
+      case MENU_SWITCH_MODE:
+        config.readingMode = this.view === 'flowReading' ? 'paged' : 'flow';
+        saveSettings();
+        await saveSettingsToBridge(this.bridge);
+        await this.applySettings();
+        break;
+      case MENU_MAIN_MENU:
+        this.stopFlow();
+        await this.showMainMenu();
+        break;
+      case MENU_FASTER:
+      case MENU_SLOWER: {
+        if (this.view !== 'flowReading') return;
+        const step = itemID === MENU_FASTER ? 30 : -30;
+        config.flowSpeedWpm = clamp(config.flowSpeedWpm + step, FLOW_MIN_WPM, FLOW_MAX_WPM);
+        saveSettings();
+        await saveSettingsToBridge(this.bridge);
+        await this.showFlowFrame();
+        break;
+      }
+      case MENU_SET_BOOKMARK:
+        await this.saveBookmark();
+        break;
+      case MENU_GO_BOOKMARK:
+        await this.goToBookmark();
+        break;
+    }
+  }
+
+  /** Jump to the book's single quick bookmark, if one exists (plan §3.6). */
+  private async goToBookmark(): Promise<void> {
+    if (!this.book || !this.currentBookId) return;
+    try {
+      const raw = await (this.bridge as unknown as PositionBridge).getLocalStorage(
+        `epub-bookmark-${this.currentBookId}`,
+      );
+      if (!raw) {
+        setStatus('No bookmark set');
+        return;
+      }
+      const pos = JSON.parse(raw) as ReadingPosition;
+      if (pos.chapterIndex >= this.chapterPageStarts.length) {
+        setStatus('Bookmark no longer valid');
+        return;
+      }
+      const starts = this.chapterPageStarts[pos.chapterIndex] ?? [0];
+      this.chapterIndex = pos.chapterIndex;
+      this.pageIndex = pageForOffset(starts, typeof pos.offset === 'number' ? pos.offset : 0);
+      if (this.view === 'flowReading') {
+        const pageText = this.chapterPages[this.chapterIndex]?.[this.pageIndex] ?? '';
+        const pageWords = this.flowPageData[this.chapterIndex]?.[this.pageIndex]?.wordCount ?? 1;
+        this.flowWordIndex = clamp(
+          flowWordForOffset(pageText, Math.max(0, (pos.offset ?? 0) - starts[this.pageIndex])),
+          0,
+          Math.max(0, pageWords - 1),
+        );
+        await this.showFlowFrame();
+      } else {
+        await this.showPage();
+      }
+    } catch (e) {
+      console.warn('Bookmark jump failed:', e);
+      setStatus('Bookmark jump failed');
+    }
+  }
+
+  /** Single quick bookmark per book (plan §3.6), position format v2 shape. */
+  private async saveBookmark(): Promise<void> {
+    if (!this.book || !this.currentBookId) return;
+    try {
+      const pos: ReadingPosition = {
+        chapterIndex: this.chapterIndex,
+        pageIndex: this.pageIndex,
+        wordIndex: this.view === 'flowReading' ? this.flowWordIndex : undefined,
+        v: 2,
+        offset: this.currentOffset(),
+        paginationVersion: PAGINATION_VERSION,
+      };
+      await (this.bridge as unknown as PositionBridge).setLocalStorage(
+        `epub-bookmark-${this.currentBookId}`,
+        JSON.stringify(pos),
+      );
+      setStatus(`Bookmarked: Ch ${this.chapterIndex + 1}, Pg ${this.pageIndex + 1}`);
+    } catch (e) {
+      console.warn('Bookmark save failed:', e);
+      setStatus('Bookmark failed');
+    }
+  }
+
+  /** Build the contextual-menu payload for the current reading view. */
+  private buildMenuObject(): MenuContainerProperty | undefined {
+    if (this.view !== 'reading' && this.view !== 'flowReading') return undefined;
+    const items = this.view === 'flowReading' ? FLOW_MENU_ITEMS : PAGED_MENU_ITEMS;
+    return new MenuContainerProperty({
+      menuItems: items.map((m) => new MenuItemProperty({ itemID: m.id, itemName: m.label })),
+    });
   }
 
   /** Dispatch one mapped gesture. Runs serialized — see onEvenHubEvent. */
@@ -1427,7 +1729,14 @@ export class EvenEpubClient {
       case 'HIGHLIGHT_MOVE':
         if (action.direction === 'down') {
           if (this.view === 'reading') await this.nextPage();
-          else if (this.view === 'flowReading') await this.nextChapterInFlow();
+          else if (this.view === 'flowReading') {
+            // Plan §3.4: chapter jumps are OUT of swipe-while-running (temple
+            // touches are the most common accidental input). Running → next
+            // sentence; paused → next page. Chapters remain reachable via
+            // Contents (double-tap or the native menu).
+            if (this.isFlowRunning) await this.flowSentenceForward();
+            else await this.nextPageInFlow();
+          }
           else if (this.view === 'chapterList') await this.nextChapterInList();
           else if (this.view === 'bookPicker') await this.nextBookInPicker();
           else if (this.view === 'mainMenu') await this.nextMainMenuSlot();
@@ -1435,7 +1744,10 @@ export class EvenEpubClient {
           else if (this.view === 'settingEditor') await this.nextEditorValue();
         } else {
           if (this.view === 'reading') await this.prevPage();
-          else if (this.view === 'flowReading') await this.prevChapterInFlow();
+          else if (this.view === 'flowReading') {
+            if (this.isFlowRunning) await this.flowSentenceBack();
+            else await this.prevPageInFlow();
+          }
           else if (this.view === 'chapterList') await this.prevChapterInList();
           else if (this.view === 'bookPicker') await this.prevBookInPicker();
           else if (this.view === 'mainMenu') await this.prevMainMenuSlot();
@@ -1736,7 +2048,12 @@ export class EvenEpubClient {
     const name = this.view === 'reading' ? 'footer' : 'flow-footer';
     try {
       await this.bridge.textContainerUpgrade(
-        new TextContainerUpgrade({ containerID: 2, containerName: name, content: label }),
+        new TextContainerUpgrade({
+          containerID: 2,
+          containerName: name,
+          content: label,
+          textColor: EvenEpubClient.FOOTER_TEXT_COLOR,
+        }),
       );
     } catch (e) {
       console.warn('clock tick textContainerUpgrade failed:', e);
