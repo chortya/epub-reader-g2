@@ -139,3 +139,78 @@ test('pickChapterTitle prefers real headings over generic chapter labels', () =>
     'Chapter 7',
   );
 });
+
+// --- Phase 1.5: split bridge storage (index + per-book payloads) ---
+
+test('upsertBookIndex upserts by bookId and sorts newest first', async () => {
+  const { upsertBookIndex } = await import('../src/db.ts');
+  const a = { bookId: 'a', filename: 'a.epub', title: 'A', timestamp: 100 };
+  const b = { bookId: 'b', filename: 'b.epub', title: 'B', timestamp: 200 };
+  assert.deepEqual(upsertBookIndex([a], b).map((e) => e.bookId), ['b', 'a']);
+  const a2 = { ...a, timestamp: 300 };
+  const merged = upsertBookIndex([a, b], a2);
+  assert.equal(merged.length, 2, 'upsert replaces, never duplicates');
+  assert.deepEqual(merged.map((e) => e.bookId), ['a', 'b']);
+});
+
+test('parseBookIndex tolerates corruption and validates entry shape', async () => {
+  const { parseBookIndex } = await import('../src/db.ts');
+  assert.deepEqual(parseBookIndex(''), []);
+  assert.deepEqual(parseBookIndex('not json'), []);
+  assert.deepEqual(parseBookIndex('{"x":1}'), []);
+  assert.deepEqual(parseBookIndex('[{"bookId":"a","filename":"a.epub","title":"A","timestamp":1},{"junk":true}]'), [
+    { bookId: 'a', filename: 'a.epub', title: 'A', timestamp: 1 },
+  ]);
+});
+
+test('bridge library split: save → load → delete round-trip with legacy dual-write', async () => {
+  const { saveEpubBufferToDB, getRecentBooksFromDB, deleteFromDB } = await import('../src/db.ts');
+  const store = new Map<string, string>();
+  const bridge = {
+    async setLocalStorage(key: string, value: string) { store.set(key, value); return true; },
+    async getLocalStorage(key: string) { return store.get(key) ?? ''; },
+  };
+
+  const bytes = new TextEncoder().encode('fake epub bytes').buffer;
+  const saved = await saveEpubBufferToDB(bytes, 'book.epub', 'Round Trip', bridge);
+  assert.match(saved.bookId, /^epub-[a-f0-9]{64}$/);
+
+  // Split keys written: index + one payload key.
+  const index = JSON.parse(store.get('epub-book-index')!);
+  assert.equal(index.length, 1);
+  assert.ok(store.get(`epub-book-data-${saved.bookId}`)?.length, 'payload key written');
+  // Legacy blob mirror dual-written for 1.4.6 rollback.
+  const legacy = JSON.parse(store.get('epub-recent-books')!);
+  assert.equal(legacy.length, 1);
+  assert.equal(legacy[0].bookId, saved.bookId);
+
+  // Load resolves through the split keys.
+  const loaded = await getRecentBooksFromDB(bridge);
+  assert.equal(loaded.length, 1);
+  assert.equal(loaded[0].bookId, saved.bookId);
+  assert.equal(new Uint8Array(loaded[0].buffer).byteLength, new Uint8Array(bytes).byteLength);
+
+  // Delete clears index, payload, and legacy mirror.
+  await deleteFromDB(saved.bookId, bridge);
+  assert.equal(JSON.parse(store.get('epub-book-index')!).length, 0);
+  assert.equal(store.get(`epub-book-data-${saved.bookId}`), '');
+  assert.equal(JSON.parse(store.get('epub-recent-books')!).length, 0);
+});
+
+test('bridge library split: legacy-blob fallback loads when the index is missing', async () => {
+  const { getRecentBooksFromDB } = await import('../src/db.ts');
+  const store = new Map<string, string>();
+  const bridge = {
+    async setLocalStorage(key: string, value: string) { store.set(key, value); return true; },
+    async getLocalStorage(key: string) { return store.get(key) ?? ''; },
+  };
+  // Simulate a 1.4.6 device: only the legacy blob exists.
+  store.set('epub-recent-books', JSON.stringify([{
+    bookId: 'legacy-1', filename: 'old.epub', title: 'Old',
+    base64: btoa('old bytes'), timestamp: 1,
+  }]));
+
+  const loaded = await getRecentBooksFromDB(bridge);
+  assert.equal(loaded.length, 1);
+  assert.equal(loaded[0].bookId, 'legacy-1');
+});

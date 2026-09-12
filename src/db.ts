@@ -6,6 +6,12 @@ export const DB_NAME = 'epub-reader-db';
 export const STORE_NAME = 'books';
 const DB_VERSION = 3;
 const BRIDGE_BOOKS_KEY = 'epub-recent-books';
+// Phase 1.5 split layout: a small metadata index plus one payload key per
+// book, so an upload no longer rewrites every book's bytes on the bridge.
+// The legacy single-blob key is dual-written through 1.5.x so a rollback to
+// 1.4.6 keeps a complete library (plan §2 rollback rule).
+const BRIDGE_BOOK_INDEX_KEY = 'epub-book-index';
+const BRIDGE_BOOK_DATA_PREFIX = 'epub-book-data-';
 
 export interface StoredBook {
   bookId: string;
@@ -304,26 +310,111 @@ async function writeBridgeBooks(bridge: BridgeLike, entries: SerializedBook[]): 
   if (!stored) throw new Error('Even Hub rejected the book-library write.');
 }
 
+// --- Split bridge storage (index + per-book payloads, legacy blob dual-written) ---
+
+export interface BookIndexEntry {
+  bookId: string;
+  filename: string;
+  title: string;
+  timestamp: number;
+}
+
+function toIndexEntry(book: StoredBook): BookIndexEntry {
+  return { bookId: book.bookId, filename: book.filename, title: book.title, timestamp: book.timestamp };
+}
+
+/** Pure: parse the index JSON; tolerate corruption by returning []. */
+export function parseBookIndex(raw: string): BookIndexEntry[] {
+  if (!raw) return [];
+  try {
+    const value = JSON.parse(raw) as unknown;
+    if (!Array.isArray(value)) return [];
+    return value
+      .filter((e): e is BookIndexEntry =>
+        !!e && typeof (e as BookIndexEntry).bookId === 'string' &&
+        typeof (e as BookIndexEntry).filename === 'string' &&
+        typeof (e as BookIndexEntry).title === 'string' &&
+        typeof (e as BookIndexEntry).timestamp === 'number')
+      .sort((a, b) => b.timestamp - a.timestamp);
+  } catch {
+    return [];
+  }
+}
+
+async function readBookIndex(bridge: BridgeLike): Promise<BookIndexEntry[]> {
+  return parseBookIndex(await bridge.getLocalStorage(BRIDGE_BOOK_INDEX_KEY));
+}
+
+async function writeBookIndex(bridge: BridgeLike, entries: BookIndexEntry[]): Promise<void> {
+  const ok = await bridge.setLocalStorage(BRIDGE_BOOK_INDEX_KEY, JSON.stringify(entries));
+  if (!ok) throw new Error('Even Hub rejected the book-index write.');
+}
+
+/** Pure: upsert one index entry by immutable bookId, newest first. */
+export function upsertBookIndex(entries: BookIndexEntry[], entry: BookIndexEntry): BookIndexEntry[] {
+  return [entry, ...entries.filter((e) => e.bookId !== entry.bookId)]
+    .sort((a, b) => b.timestamp - a.timestamp);
+}
+
 async function saveToBridgeStorage(bridge: BridgeLike, book: StoredBook): Promise<void> {
-  const legacyBookId = makeBookId(book.filename, book.title);
-  const existing = parseBridgeBooks(await bridge.getLocalStorage(BRIDGE_BOOKS_KEY))
-    .filter((entry) => !(
-      entry.bookId === legacyBookId &&
-      legacyBookId !== book.bookId &&
-      entry.filename === book.filename &&
-      entry.title === book.title
-    ));
-  const entry: SerializedBook = {
-    bookId: book.bookId,
-    filename: book.filename,
-    title: book.title,
-    base64: arrayBufferToBase64(book.buffer),
-    timestamp: book.timestamp,
-  };
-  await writeBridgeBooks(bridge, upsertBridgeBook(existing, entry));
+  // 1. Authoritative split keys.
+  const index = upsertBookIndex(await readBookIndex(bridge), toIndexEntry(book));
+  const dataOk = await bridge.setLocalStorage(
+    `${BRIDGE_BOOK_DATA_PREFIX}${book.bookId}`,
+    arrayBufferToBase64(book.buffer),
+  );
+  if (!dataOk) throw new Error('Even Hub rejected the book-data write (storage full?).');
+  await writeBookIndex(bridge, index);
+
+  // 2. Legacy single-blob mirror, best-effort: 1.4.6 rollback safety net. A
+  // failure here (quota, corruption) must not block the upload — the split
+  // keys are authoritative going forward.
+  try {
+    const existing = parseBridgeBooks(await bridge.getLocalStorage(BRIDGE_BOOKS_KEY))
+      .filter((entry) => !(
+        entry.bookId === makeBookId(book.filename, book.title) &&
+        makeBookId(book.filename, book.title) !== book.bookId &&
+        entry.filename === book.filename &&
+        entry.title === book.title
+      ));
+    const entry: SerializedBook = {
+      bookId: book.bookId,
+      filename: book.filename,
+      title: book.title,
+      base64: arrayBufferToBase64(book.buffer),
+      timestamp: book.timestamp,
+    };
+    await writeBridgeBooks(bridge, upsertBridgeBook(existing, entry));
+  } catch (error) {
+    console.warn('Legacy library mirror failed (rollback coverage reduced):', error);
+  }
 }
 
 async function loadFromBridgeStorage(bridge: BridgeLike): Promise<StoredBook[]> {
+  // Split keys first.
+  const index = await readBookIndex(bridge);
+  if (index.length > 0) {
+    const loaded: StoredBook[] = [];
+    for (const entry of index) {
+      try {
+        const base64 = await bridge.getLocalStorage(`${BRIDGE_BOOK_DATA_PREFIX}${entry.bookId}`);
+        if (!base64) continue;
+        loaded.push({
+          bookId: entry.bookId,
+          filename: entry.filename,
+          title: entry.title,
+          buffer: base64ToArrayBuffer(base64),
+          timestamp: entry.timestamp,
+        });
+      } catch (error) {
+        console.warn(`Book payload unreadable (${entry.bookId}):`, error);
+      }
+    }
+    if (loaded.length > 0) return loaded;
+    // Index survived but every payload is gone — fall through to the blob.
+  }
+
+  // Legacy blob fallback.
   const entries = parseBridgeBooks(await bridge.getLocalStorage(BRIDGE_BOOKS_KEY));
   return entries.map((entry) => ({
     bookId: entry.bookId,
@@ -335,9 +426,20 @@ async function loadFromBridgeStorage(bridge: BridgeLike): Promise<StoredBook[]> 
 }
 
 async function removeFromBridgeStorage(bridge: BridgeLike, bookId: string): Promise<boolean> {
+  // Split keys: drop the payload (SDK has no delete — empty string) + index entry.
+  const index = await readBookIndex(bridge);
+  const hadEntry = index.some((e) => e.bookId === bookId);
+  if (hadEntry) {
+    const payloadOk = await bridge.setLocalStorage(`${BRIDGE_BOOK_DATA_PREFIX}${bookId}`, '');
+    if (!payloadOk) throw new Error('Even Hub rejected the book-data delete.');
+    await writeBookIndex(bridge, index.filter((e) => e.bookId !== bookId));
+  }
+
+  // Legacy blob mirror.
   const existing = parseBridgeBooks(await bridge.getLocalStorage(BRIDGE_BOOKS_KEY));
   const filtered = pruneBridgeBooks(existing, bookId);
-  if (filtered.length === existing.length) return false;
-  await writeBridgeBooks(bridge, filtered);
-  return true;
+  if (filtered.length !== existing.length) {
+    await writeBridgeBooks(bridge, filtered);
+  }
+  return hadEntry || filtered.length !== existing.length;
 }
