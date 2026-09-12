@@ -1,5 +1,6 @@
 import { makeBookId, makeContentBookId } from './book-id.ts';
 import { createSerialExecutor } from './operation-queue.ts';
+import { migrateLegacyPositionKeys } from './position-store.ts';
 
 export const DB_NAME = 'epub-reader-db';
 export const STORE_NAME = 'books';
@@ -139,9 +140,15 @@ function getDB(): Promise<IDBDatabase> {
   });
 }
 
-async function putIndexedDB(book: StoredBook): Promise<void> {
+/**
+ * Insert or replace a book row. Returns the legacy bookId of a row that was
+ * replaced (v3-migrated rows keyed by `makeBookId(filename, title)` on the
+ * first re-upload), or null when nothing was replaced. The caller uses it to
+ * migrate position keys to the new identity.
+ */
+async function putIndexedDB(book: StoredBook): Promise<string | null> {
   const db = await getDB();
-  await new Promise<void>((resolve, reject) => {
+  return new Promise<string | null>((resolve, reject) => {
     const transaction = db.transaction(STORE_NAME, 'readwrite');
     const store = transaction.objectStore(STORE_NAME);
     const legacyBookId = makeBookId(book.filename, book.title);
@@ -154,14 +161,17 @@ async function putIndexedDB(book: StoredBook): Promise<void> {
       const legacyRequest = store.get(legacyBookId);
       legacyRequest.onsuccess = () => {
         const legacy = legacyRequest.result as StoredBook | undefined;
+        let replaced: string | null = null;
         if (legacy?.filename === book.filename && legacy.title === book.title) {
           store.delete(legacyBookId);
+          replaced = legacyBookId;
         }
         store.put(book);
+        transaction.oncomplete = () => resolve(replaced);
       };
       legacyRequest.onerror = () => transaction.abort();
     }
-    transaction.oncomplete = () => resolve();
+    transaction.oncomplete = () => resolve(null);
     transaction.onerror = () => reject(transaction.error);
     transaction.onabort = () => reject(transaction.error);
   });
@@ -181,9 +191,10 @@ export async function saveEpubBufferToDB(
     timestamp: Date.now(),
   };
   let saved = false;
+  let replacedLegacyBookId: string | null = null;
 
   try {
-    await putIndexedDB(book);
+    replacedLegacyBookId = await putIndexedDB(book);
     saved = true;
   } catch (error) {
     console.warn('IndexedDB save failed:', error);
@@ -195,6 +206,20 @@ export async function saveEpubBufferToDB(
       saved = true;
     } catch (error) {
       console.warn('Bridge storage save failed:', error);
+    }
+
+    if (replacedLegacyBookId) {
+      // The re-keyed row's positions would be orphaned under the legacy ID.
+      // Carry them to the content identity (browser lane included when present).
+      try {
+        const browserStore: Storage | undefined =
+          typeof window !== 'undefined' ? window.localStorage : undefined;
+        await runBridgeMutation(() =>
+          migrateLegacyPositionKeys(bridge, replacedLegacyBookId, book.bookId, browserStore),
+        );
+      } catch (error) {
+        console.warn('Position key migration failed:', error);
+      }
     }
   }
 

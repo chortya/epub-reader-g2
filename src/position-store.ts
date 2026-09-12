@@ -64,6 +64,55 @@ export function flowPositionKeys(ref: BookRef): string[] {
 }
 
 /**
+ * Copy saved positions from a legacy book identity (pre-content-ID
+ * `makeBookId(filename, title)` shape) to a content identity after the
+ * library re-keys the book (db.ts replaces the migrated row on re-upload).
+ *
+ * The target key wins when it already holds a position: a content-ID position
+ * can only exist if the same bytes were opened under the new identity, which
+ * is always the more recent session. Corrupt source JSON is copied verbatim —
+ * the restore path validates it.
+ */
+export async function migrateLegacyPositionKeys(
+  bridge: PositionBridge,
+  fromBookId: string,
+  toBookId: string,
+  browserFallback?: Storage,
+): Promise<void> {
+  const pairs: Array<[string, string]> = [
+    [`${STORAGE_KEY_POSITION}-${fromBookId}`, `${STORAGE_KEY_POSITION}-${toBookId}`],
+    [`${STORAGE_KEY_FLOW_POSITION}-${fromBookId}`, `${STORAGE_KEY_FLOW_POSITION}-${toBookId}`],
+  ];
+  for (const [fromKey, toKey] of pairs) {
+    let source = '';
+    try {
+      source = await bridge.getLocalStorage(fromKey);
+    } catch {
+      continue;
+    }
+    if (!source) continue;
+    let target = '';
+    try {
+      target = await bridge.getLocalStorage(toKey);
+    } catch {
+      target = '';
+    }
+    if (target) continue;
+    try {
+      await bridge.setLocalStorage(toKey, source);
+    } catch { /* keep going; the legacy key remains readable */ }
+
+    if (browserFallback) {
+      try {
+        if (!browserFallback.getItem(toKey) && browserFallback.getItem(fromKey)) {
+          browserFallback.setItem(toKey, browserFallback.getItem(fromKey)!);
+        }
+      } catch { /* localStorage unavailable */ }
+    }
+  }
+}
+
+/**
  * Persist a paged reading position: the position JSON under both keys, plus the
  * L3 last-book keys. Mirrors to a browser-localStorage fallback when provided
  * so a cold WebView reload can still recover.

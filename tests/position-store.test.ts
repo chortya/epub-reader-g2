@@ -14,6 +14,7 @@ import {
   pagedPositionKeys,
   flowPositionKeys,
   writeLastBookKeys,
+  migrateLegacyPositionKeys,
   type PositionBridge,
 } from '../src/position-store.ts';
 import type { ReadingPosition } from '../src/types.ts';
@@ -211,4 +212,72 @@ test('saveFlowPosition: skips bookId key when bookId absent', async () => {
 
   assert.ok(bridge.store.has(`${STORAGE_KEY_FLOW_POSITION}-B`));
   assert.ok(!bridge.store.has(`${STORAGE_KEY_FLOW_POSITION}-null`));
+});
+
+test('migrateLegacyPositionKeys: copies paged and flow positions to the content identity', async () => {
+  const bridge = makeBridge();
+  const paged = JSON.stringify({ chapterIndex: 2, pageIndex: 4 });
+  const flow = JSON.stringify({ chapterIndex: 2, pageIndex: 4, wordIndex: 7 });
+  bridge.store.set(`${STORAGE_KEY_POSITION}-legacy-1`, paged);
+  bridge.store.set(`${STORAGE_KEY_FLOW_POSITION}-legacy-1`, flow);
+
+  await migrateLegacyPositionKeys(bridge, 'legacy-1', 'epub-abc');
+
+  assert.equal(bridge.store.get(`${STORAGE_KEY_POSITION}-epub-abc`), paged);
+  assert.equal(bridge.store.get(`${STORAGE_KEY_FLOW_POSITION}-epub-abc`), flow);
+  // Legacy keys remain (rollback safety for 1.4.6)
+  assert.equal(bridge.store.get(`${STORAGE_KEY_POSITION}-legacy-1`), paged);
+});
+
+test('migrateLegacyPositionKeys: keeps an existing content-identity position', async () => {
+  const bridge = makeBridge();
+  const newer = JSON.stringify({ chapterIndex: 9, pageIndex: 0 });
+  bridge.store.set(`${STORAGE_KEY_POSITION}-legacy-1`, JSON.stringify({ chapterIndex: 0, pageIndex: 0 }));
+  bridge.store.set(`${STORAGE_KEY_POSITION}-epub-abc`, newer);
+
+  await migrateLegacyPositionKeys(bridge, 'legacy-1', 'epub-abc');
+
+  assert.equal(bridge.store.get(`${STORAGE_KEY_POSITION}-epub-abc`), newer);
+});
+
+test('migrateLegacyPositionKeys: skips empty sources and tolerates a throwing bridge', async () => {
+  const bridge = makeBridge();
+  bridge.store.set(`${STORAGE_KEY_POSITION}-legacy-1`, JSON.stringify({ chapterIndex: 1, pageIndex: 1 }));
+  let calls = 0;
+  const flaky: PositionBridge = {
+    async setLocalStorage(key: string, value: string) {
+      calls += 1;
+      if (calls === 1) throw new Error('bridge busy');
+      bridge.store.set(key, value);
+      return true;
+    },
+    async getLocalStorage(key: string) {
+      return bridge.store.get(key) ?? '';
+    },
+  };
+
+  // No flow key on source — only the paged pair is considered; first write throws
+  await migrateLegacyPositionKeys(flaky, 'legacy-1', 'epub-abc');
+  assert.ok(!bridge.store.has(`${STORAGE_KEY_POSITION}-epub-abc`));
+
+  // Second attempt succeeds
+  await migrateLegacyPositionKeys(flaky, 'legacy-1', 'epub-abc');
+  assert.ok(bridge.store.has(`${STORAGE_KEY_POSITION}-epub-abc`));
+
+  // Unknown source id: no writes at all
+  const before = bridge.writes.length;
+  await migrateLegacyPositionKeys(bridge, 'missing-id', 'epub-xyz');
+  assert.equal(bridge.writes.length, before);
+});
+
+test('migrateLegacyPositionKeys: mirrors to the browser fallback lane', async () => {
+  const bridge = makeBridge();
+  const browser = makeBrowserStore();
+  const paged = JSON.stringify({ chapterIndex: 3, pageIndex: 2 });
+  bridge.store.set(`${STORAGE_KEY_POSITION}-legacy-1`, paged);
+  browser.data.set(`${STORAGE_KEY_POSITION}-legacy-1`, paged);
+
+  await migrateLegacyPositionKeys(bridge, 'legacy-1', 'epub-abc', browser);
+
+  assert.equal(browser.data.get(`${STORAGE_KEY_POSITION}-epub-abc`), paged);
 });
