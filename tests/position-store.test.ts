@@ -15,6 +15,8 @@ import {
   flowPositionKeys,
   writeLastBookKeys,
   migrateLegacyPositionKeys,
+  createPositionPersister,
+  readPositionFromKeys,
   type PositionBridge,
 } from '../src/position-store.ts';
 import type { ReadingPosition } from '../src/types.ts';
@@ -118,7 +120,7 @@ test('writeLastBookKeys: writes only title when bookId/filename absent', async (
 
 // --- savePagedPosition ---
 
-test('savePagedPosition: writes position JSON under bookId and title keys + L3 keys', async () => {
+test('savePagedPosition: writes position JSON under bookId and title keys (no L3 — that is book-open)', async () => {
   const bridge = makeBridge();
   const pos: ReadingPosition = { chapterIndex: 2, pageIndex: 5 };
   await savePagedPosition(bridge, { title: 'A', bookId: 'abc-1', filename: 'a.epub' }, pos);
@@ -128,10 +130,10 @@ test('savePagedPosition: writes position JSON under bookId and title keys + L3 k
   assert.equal(byBookId, JSON.stringify(pos));
   assert.equal(byTitle, JSON.stringify(pos));
 
-  // L3 invariant: all three last-book keys present
-  assert.equal(bridge.store.get(STORAGE_KEY_BOOK_TITLE), 'A');
-  assert.equal(bridge.store.get(STORAGE_KEY_LAST_BOOK_ID), 'abc-1');
-  assert.equal(bridge.store.get(STORAGE_KEY_LAST_BOOK_FILENAME), 'a.epub');
+  // L3 keys are written once per book open (writeLastBookKeys), not per save.
+  assert.equal(bridge.store.get(STORAGE_KEY_BOOK_TITLE), undefined);
+  assert.equal(bridge.store.get(STORAGE_KEY_LAST_BOOK_ID), undefined);
+  assert.equal(bridge.store.get(STORAGE_KEY_LAST_BOOK_FILENAME), undefined);
 });
 
 test('savePagedPosition: skips bookId key when bookId absent', async () => {
@@ -174,10 +176,8 @@ test('saveFlowPosition: writes flow position JSON with wordIndex when persistToB
   assert.equal(byBookId, JSON.stringify(pos));
   assert.equal(byTitle, JSON.stringify(pos));
 
-  // L3 keys written when persistToBridge is true
-  assert.equal(bridge.store.get(STORAGE_KEY_BOOK_TITLE), 'B');
-  assert.equal(bridge.store.get(STORAGE_KEY_LAST_BOOK_ID), 'def-2');
-  assert.equal(bridge.store.get(STORAGE_KEY_LAST_BOOK_FILENAME), 'b.epub');
+  // L3 keys are not written by saves (book-open concern).
+  assert.equal(bridge.store.get(STORAGE_KEY_BOOK_TITLE), undefined);
 });
 
 test('saveFlowPosition: skips bridge writes when persistToBridge=false (mid-tick)', async () => {
@@ -293,8 +293,6 @@ test('savePagedPosition: content-ID books skip the title lane on bridge and brow
   assert.ok(!bridge.store.has(`${STORAGE_KEY_POSITION}-Same`));
   assert.ok(browser.data.has(`${STORAGE_KEY_POSITION}-${contentId}`));
   assert.ok(!browser.data.has(`${STORAGE_KEY_POSITION}-Same`));
-  // L3 keys still written
-  assert.equal(bridge.store.get(STORAGE_KEY_BOOK_TITLE), 'Same');
 });
 
 test('saveFlowPosition: content-ID books skip the title lane', async () => {
@@ -305,4 +303,123 @@ test('saveFlowPosition: content-ID books skip the title lane', async () => {
 
   assert.ok(bridge.store.has(`${STORAGE_KEY_FLOW_POSITION}-${contentId}`));
   assert.ok(!bridge.store.has(`${STORAGE_KEY_FLOW_POSITION}-Same`));
+});
+
+// --- createPositionPersister (debounced saves; node mock timers) ---
+
+test('persister: debounces page-turn saves into one trailing write (latest-wins)', async () => {
+  const bridge = makeBridge();
+  const persister = createPositionPersister(bridge, { delayMs: 100 });
+  persister.setRef({ title: 'A', bookId: 'abc-1' });
+
+  persister.savePaged({ chapterIndex: 0, pageIndex: 0 });
+  persister.savePaged({ chapterIndex: 0, pageIndex: 1 });
+  persister.savePaged({ chapterIndex: 1, pageIndex: 0 });
+  assert.equal(bridge.writes.length, 0, 'nothing written before the delay elapses');
+
+  await new Promise((r) => setTimeout(r, 150));
+  const posKeys = bridge.writes.filter(([k]) => k.startsWith(`${STORAGE_KEY_POSITION}-`));
+  assert.equal(posKeys.length, 2, 'bookId + legacy title lane for a non-content id');
+  assert.equal(
+    bridge.store.get(`${STORAGE_KEY_POSITION}-abc-1`),
+    JSON.stringify({ chapterIndex: 1, pageIndex: 0 }),
+  );
+});
+
+test('persister: immediate save bypasses the debounce (lifecycle exits)', async () => {
+  const bridge = makeBridge();
+  const persister = createPositionPersister(bridge, { delayMs: 60_000 });
+  persister.setRef({ title: 'A', bookId: 'abc-1' });
+
+  persister.savePaged({ chapterIndex: 3, pageIndex: 2 }, { immediate: true });
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(
+    bridge.store.get(`${STORAGE_KEY_POSITION}-abc-1`),
+    JSON.stringify({ chapterIndex: 3, pageIndex: 2 }),
+  );
+  assert.equal(persister.hasPending(), false);
+});
+
+test('persister: flush lands the pending snapshot under the ref captured at save time', async () => {
+  const bridge = makeBridge();
+  const persister = createPositionPersister(bridge, { delayMs: 60_000 });
+  persister.setRef({ title: 'Old', bookId: 'old-1' });
+  persister.savePaged({ chapterIndex: 1, pageIndex: 1 });
+
+  // Book switches: flush first, then re-point the ref.
+  await persister.flush();
+  persister.setRef({ title: 'New', bookId: 'new-1' });
+
+  assert.equal(bridge.store.get(`${STORAGE_KEY_POSITION}-old-1`), JSON.stringify({ chapterIndex: 1, pageIndex: 1 }));
+  assert.ok(!bridge.store.has(`${STORAGE_KEY_POSITION}-New`));
+  assert.equal(persister.hasPending(), false);
+  await persister.flush(); // no-op when nothing pending
+});
+
+test('persister: a rejected bridge write surfaces via onError and the timer chain keeps working', async () => {
+  const bridge = makeBridge();
+  const errors: unknown[] = [];
+  let failNext = true;
+  const flaky: PositionBridge = {
+    async setLocalStorage(key: string, value: string) {
+      if (failNext && key.startsWith(`${STORAGE_KEY_POSITION}-`)) { failNext = false; return false; }
+      bridge.store.set(key, value);
+      return true;
+    },
+    async getLocalStorage(key: string) { return bridge.store.get(key) ?? ''; },
+  };
+  const persister = createPositionPersister(flaky, {
+    delayMs: 20,
+    onError: (e) => errors.push(e),
+  });
+  persister.setRef({ title: 'A', bookId: 'abc-1' });
+
+  persister.savePaged({ chapterIndex: 0, pageIndex: 0 });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(errors.length, 1, 'rejected write reported');
+
+  persister.savePaged({ chapterIndex: 0, pageIndex: 2 });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(
+    bridge.store.get(`${STORAGE_KEY_POSITION}-abc-1`),
+    JSON.stringify({ chapterIndex: 0, pageIndex: 2 }),
+    'later saves still land after a failure',
+  );
+});
+
+// --- readPositionFromKeys (shared reader; dedups getSavedPosition/restore*) ---
+
+test('readPositionFromKeys: tries keys in order, bridge before browser fallback', async () => {
+  const bridge = makeBridge();
+  const browser = makeBrowserStore();
+  bridge.store.set(`${STORAGE_KEY_POSITION}-k1`, JSON.stringify({ chapterIndex: 0, pageIndex: 1 }));
+  browser.data.set(`${STORAGE_KEY_POSITION}-k2`, JSON.stringify({ chapterIndex: 1, pageIndex: 2 }));
+
+  assert.deepEqual(
+    await readPositionFromKeys(bridge, [`${STORAGE_KEY_POSITION}-k1`, `${STORAGE_KEY_POSITION}-k2`], browser),
+    { chapterIndex: 0, pageIndex: 1 },
+  );
+  assert.deepEqual(
+    await readPositionFromKeys(bridge, ['missing', `${STORAGE_KEY_POSITION}-k2`], browser),
+    { chapterIndex: 1, pageIndex: 2 },
+  );
+});
+
+test('readPositionFromKeys: rejects malformed records and keeps looking', async () => {
+  const bridge = makeBridge();
+  bridge.store.set(`${STORAGE_KEY_POSITION}-bad`, 'not json');
+  bridge.store.set(`${STORAGE_KEY_POSITION}-neg`, JSON.stringify({ chapterIndex: -1, pageIndex: 0 }));
+  bridge.store.set(`${STORAGE_KEY_POSITION}-frac`, JSON.stringify({ chapterIndex: 0.5, pageIndex: 0 }));
+  bridge.store.set(`${STORAGE_KEY_POSITION}-ok`, JSON.stringify({ chapterIndex: 2, pageIndex: 0 }));
+
+  assert.deepEqual(
+    await readPositionFromKeys(bridge, [
+      `${STORAGE_KEY_POSITION}-bad`,
+      `${STORAGE_KEY_POSITION}-neg`,
+      `${STORAGE_KEY_POSITION}-frac`,
+      `${STORAGE_KEY_POSITION}-ok`,
+    ]),
+    { chapterIndex: 2, pageIndex: 0 },
+  );
+  assert.equal(await readPositionFromKeys(bridge, ['nothing']), null);
 });

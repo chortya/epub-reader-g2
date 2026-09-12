@@ -24,6 +24,12 @@ export interface BookRef {
   filename?: string | null;
 }
 
+/** One bridge write that treats `false` as the failure it is. */
+async function writeKey(bridge: PositionBridge, key: string, value: string): Promise<void> {
+  const ok = await bridge.setLocalStorage(key, value);
+  if (!ok) throw new Error(`bridge rejected write: ${key}`);
+}
+
 /**
  * Write the three L3 "last book" keys together (design §8.5 invariant I1):
  * title, last-book-id, last-book-filename. Continue Reading resolves by
@@ -37,12 +43,12 @@ export async function writeLastBookKeys(
   bridge: PositionBridge,
   ref: BookRef,
 ): Promise<void> {
-  await bridge.setLocalStorage(STORAGE_KEY_BOOK_TITLE, ref.title);
+  await writeKey(bridge, STORAGE_KEY_BOOK_TITLE, ref.title);
   if (ref.bookId) {
-    await bridge.setLocalStorage(STORAGE_KEY_LAST_BOOK_ID, ref.bookId);
+    await writeKey(bridge, STORAGE_KEY_LAST_BOOK_ID, ref.bookId);
   }
   if (ref.filename) {
-    await bridge.setLocalStorage(STORAGE_KEY_LAST_BOOK_FILENAME, ref.filename);
+    await writeKey(bridge, STORAGE_KEY_LAST_BOOK_FILENAME, ref.filename);
   }
 }
 
@@ -113,14 +119,14 @@ export async function migrateLegacyPositionKeys(
 }
 
 /**
- * Persist a paged reading position: the position JSON under both keys, plus the
- * L3 last-book keys. Mirrors to a browser-localStorage fallback when provided
- * so a cold WebView reload can still recover.
+ * Persist a paged reading position. The title lane is only written for legacy
+ * (non-content) identities: the read path skips it for content IDs (same-titled
+ * books must never inherit one another's position), so writing it would be
+ * waste plus cross-book pollution. 1.4.6 rollback stays safe either way — it
+ * restores from the bookId key.
  *
- * The title lane is only written for legacy (non-content) identities: the read
- * path skips it for content IDs (same-titled books must never inherit one
- * another's position), so writing it would be waste plus cross-book pollution.
- * 1.4.6 rollback stays safe either way — it restores from the bookId key.
+ * L3 "last book" keys are NOT written here; they only change when the open
+ * book changes, so the client writes them once per book open (`writeLastBookKeys`).
  */
 export async function savePagedPosition(
   bridge: PositionBridge,
@@ -131,12 +137,11 @@ export async function savePagedPosition(
   const json = JSON.stringify(pos);
   const titleLane = !isContentBookId(ref.bookId);
   if (ref.bookId) {
-    await bridge.setLocalStorage(`${STORAGE_KEY_POSITION}-${ref.bookId}`, json);
+    await writeKey(bridge, `${STORAGE_KEY_POSITION}-${ref.bookId}`, json);
   }
   if (titleLane) {
-    await bridge.setLocalStorage(`${STORAGE_KEY_POSITION}-${ref.title}`, json);
+    await writeKey(bridge, `${STORAGE_KEY_POSITION}-${ref.title}`, json);
   }
-  await writeLastBookKeys(bridge, ref);
 
   if (browserFallback) {
     try {
@@ -154,7 +159,8 @@ export async function savePagedPosition(
  * Persist a flow reading position (includes wordIndex). `persistToBridge`
  * gates the bridge writes (flow ticks skip them mid-page to avoid flooding the
  * bridge) but the browser-localStorage fallback still mirrors every tick when
- * available, because it is local and cheap.
+ * available, because it is local and cheap. L3 keys are not written here
+ * (see savePagedPosition).
  */
 export async function saveFlowPosition(
   bridge: PositionBridge,
@@ -167,12 +173,11 @@ export async function saveFlowPosition(
   const titleLane = !isContentBookId(ref.bookId);
   if (persistToBridge) {
     if (ref.bookId) {
-      await bridge.setLocalStorage(`${STORAGE_KEY_FLOW_POSITION}-${ref.bookId}`, json);
+      await writeKey(bridge, `${STORAGE_KEY_FLOW_POSITION}-${ref.bookId}`, json);
     }
     if (titleLane) {
-      await bridge.setLocalStorage(`${STORAGE_KEY_FLOW_POSITION}-${ref.title}`, json);
+      await writeKey(bridge, `${STORAGE_KEY_FLOW_POSITION}-${ref.title}`, json);
     }
-    await writeLastBookKeys(bridge, ref);
   }
   if (browserFallback) {
     try {
@@ -184,4 +189,148 @@ export async function saveFlowPosition(
       }
     } catch { /* localStorage unavailable */ }
   }
+}
+
+/**
+ * Debounced position persister. Page turns and flow ticks schedule a save;
+ * a trailing timer lands the latest snapshot after `delayMs` of quiet.
+ * Lifecycle exits pass `{ immediate: true }` to land the position right away,
+ * and `flush()` lands any pending snapshot before the open book changes so a
+ * stale position can never be written under a new book's ref.
+ *
+ * Each scheduled save snapshots the ref alongside the position: a flush that
+ * happens after a book switch still writes under the ref the position came
+ * from (latest-wins per snapshot, never cross-book).
+ */
+export interface PositionPersister {
+  /** Point subsequent debounced saves at this book identity. */
+  setRef(ref: BookRef): void;
+  savePaged(pos: ReadingPosition, opts?: { immediate?: boolean }): void;
+  saveFlow(pos: ReadingPosition, persistToBridge: boolean, opts?: { immediate?: boolean }): void;
+  /** Land any pending snapshot now (no-op when nothing is pending). */
+  flush(): Promise<void>;
+  hasPending(): boolean;
+}
+
+export function createPositionPersister(
+  bridge: PositionBridge,
+  opts: {
+    delayMs: number;
+    browserFallback?: Storage;
+    onError?: (error: unknown) => void;
+  },
+): PositionPersister {
+  let ref: BookRef = { title: '' };
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let pending:
+    | { kind: 'paged'; pos: ReadingPosition; ref: BookRef }
+    | { kind: 'flow'; pos: ReadingPosition; persistToBridge: boolean; ref: BookRef }
+    | null = null;
+
+  const report = (error: unknown): void => {
+    if (opts.onError) opts.onError(error);
+    else console.warn('Position save failed:', error);
+  };
+
+  const run = async (): Promise<void> => {
+    const snapshot = pending;
+    pending = null;
+    if (!snapshot) return;
+    try {
+      if (snapshot.kind === 'paged') {
+        await savePagedPosition(bridge, snapshot.ref, snapshot.pos, opts.browserFallback);
+      } else {
+        await saveFlowPosition(bridge, snapshot.ref, snapshot.pos, snapshot.persistToBridge, opts.browserFallback);
+      }
+    } catch (error) {
+      // A failed debounced write must not kill the timer chain.
+      report(error);
+    }
+  };
+
+  const schedule = (): void => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      void run();
+    }, opts.delayMs);
+  };
+
+  return {
+    setRef(next: BookRef): void {
+      ref = next;
+    },
+    savePaged(pos, writeOpts): void {
+      pending = { kind: 'paged', pos, ref };
+      if (writeOpts?.immediate) {
+        if (timer) { clearTimeout(timer); timer = null; }
+        void run();
+      } else {
+        schedule();
+      }
+    },
+    saveFlow(pos, persistToBridge, writeOpts): void {
+      pending = { kind: 'flow', pos, persistToBridge, ref };
+      if (writeOpts?.immediate) {
+        if (timer) { clearTimeout(timer); timer = null; }
+        void run();
+      } else {
+        schedule();
+      }
+    },
+    async flush(): Promise<void> {
+      if (timer) { clearTimeout(timer); timer = null; }
+      if (!pending) return;
+      const snapshot = pending;
+      pending = null;
+      try {
+        if (snapshot.kind === 'paged') {
+          await savePagedPosition(bridge, snapshot.ref, snapshot.pos, opts.browserFallback);
+        } else {
+          await saveFlowPosition(bridge, snapshot.ref, snapshot.pos, snapshot.persistToBridge, opts.browserFallback);
+        }
+      } catch (error) {
+        report(error);
+      }
+    },
+    hasPending(): boolean {
+      return pending !== null;
+    },
+  };
+}
+
+/**
+ * Read a saved position by trying each candidate key in order (bridge first,
+ * then the browser fallback lane). Returns the first record that parses to a
+ * sane {chapterIndex, pageIndex} — callers apply their own clamp/bounds logic.
+ */
+export async function readPositionFromKeys(
+  bridge: PositionBridge,
+  keys: string[],
+  browserFallback?: Storage,
+): Promise<ReadingPosition | null> {
+  for (const key of keys) {
+    let raw = '';
+    try {
+      raw = await bridge.getLocalStorage(key);
+    } catch { /* fall through to the next lane */ }
+    if (!raw && browserFallback) {
+      try {
+        raw = browserFallback.getItem(key) || '';
+      } catch { /* localStorage unavailable */ }
+    }
+    if (!raw) continue;
+    try {
+      const pos = JSON.parse(raw) as ReadingPosition;
+      if (
+        Number.isInteger(pos.chapterIndex) &&
+        Number.isInteger(pos.pageIndex) &&
+        pos.chapterIndex >= 0 &&
+        pos.pageIndex >= 0
+      ) {
+        return pos;
+      }
+    } catch { /* corrupt record — try the next key */ }
+  }
+  return null;
 }

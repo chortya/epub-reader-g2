@@ -38,6 +38,7 @@ import {
   type SettingKey,
 } from './constants';
 import { clamp, setStatus, truncateForList, appendEventLog } from './utils';
+import { createSerialExecutor, type SerialExecutor } from './operation-queue';
 import { createSplashBridgeAdapter } from './splash-bridge';
 import {
   ITEMS_PER_PAGE,
@@ -49,11 +50,13 @@ import {
   CHAR_PITCH_PX,
 } from './layout';
 import {
-  savePagedPosition as storePagedPosition,
-  saveFlowPosition as storeFlowPosition,
+  createPositionPersister,
   pagedPositionKeys,
   flowPositionKeys,
+  readPositionFromKeys,
+  writeLastBookKeys,
   type PositionBridge,
+  type PositionPersister,
 } from './position-store';
 import {
   computePagedProgress,
@@ -146,6 +149,12 @@ export class EvenEpubClient {
   // Cached at showMainMenu time so the SELECT dispatch does not re-hit the bridge.
   private continueReadingResolved: CachedBookMeta | null = null;
 
+  // Debounced position persistence (Phase 1.4): page turns schedule, lifecycle
+  // exits save immediately, flush() lands pending writes before a book switch.
+  private persister: PositionPersister;
+  // FIFO queue for gesture-driven SDK work (Phase 1.6): swipes never overlap.
+  private serialGesture: SerialExecutor;
+
   // Settings-menu state (Stage 6). settingsListSelectedIndex indexes into
   // SETTINGS_MENU_KEYS; editingSettingKey is non-null while the editor view
   // is active; editorSelectedIndex indexes into the per-key value array.
@@ -163,7 +172,18 @@ export class EvenEpubClient {
   public onPositionChanged?: (chapterIndex: number, pageIndex: number) => void;
   public onFlowStateChanged?: (isRunning: boolean) => void;
 
-  constructor(private bridge: Bridge) { }
+  constructor(private bridge: Bridge) {
+    this.persister = createPositionPersister(this.bridge as unknown as PositionBridge, {
+      // Page turns debounce; lifecycle exits save immediately via {immediate}.
+      delayMs: 800,
+      browserFallback: typeof window !== 'undefined' ? window.localStorage : undefined,
+      onError: (error) => {
+        console.warn('Position save failed:', error);
+        setStatus('Position save failed');
+      },
+    });
+    this.serialGesture = createSerialExecutor();
+  }
 
   async init(): Promise<void> {
     this.bridge.onDeviceStatusChanged(async (status) => {
@@ -200,12 +220,30 @@ export class EvenEpubClient {
     bookId?: string,
     filename?: string,
   ): Promise<void> {
+    // Land any pending position under the OLD book's ref before switching.
+    await this.persister.flush();
     this.stopFlow();
     this.book = book;
     this.currentBookId = bookId ?? null;
     this.currentBookFilename = filename ?? null;
+    this.persister.setRef({
+      title: book.title,
+      bookId: this.currentBookId,
+      filename: this.currentBookFilename,
+    });
     this.chapterPages = book.chapters.map((ch) => paginateText(ch.text));
     this.flowPageData = this.buildFlowPageData(this.chapterPages);
+
+    // L3 "last book" keys change only when the open book changes — write them
+    // here, once per open, instead of on every page turn (invariant I1).
+    try {
+      await writeLastBookKeys(
+        this.bridge as unknown as PositionBridge,
+        { title: book.title, bookId: this.currentBookId, filename: this.currentBookFilename },
+      );
+    } catch (e) {
+      console.warn('Failed to write last-book keys:', e);
+    }
 
     const restoredPaged = await this.restorePagedPosition(book.title);
     const restoredFlow = await this.restoreFlowPosition(book.title);
@@ -1193,16 +1231,40 @@ export class EvenEpubClient {
   }
 
   private async refreshCurrentView(): Promise<void> {
-    if (this.view === 'reading') {
-      await this.showPage();
-    } else if (this.view === 'flowReading') {
-      await this.showFlowFrame();
-    } else if (this.view === 'bookPicker') {
-      await this.showBookPicker();
-    } else if (this.book) {
-      await this.showChapterList();
-    } else {
-      await this.showWelcome();
+    // Exhaustive per-view refresh. Returning from a menu/background visit must
+    // land the user back on the SAME view — the old if/else chain had no
+    // branches for mainMenu/settings/settingEditor, so those fell through to
+    // chapterList (book open) or welcome (no book). A new ViewState member
+    // that lacks a case here is a compile error (exhaustiveness guard).
+    switch (this.view) {
+      case 'reading':
+        await this.showPage();
+        return;
+      case 'flowReading':
+        await this.showFlowFrame();
+        return;
+      case 'bookPicker':
+        await this.showBookPicker();
+        return;
+      case 'chapterList':
+        await this.showChapterList();
+        return;
+      case 'mainMenu':
+        await this.showMainMenu();
+        return;
+      case 'settings':
+        await this.showSettingsMenu();
+        return;
+      case 'settingEditor':
+        await this.showSettingEditor(this.editingSettingKey ?? SETTINGS_MENU_KEYS[0]);
+        return;
+      case 'welcome':
+        await this.showWelcome();
+        return;
+      default: {
+        const exhausted: never = this.view;
+        throw new Error(`Unhandled view in refreshCurrentView: ${String(exhausted)}`);
+      }
     }
   }
 
@@ -1210,6 +1272,8 @@ export class EvenEpubClient {
 
   private async onEvenHubEvent(event: EvenHubEvent): Promise<void> {
     const sysEvent = event?.sysEvent;
+    // Lifecycle events bypass the gesture queue: exits must preempt in-flight
+    // renders, and the enter-refresh is safe to overlap either way.
     if (sysEvent?.eventType === OsEventTypeList.SYSTEM_EXIT_EVENT) {
       await this.handleShutdown();
       return;
@@ -1217,8 +1281,8 @@ export class EvenEpubClient {
     if (sysEvent?.eventType === OsEventTypeList.FOREGROUND_EXIT_EVENT) {
       if (this.isFlowRunning) this.stopFlow();
       this.stopClockTicker();
-      if (this.view === 'flowReading') await this.saveFlowPosition();
-      else await this.savePagedPosition();
+      if (this.view === 'flowReading') await this.saveFlowPosition(true, true);
+      else await this.savePagedPosition(true);
       return;
     }
     if (sysEvent?.eventType === OsEventTypeList.FOREGROUND_ENTER_EVENT) {
@@ -1229,6 +1293,14 @@ export class EvenEpubClient {
       return;
     }
 
+    // Gestures serialize (FIFO): two rapid swipes must not interleave their
+    // rebuild/upgrade SDK calls. One rejection cannot wedge the queue
+    // (createSerialExecutor), and each caller still logs its own error.
+    await this.serialGesture(() => this.dispatchGlassEvent(event));
+  }
+
+  /** Dispatch one mapped gesture. Runs serialized — see onEvenHubEvent. */
+  private async dispatchGlassEvent(event: EvenHubEvent): Promise<void> {
     const action = mapGlassEvent(event);
     if (!action) return;
 
@@ -1472,8 +1544,8 @@ export class EvenEpubClient {
   private async handleShutdown(): Promise<void> {
     this.stopFlow();
     this.stopClockTicker();
-    if (this.view === 'flowReading') await this.saveFlowPosition();
-    else await this.savePagedPosition();
+    if (this.view === 'flowReading') await this.saveFlowPosition(true, true);
+    else await this.savePagedPosition(true);
     try { await this.bridge.shutDownPageContainer(); } catch { /* */ }
   }
 
@@ -1558,122 +1630,69 @@ export class EvenEpubClient {
 
   // --- Persistence ---
 
-  private async savePagedPosition(): Promise<void> {
+  private async savePagedPosition(immediate = false): Promise<void> {
     if (!this.book) return;
-    try {
-      const pos: ReadingPosition = {
-        chapterIndex: this.chapterIndex,
-        pageIndex: this.pageIndex,
-      };
-      await storePagedPosition(
-        this.bridge as unknown as PositionBridge,
-        { title: this.book.title, bookId: this.currentBookId, filename: this.currentBookFilename },
-        pos,
-        localStorage,
-      );
-      this.onPositionChanged?.(this.chapterIndex, this.pageIndex);
-    } catch (e) {
-      console.warn('Failed to save position:', e);
-    }
+    const pos: ReadingPosition = {
+      chapterIndex: this.chapterIndex,
+      pageIndex: this.pageIndex,
+    };
+    this.persister.savePaged(pos, { immediate });
+    this.onPositionChanged?.(this.chapterIndex, this.pageIndex);
   }
 
   public async getSavedPosition(bookTitle: string, bookId?: string): Promise<ReadingPosition | null> {
-    const keys = pagedPositionKeys({ title: bookTitle, bookId });
-    for (const key of keys) {
-      try {
-        let raw = await this.bridge.getLocalStorage(key);
-        if (!raw) try { raw = localStorage.getItem(key) || ''; } catch { /* */ }
-        if (!raw) continue;
-
-        const pos: ReadingPosition = JSON.parse(raw);
-        if (
-          Number.isInteger(pos.chapterIndex) &&
-          Number.isInteger(pos.pageIndex) &&
-          pos.chapterIndex >= 0 &&
-          pos.pageIndex >= 0
-        ) {
-          return pos;
-        }
-      } catch { /* try next legacy-compatible key */ }
-    }
-
-    return null;
+    return readPositionFromKeys(
+      this.bridge as unknown as PositionBridge,
+      pagedPositionKeys({ title: bookTitle, bookId }),
+      localStorage,
+    );
   }
 
   private async restorePagedPosition(bookTitle: string): Promise<ReadingPosition | null> {
-    const keys = pagedPositionKeys({ title: bookTitle, bookId: this.currentBookId });
-
-    for (const key of keys) {
-      try {
-        let raw = await this.bridge.getLocalStorage(key);
-        if (!raw) try { raw = localStorage.getItem(key) || ''; } catch { /* */ }
-        if (!raw) continue;
-
-        const pos: ReadingPosition = JSON.parse(raw);
-        if (
-          Number.isInteger(pos.chapterIndex) &&
-          Number.isInteger(pos.pageIndex) &&
-          pos.chapterIndex >= 0 && pos.chapterIndex < this.chapterPages.length && pos.pageIndex >= 0
-        ) {
-          pos.pageIndex = Math.min(pos.pageIndex, Math.max(0, (this.chapterPages[pos.chapterIndex]?.length ?? 1) - 1));
-          return pos;
-        }
-      } catch { /* try next key */ }
-    }
-
-    return null;
+    const pos = await readPositionFromKeys(
+      this.bridge as unknown as PositionBridge,
+      pagedPositionKeys({ title: bookTitle, bookId: this.currentBookId }),
+      localStorage,
+    );
+    if (!pos) return null;
+    if (pos.chapterIndex >= this.chapterPages.length) return null;
+    pos.pageIndex = Math.min(
+      pos.pageIndex,
+      Math.max(0, (this.chapterPages[pos.chapterIndex]?.length ?? 1) - 1),
+    );
+    return pos;
   }
 
-  private async saveFlowPosition(persistToBridge = true): Promise<void> {
+  private async saveFlowPosition(persistToBridge = true, immediate = false): Promise<void> {
     if (!this.book) return;
-    try {
-      const pos: ReadingPosition = {
-        chapterIndex: this.chapterIndex,
-        pageIndex: this.pageIndex,
-        wordIndex: this.flowWordIndex,
-      };
-      await storeFlowPosition(
-        this.bridge as unknown as PositionBridge,
-        { title: this.book.title, bookId: this.currentBookId, filename: this.currentBookFilename },
-        pos,
-        persistToBridge,
-        localStorage,
-      );
-      this.onPositionChanged?.(this.chapterIndex, this.pageIndex);
-    } catch (e) {
-      console.warn('Failed to save flow position:', e);
-    }
+    const pos: ReadingPosition = {
+      chapterIndex: this.chapterIndex,
+      pageIndex: this.pageIndex,
+      wordIndex: this.flowWordIndex,
+    };
+    this.persister.saveFlow(pos, persistToBridge, { immediate });
+    this.onPositionChanged?.(this.chapterIndex, this.pageIndex);
   }
 
   private async restoreFlowPosition(bookTitle: string): Promise<ReadingPosition | null> {
-    const keys = flowPositionKeys({ title: bookTitle, bookId: this.currentBookId });
+    const pos = await readPositionFromKeys(
+      this.bridge as unknown as PositionBridge,
+      flowPositionKeys({ title: bookTitle, bookId: this.currentBookId }),
+      localStorage,
+    );
+    if (!pos) return null;
+    if (pos.chapterIndex >= this.flowPageData.length) return null;
 
-    for (const key of keys) {
-      try {
-        let raw = await this.bridge.getLocalStorage(key);
-        if (!raw) try { raw = localStorage.getItem(key) || ''; } catch { /* */ }
-        if (!raw) continue;
-
-        const pos: ReadingPosition = JSON.parse(raw);
-        const pageIndex = Number.isInteger(pos.pageIndex) ? pos.pageIndex : 0;
-        const wordIndex = Number.isInteger(pos.wordIndex) ? pos.wordIndex! : 0;
-        const chapterPages = this.flowPageData[pos.chapterIndex];
-        if (
-          Number.isInteger(pos.chapterIndex) &&
-          pos.chapterIndex >= 0 &&
-          pos.chapterIndex < this.flowPageData.length &&
-          pageIndex >= 0 &&
-          pageIndex < (chapterPages?.length ?? 0)
-        ) {
-          return {
-            chapterIndex: pos.chapterIndex,
-            pageIndex,
-            wordIndex: Math.min(wordIndex, Math.max(0, (chapterPages[pageIndex]?.wordCount ?? 1) - 1)),
-          };
-        }
-      } catch { /* try next key */ }
+    const pageIndex = Number.isInteger(pos.pageIndex) ? pos.pageIndex : 0;
+    const wordIndex = Number.isInteger(pos.wordIndex) ? pos.wordIndex! : 0;
+    const chapterPages = this.flowPageData[pos.chapterIndex];
+    if (pageIndex >= 0 && pageIndex < (chapterPages?.length ?? 0)) {
+      return {
+        chapterIndex: pos.chapterIndex,
+        pageIndex,
+        wordIndex: Math.min(wordIndex, Math.max(0, (chapterPages[pageIndex]?.wordCount ?? 1) - 1)),
+      };
     }
-
     return null;
   }
 }
