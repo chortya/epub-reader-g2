@@ -1,7 +1,7 @@
 # Architecture
 
 This document describes how the **Even G2 ePub Reader** is put together as of
-**v1.3.1**. It is meant for contributors touching the codebase; user-facing
+**v1.5.0**. It is meant for contributors touching the codebase; user-facing
 docs live in `README.md` / `CHANGELOG.md` and high-level conventions live in
 `CLAUDE.md`.
 
@@ -27,9 +27,14 @@ Two entry points ship in the built bundle:
 - **Tests**: Node 22+ native test runner with `--experimental-strip-types` —
   no Jest / Vitest.
 - **Runtime dependencies**:
-  - `@evenrealities/even_hub_sdk` (0.0.10) — raw bridge to the G2 device.
-  - `even-toolkit` (1.7.x) — gesture mapping, splash, text cleaning,
-    keep-alive (no React — we use the glasses-side modules only).
+  - `@evenrealities/even_hub_sdk` (0.0.15, pinned) — raw bridge to the G2
+    device (long-press events, native contextual menu, textColor since 0.0.14).
+  - `even-toolkit` (1.7.7, patched) — gesture mapping, splash, text cleaning,
+    keep-alive (no React — we use the glasses-side modules only). The
+    patch-package patch adds `resetGestureState()` and the 40 ms suppression
+    window to `gestures` (regenerated for 1.7.7).
+  - `@evenrealities/pretext` (via even-toolkit) — firmware-exact LVGL font
+    metrics; wrapped by `src/text-metrics.ts`.
   - `jszip` — EPUB ZIP extraction.
   - `hypher` + `hyphenation.*` — per-language word hyphenation.
   - `upng-js` — PNG encoding for the splash screen.
@@ -57,8 +62,27 @@ mock-bridge.ts       Browser-simulator bridge: intercepts SDK methods and render
                      a DOM canvas; provides Prev/Next/Tap/DblTap buttons.
 splash-bridge.ts     Adapter exposing an even-toolkit SplashBridge interface on top of the raw SDK.
 gutenberg.ts         Fetches the Gutenberg Top 100 and downloads individual EPUBs via a CORS proxy.
-book-id.ts           Deterministic slug-safe ID from filename + title hash; resolveLastBook()
-                     for the mainMenu's Continue Reading resolver (bookId → filename+title).
+book-id.ts           Book identity: SHA-256 content IDs (makeContentBookId) plus the legacy
+                     filename+title hash (makeBookId); resolveLastBook() for the mainMenu's
+                     Continue Reading resolver (bookId → filename+title).
+operation-queue.ts   createSerialExecutor — FIFO promise queue whose rejections never wedge
+                     the tail; used for bridge-library mutations and gesture dispatch.
+position-store.ts    Position persistence: debounced createPositionPersister (trailing 800 ms,
+                     immediate on lifecycle exits, ref-snapshot flush), savePagedPosition /
+                     saveFlowPosition (v2 format, title lane only for legacy IDs),
+                     writeLastBookKeys (L3, once per book open), migrateLegacyPositionKeys,
+                     readPositionFromKeys (shared restore reader).
+reading-progress.ts  Pure footer/progress math: computePagedProgress / computeFlowProgress
+                     (with measured-pace chapter ETA), rescalePageIndex (legacy estimator),
+                     routeGoBack, toggleStatusBarPosition.
+book-selection.ts    Collision-aware book-picker labels + companion search matching.
+lifecycle.ts         Foreground lifecycle reducer (active/overlayOpen/backgrounded) that
+                     disambiguates native-menu ENTER/EXIT from real background/foreground;
+                     static menu payloads (PAGED_MENU_ITEMS / FLOW_MENU_ITEMS).
+sentences.ts         Sentence-boundary scanning on cleaned chapter text (Flow sentence
+                     rewind, auto-rewind on resume). Offsets match position v2.
+text-metrics.ts      Single import site for @evenrealities/pretext pixel measurement
+                     (firmware font metrics; the font is proportional, not monospace).
 chapter-title.ts     Picks the best-looking chapter title from spine / heading / document-title
                      candidates (generic "Chapter N" labels deprioritized).
 launch.ts            pickInitialView(intent, lastBook, readingMode) — pure post-splash view
@@ -131,15 +155,20 @@ From `src/types.ts`:
 ```ts
 type Chapter         = { title: string; text: string };
 type Book            = { title: string; chapters: Chapter[] };
-type ViewState       = 'mainMenu' | 'bookPicker' | 'library' | 'reading' | 'flowReading'
-                     | 'settings' | 'settingEditor';
-type ReadingPosition = { chapterIndex: number; pageIndex: number; wordIndex?: number };
+type ViewState       = 'mainMenu' | 'bookPicker' | 'welcome' | 'chapterList' | 'reading'
+                     | 'flowReading' | 'settings' | 'settingEditor';
+// v2 (v1.5.0): offset+paginationVersion survive repagination exactly.
+// chapterIndex/pageIndex/wordIndex remain as hints — 1.4.6 (rollback) reads
+// those and ignores the v2 fields.
+type ReadingPosition = { chapterIndex: number; pageIndex: number; wordIndex?: number;
+                         v?: number; offset?: number; paginationVersion?: number };
 type CachedBookMeta  = { bookId: string; title: string; filename: string; uploadedAt: number };
 ```
 
 Each chapter is flattened to plain text during parse. The reader never holds
 the original HTML — styling, images, and markup are discarded by design
-(G2 is monochrome, 58-ish chars per line).
+(G2 is monochrome, ~59-char lines with a proportional font — pixel metrics in
+`text-metrics.ts`, not char counts, decide the footer fit).
 
 ## 6. View state machine
 
@@ -203,23 +232,28 @@ Raw SDK events reach the app via `bridge.onEvenHubEvent`. They flow through
 three layers:
 
 ```
-SDK event -------> mapGlassEvent() ------> switch(action.type) in EvenEpubClient
-(SCROLL_TOP,      (even-toolkit/          (HIGHLIGHT_MOVE | SELECT_HIGHLIGHTED | GO_BACK)
- SCROLL_BOTTOM,    action-map)            + view-dependent dispatch
- CLICK,
- DOUBLE_CLICK,
- FOREGROUND_*,
- SYSTEM_EXIT)
+SDK event ----> lifecycle/menu routing ---> mapGlassEvent() ---> dispatchGlassEvent()
+(sys, menu,      (src/lifecycle.ts —        (even-toolkit/       (serialized FIFO via
+ foreground_*)    overlay vs background)     action-map)          createSerialExecutor)
 ```
 
-Two debouncing helpers from `even-toolkit/gestures` are used around display
-updates: `notifyTextUpdate()` after every `rebuildPageContainer` /
-`textContainerUpgrade` (suppresses spurious scroll events for ~80 ms) and
-`armImmediateScroll()` before a view transition (makes the first swipe
-responsive again).
+- **Lifecycle (v1.5.0).** FOREGROUND_ENTER/EXIT are ambiguous since the
+  native contextual menu (hold) fires the same pair around the overlay. The
+  reducer tracks active/overlayOpen/backgrounded: a menu click is held until
+  the overlay's EXIT delivers it (both event orders work); only a *real*
+  backgrounding pauses Flow and flushes. SYSTEM_EXIT bypasses everything.
+- **Native menu.** Reading-view rebuilds carry `menuObject` (a rebuild without
+  it clears the menu). Clicks arrive as `menuItemClickEvent` and bypass
+  gesture routing; stale clicks are dropped by a view guard.
+- **Serialization.** Gesture-driven renders run through one FIFO queue so
+  rapid swipes cannot interleave SDK calls; lifecycle exits preempt.
+- **Flow swipes** (running): one sentence back/forward (`src/sentences.ts`);
+  paused: page navigation. Chapter jumps live in the menu/Contents.
+- `notifyTextUpdate()` follows every rebuild/upgrade (phantom-suppression
+  window); `resetGestureState()` runs after view transitions.
 
-`SYSTEM_EXIT_EVENT` and `FOREGROUND_EXIT_EVENT` flush positions to
-persistence before the process dies.
+`SYSTEM_EXIT_EVENT` flushes; a real `FOREGROUND_EXIT_EVENT` pauses Flow and
+saves the position immediately (persister `{immediate}`).
 
 ## 8. Text pipeline
 
@@ -314,50 +348,63 @@ Examples (bottom status bar on):
 
 ## 10. Persistence
 
-Five independent storage lanes:
-
 ```
-+-------------------+----------------------+-------------------------------+-------------------------------+
-| Data              | Primary              | Fallback                      | Key pattern                   |
-+-------------------+----------------------+-------------------------------+-------------------------------+
-| Book files        | IndexedDB            | bridge.setLocalStorage        | BRIDGE_BOOKS_KEY (array,      |
-| (local library)   | (db.ts, store:books) | base64 library fallback       | each { bookId, filename, ...})|
-+-------------------+----------------------+-------------------------------+-------------------------------+
-| Cached book list  | bridge local storage | (none)                        | 'epub-book-list'              |
-| (glasses picker)  |                      |                               |                               |
-+-------------------+----------------------+-------------------------------+-------------------------------+
-| Paged position    | bridge local storage | window.localStorage           | STORAGE_KEY_POSITION + bookId |
-|                   |                      | (WebView fallback)            | + STORAGE_KEY_POSITION + title|
-+-------------------+----------------------+-------------------------------+-------------------------------+
-| Flow position     | bridge local storage | window.localStorage           | STORAGE_KEY_FLOW_POSITION +...|
-+-------------------+----------------------+-------------------------------+-------------------------------+
-| App settings      | bridge local storage | window.localStorage           | SETTINGS_KEY                  |
-| (AppConfig)       |                      |                               |                               |
-+-------------------+----------------------+-------------------------------+-------------------------------+
-| Last book meta    | bridge local storage | (none)                        | STORAGE_KEY_BOOK_TITLE        |
-| (for Continue     |                      |                               | STORAGE_KEY_LAST_BOOK_ID      |
-|  Reading)         |                      |                               | STORAGE_KEY_LAST_BOOK_FILENAME|
-+-------------------+----------------------+-------------------------------+-------------------------------+
++-------------------+----------------------+----------------------------------------------+
+| Data              | Primary              | Key pattern                                  |
++-------------------+----------------------+----------------------------------------------+
+| Book files        | IndexedDB (db.ts,    | Split bridge mirror (v1.5.0):                |
+| (local library)   | store:books, keyed   |   'epub-book-index' (metadata array)         |
+|                   | by SHA-256 bookId)   |   'epub-book-data-<bookId>' (base64 payload) |
+|                   |                      | Legacy single blob 'epub-recent-books' is    |
+|                   |                      | dual-written for 1.4.6 rollback              |
++-------------------+----------------------+----------------------------------------------+
+| Cached book list  | bridge local storage | 'epub-book-list'                             |
+| (glasses picker)  |                      |                                              |
++-------------------+----------------------+----------------------------------------------+
+| Paged position    | bridge local storage | STORAGE_KEY_POSITION + bookId                |
+| (format v2)       | (debounced 800 ms;   | (+ title lane only for legacy IDs)           |
+|                   | immediate on exits)  |                                              |
++-------------------+----------------------+----------------------------------------------+
+| Flow position     | bridge local storage | STORAGE_KEY_FLOW_POSITION + ... (same rules) |
++-------------------+----------------------+----------------------------------------------+
+| Quick bookmark    | bridge local storage | 'epub-bookmark-<bookId>' (position v2)       |
++-------------------+----------------------+----------------------------------------------+
+| App settings      | bridge local storage | SETTINGS_KEY (incl. textBrightness 1-4)      |
++-------------------+----------------------+----------------------------------------------+
+| Last book meta    | bridge local storage | STORAGE_KEY_BOOK_TITLE / _LAST_BOOK_ID /     |
+| (for Continue)    | (once per book open) | _LAST_BOOK_FILENAME                          |
++-------------------+----------------------+----------------------------------------------+
 ```
 
-The three "Last book meta" keys are written together on every position save
-(invariant I1 — enforced by `tests/l3-save-invariant.test.ts`). The mainMenu's
-Continue Reading resolver (`resolveLastBook()` in `book-id.ts`) matches them
-against `cachedBookList`: bookId first, then `makeBookId(filename, title)` as
-a tiebreaker. Title-only resume is intentionally rejected to avoid duplicate-
-title footguns (design decision Q6).
+- **Positions (v1.5.0 format v2)** are a superset of v1: `{v:2, chapterIndex,
+  pageIndex, wordIndex, offset, paginationVersion}`. `offset` is the char
+  position inside the chapter's cleaned text (paged: page start; flow: word
+  start), valid while `paginationVersion` matches — so text-height changes
+  (and any future pagination change) resume at the *same text*, not the same
+  page fraction. Rollback safety: 1.4.6 reads the hints and ignores v2
+  fields, so no mirror keys are needed.
+- **Debounced persister** (`createPositionPersister`): page turns schedule a
+  save (trailing 800 ms, latest-wins); lifecycle exits and menu actions save
+  immediately; `flush()` lands pending writes (under the ref captured at save
+  time) before a book switch. `setLocalStorage === false` is an error.
+- **L3 "last book" keys** are written together once per book open (invariant
+  I1 — `tests/l3-save-invariant.test.ts`), not on every page turn.
 
 - **Book files** use SHA-256 content IDs in IndexedDB, so different EPUB bytes
   remain separate even when filenames and titles collide. Schema v3 migrates
-  surviving filename-keyed rows without clearing the store. `db.ts` also keeps
-  a bridge-localStorage base64 fallback; its read-modify-write mutations are
-  serialized, and neither store silently evicts a fourth book.
+  surviving filename-keyed rows without clearing the store; re-uploading the
+  same filename+title replaces the migrated legacy-ID row and re-keys its
+  positions. The bridge mirror uses the v1.5.0 split layout (index + per-book
+  payload) with the legacy blob dual-written; mutations are serialized and
+  neither store silently evicts books. Rejected bridge writes throw with an
+  explicit storage-full message.
 - **Cached book list** is separate from the book bytes: `EvenEpubClient`
   stores a compact metadata array under `'epub-book-list'` so startup can
   render the glasses-side picker before any EPUB is parsed.
-- **Positions** are saved on every page turn to *both* lanes. Read path
-  tries `bookId` first, then `title`, then bridge, then browser
-  localStorage — whichever returns valid state first wins.
+- **Positions**: restore tries `bookId` first, then the title lane (legacy
+  IDs only), then bridge, then browser localStorage. On a legacy→content-ID
+  re-upload the old position keys are migrated forward
+  (`migrateLegacyPositionKeys`).
 - **Settings** now use bridge localStorage as the source of truth on device.
   `constants.ts` still hydrates synchronously from browser localStorage at
   module load for warm reloads in the same WebView, then `main.ts` calls
@@ -461,7 +508,7 @@ Tests are pure: they import `src/*.ts` directly (using explicit `.ts`
 extensions — Node's native TS mode requires them) and exercise side-effect
 free functions. There is no jsdom / Vitest / Jest.
 
-Current suites (v1.4.1 → 89 tests):
+Current suites (v1.5.0 → 173 tests):
 
 - `app-json.test.ts` — manifest / package version alignment, SDK version
   consistency, `supported_languages` matches hyphenation set, network
@@ -486,8 +533,22 @@ Current suites (v1.4.1 → 89 tests):
 - `launch-intent.test.ts` — `pickInitialView` decision function for
   each combination of launch intent, resolvable last book, and reading
   mode.
-- `l3-save-invariant.test.ts` — ensures every paged/flow save writes
-  all three L3 keys (title, bookId, filename) together.
+- `l3-save-invariant.test.ts` — invariant I1 (v1.5.0 form): the three L3
+  keys are written together once per book open; saves never touch them.
+- `position-store.test.ts` — persister debounce/flush/ref-snapshot semantics,
+  v2 save/read helpers, legacy position-key migration, shared restore reader.
+- `layout.test.ts` — menu-box geometry contract incl. injected pixel measure.
+- `gestures-reset.test.ts` — the toolkit-patch contract (resetGestureState
+  preserves the post-rebuild suppression window).
+- `lifecycle.test.ts` — overlay vs background ENTER/EXIT, both event orders,
+  menu payload constraints (unique non-zero ids, 32-byte labels).
+- `sentences.test.ts` — sentence boundaries incl. abbreviation guards.
+- `review-regressions.test.ts` — book identity, bridge-library split
+  (index + per-book keys, legacy fallback), split round-trip, flow ETA guard.
+
+The app-json test enforces a number of release invariants, so simply
+forgetting to bump `app.json` version alongside `package.json` is caught
+automatically at `npm test`.
 
 The app-json test enforces a number of release invariants, so simply
 forgetting to bump `app.json` version alongside `package.json` is caught
