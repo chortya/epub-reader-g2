@@ -1,6 +1,6 @@
 {
   "name": "epub-reader-g2",
-  "version": "1.4.4",
+  "version": "1.4.6",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,8 +11,8 @@
     "build": "vite build",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
     "preview": "vite preview --host 0.0.0.0 --strictPort",
-    "qr": "evenhub qr --clear >/dev/null 2>&1; evenhub qr --port 5173 --path / -e",
-    "qr:sim": "evenhub qr --clear >/dev/null 2>&1; evenhub qr --port 5173 --path '/?simulator=true' -e",
+    "qr": "node qr.mjs /",
+    "qr:sim": "node qr.mjs '/?simulator=true'",
     "init:evenhub": "evenhub init --output app.json",
     "pack": "npm run build && evenhub pack app.json ./dist --output epub-reader.ehpk",
     "pack:check": "evenhub pack app.json ./dist --check",

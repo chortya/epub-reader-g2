@@ -6,3 +6,4 @@ dist/
 .env
 .claude/
 glasses_*.png
+.nanocoder/

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Even G2 ePub Reader (v1.4.1) — a web app for reading EPUB books on Even Realities G2 smart glasses. Built with TypeScript, Vite, Even Hub SDK (v0.0.10), and even-toolkit. Renders paginated text to a 576x288px monochrome display.
+Even G2 ePub Reader (v1.4.6) — a web app for reading EPUB books on Even Realities G2 smart glasses. Built with TypeScript, Vite, Even Hub SDK (v0.0.10), and even-toolkit. Renders paginated text to a 576x288px monochrome display.
 
 ## Commands
 
@@ -32,7 +32,7 @@ index.html → main.ts (bootstrap, UI wiring, file upload, settings panel, keep-
                ├── paginateText (paginator.ts) — word-wrap with language-aware hyphenation
                ├── gutenberg.ts — fetch/download Project Gutenberg books via CORS proxy
                ├── splash-bridge.ts — SplashBridge adapter for raw SDK bridge
-               ├── db.ts — IndexedDB local cache for recently opened books (max 3)
+               ├── db.ts — content-addressed IndexedDB library + bridge fallback (no silent eviction)
                ├── mock-bridge.ts — browser simulator fallback (renders to canvas)
                ├── constants.ts — display specs, config management, storage keys
                ├── utils.ts — shared helpers (status display, timeout wrapper, clamp, truncation)
@@ -48,7 +48,7 @@ index.html → main.ts (bootstrap, UI wiring, file upload, settings panel, keep-
 
 **even-toolkit integration:** Uses glasses-side modules only (no React). Event mapping via `action-map`, gesture debouncing via `gestures`, text safety via `text-clean`, WebView keep-alive via `keep-alive`. Does NOT use `EvenHubBridge` from toolkit — the app uses the raw SDK bridge directly for custom container layouts (status bars, chapter grid).
 
-**Persistence:** Reading positions saved to bridge localStorage per book title + browser localStorage as fallback. Config (hyphenation, status bar, reading mode, flow speed, text height) written to BOTH bridge localStorage (via `saveSettingsToBridge`, persists across device app restarts) AND browser localStorage (fast warm-start on simulator). Book files cached locally only — IndexedDB primary, base64 in bridge localStorage as fallback (max 3 books). "Continue Reading" on the mainMenu resolves from three bridge keys written together on every save: `epub-book-title`, `epub-last-book-id`, `epub-last-book-filename`. No cloud storage.
+**Persistence:** Reading positions saved to bridge localStorage per book identity/title + browser localStorage as fallback. Config (hyphenation, status bar, reading mode, flow speed, text height) written to BOTH bridge localStorage (via `saveSettingsToBridge`, persists across device app restarts) AND browser localStorage (fast warm-start on simulator). Book files use a content-addressed IndexedDB library with a base64 bridge fallback; there is no silent three-book eviction, and same-named EPUBs stay isolated. "Continue Reading" on the mainMenu resolves from three bridge keys written together on every save: `epub-book-title`, `epub-last-book-id`, `epub-last-book-filename`. No cloud storage.
 
 **Entry points:** `index.html` is the main reader app. `gutenberg.html` is a standalone page for browsing/downloading Project Gutenberg books.
 

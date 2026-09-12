@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   CHAR_PITCH_PX,
+  BOX_TEXT_PADDING_CELLS,
   EDGE_MARGIN,
   ITEMS_PER_PAGE,
   MIN_BOX_PX,
@@ -46,9 +47,15 @@ test('computeBoxWidthPx: all-empty input returns MIN_BOX_PX (no Infinity/NaN)', 
 test('computeBoxWidthPx: scales with longest label length', () => {
   const label = 'Continue reading'; // 16 chars
   const got = computeBoxWidthPx([label]);
-  // Expected: ceil(16 * 9.76) + 2*4 = 157 + 8 = 165, then clamped above MIN_BOX_PX.
-  const expectedRaw = Math.ceil(label.length * CHAR_PITCH_PX) + 8;
+  // Include a full breathing cell on each side for the proportional G2 font.
+  const expectedRaw = Math.ceil((label.length + BOX_TEXT_PADDING_CELLS) * CHAR_PITCH_PX) + 8;
   assert.equal(got, Math.max(MIN_BOX_PX, expectedRaw));
+});
+
+test('computeBoxWidthPx: reserves two cells so exact-fit labels do not clip', () => {
+  const label = '(No recent book)';
+  const textWidth = label.length * CHAR_PITCH_PX;
+  assert.ok(computeBoxWidthPx([label]) >= textWidth + 2 * CHAR_PITCH_PX);
 });
 
 test('trimTrailingEmptySlots: removes trailing empty rows from a 4-slot array', () => {

@@ -67,7 +67,7 @@ npm run qr:sim
 
 ## Storage Behavior
 
-- IndexedDB keeps the 3 most recent books for fast reload in the browser/WebView.
+- IndexedDB keeps the full local library for fast reload in the browser/WebView. Content-based IDs prevent same-named EPUBs from overwriting one another.
 - Bridge local storage keeps a base64 fallback of those same books so they survive app restarts on the glasses device.
 - Reading positions are saved on every page turn to bridge storage (per bookId and per title) with browser localStorage as a secondary fallback.
 - Web library lists local books only; deleting from the web UI prompts for confirmation and removes both the IndexedDB entry and the bridge-storage copy.

@@ -16,6 +16,7 @@ import type { Book, ReadingPosition, ViewState, CachedBookMeta } from './types';
 import type { LaunchIntent } from './launch';
 import { pickInitialView } from './launch';
 import { resolveLastBook } from './book-id';
+import { formatBookPickerLabel } from './book-selection';
 import { paginateText } from './paginator';
 import {
   config,
@@ -25,10 +26,8 @@ import {
   FLOW_MIN_WPM,
   FLOW_SPEED_VALUES,
   STORAGE_KEY_BOOK_TITLE,
-  STORAGE_KEY_FLOW_POSITION,
   STORAGE_KEY_LAST_BOOK_FILENAME,
   STORAGE_KEY_LAST_BOOK_ID,
-  STORAGE_KEY_POSITION,
   TEXT_HEIGHT_VALUES,
   applyEditorValue,
   formatSettingsRow,
@@ -49,6 +48,20 @@ import {
   trimTrailingEmptySlots,
   CHAR_PITCH_PX,
 } from './layout';
+import {
+  savePagedPosition as storePagedPosition,
+  saveFlowPosition as storeFlowPosition,
+  pagedPositionKeys,
+  flowPositionKeys,
+  type PositionBridge,
+} from './position-store';
+import {
+  computePagedProgress,
+  computeFlowProgress,
+  rescalePageIndex,
+  routeGoBack,
+  toggleStatusBarPosition,
+} from './reading-progress';
 
 type Bridge = Awaited<ReturnType<typeof waitForEvenAppBridge>>;
 
@@ -110,7 +123,7 @@ function currentEditorIndex(key: SettingKey): number {
 }
 
 export class EvenEpubClient {
-  private view: ViewState = 'library'; // Starts as library (welcome), transitions after init
+  private view: ViewState = 'welcome'; // Starts as welcome, transitions after init
   private book: Book | null = null;
   private chapterPages: string[][] = [];
   private flowPageData: FlowPageData[][] = [];
@@ -234,18 +247,17 @@ export class EvenEpubClient {
         await this.showPage();
       }
     } else {
-      await this.showChapterList();
+      await this.showChapterList(false);
     }
   }
 
   async applySettings(): Promise<void> {
     if (this.book && this.chapterPages.length > 0) {
       const oldTotalPages = this.chapterPages[this.chapterIndex]?.length || 1;
-      const progress = this.pageIndex / oldTotalPages;
       this.chapterPages = this.book.chapters.map((ch) => paginateText(ch.text));
       this.flowPageData = this.buildFlowPageData(this.chapterPages);
       const newTotalPages = this.chapterPages[this.chapterIndex]?.length || 1;
-      this.pageIndex = Math.max(0, Math.min(Math.floor(progress * newTotalPages), newTotalPages - 1));
+      this.pageIndex = rescalePageIndex(this.pageIndex, oldTotalPages, newTotalPages);
 
       const flowPage = this.flowPageData[this.chapterIndex]?.[this.pageIndex];
       const maxWordIndex = Math.max(0, (flowPage?.wordCount ?? 1) - 1);
@@ -272,7 +284,7 @@ export class EvenEpubClient {
       if (this.view === 'flowReading' && this.isFlowRunning) {
         this.scheduleFlowTick();
       }
-    } else if (this.view === 'library' && !this.book) {
+    } else if (this.view === 'welcome') {
       await this.showWelcome();
     }
   }
@@ -609,21 +621,22 @@ export class EvenEpubClient {
     for (let i = 0; i < ITEMS_PER_PAGE; i++) {
       const idx = pageStart + i;
       if (idx < total) {
-        labels.push(truncateForList(this.cachedBookList[idx].title, 42));
+        const label = formatBookPickerLabel(this.cachedBookList[idx], this.cachedBookList);
+        labels.push(truncateForList(`${idx + 1}. ${label}`, 42));
       } else {
         labels.push('');
       }
     }
 
     await this.rebuildSlots(labels, selectedSlot);
-    setStatus(`Library: ${this.bookPickerSelectedIndex + 1}/${total}. Swipe=browse, Tap=open, DblTap=exit`);
+    setStatus(`Library: ${this.bookPickerSelectedIndex + 1}/${total}. Swipe=browse, Tap=open, DblTap=back`);
     this.onViewChanged?.();
   }
 
   private async showWelcome(): Promise<void> {
     this.stopFlow();
     this.stopClockTicker();
-    this.view = 'library';
+    this.view = 'welcome';
 
     await this.bridge.rebuildPageContainer(
       new RebuildPageContainer({
@@ -643,11 +656,11 @@ export class EvenEpubClient {
     this.onViewChanged?.();
   }
 
-  private async showChapterList(): Promise<void> {
+  private async showChapterList(showPageCounts = true): Promise<void> {
     if (!this.book) return;
     this.stopFlow();
     this.stopClockTicker();
-    this.view = 'library';
+    this.view = 'chapterList';
 
     const total = this.book.chapters.length;
     const pageStart =
@@ -659,8 +672,12 @@ export class EvenEpubClient {
       const idx = pageStart + i;
       if (idx < total) {
         const ch = this.book.chapters[idx];
-        const pgCount = this.chapterPages[idx]?.length ?? 0;
-        labels.push(truncateForList(`${idx + 1}. ${ch.title} (${pgCount}pg)`, 42));
+        if (showPageCounts) {
+          const pgCount = this.chapterPages[idx]?.length ?? 0;
+          labels.push(truncateForList(`${idx + 1}. ${ch.title} (${pgCount}pg)`, 42));
+        } else {
+          labels.push(truncateForList(`${idx + 1}. ${ch.title}`, 50));
+        }
       } else {
         labels.push('');
       }
@@ -684,20 +701,12 @@ export class EvenEpubClient {
     const chapter = this.book.chapters[this.chapterIndex];
     const totalPages = pages.length;
 
-    let totalBookPages = 0;
-    let currentAbsolutePage = 0;
-    for (let i = 0; i < this.chapterPages.length; i++) {
-      if (i < this.chapterIndex) {
-        currentAbsolutePage += this.chapterPages[i].length;
-      } else if (i === this.chapterIndex) {
-        currentAbsolutePage += this.pageIndex + 1;
-      }
-      totalBookPages += this.chapterPages[i].length;
-    }
-    const progress = totalBookPages > 1 ? currentAbsolutePage / totalBookPages : 1;
-    // Progress info text and bar
-    const totalChapters = this.book.chapters.length;
-    const infoText = `Ch ${this.chapterIndex + 1}/${totalChapters} Pg ${this.pageIndex + 1}/${totalPages} `;
+    const { infoText, progress } = computePagedProgress({
+      chapterPages: this.chapterPages,
+      chapterIndex: this.chapterIndex,
+      pageIndex: this.pageIndex,
+      totalChapters: this.book.chapters.length,
+    });
 
     // Status-line content: "HH:MM  Ch C/T Pg P/N [━━━───]". Clock updates via
     // the periodic clockTicker (every 10 s with a string-compare gate); the
@@ -794,28 +803,17 @@ export class EvenEpubClient {
     this.flowWordIndex = clamp(this.flowWordIndex, 0, totalPageWords - 1);
     const content = this.buildFlowPageContent(pageData, this.flowWordIndex);
 
-    let totalBookWords = 0;
-    let currentAbsoluteWord = 0;
-    for (let ch = 0; ch < this.flowPageData.length; ch++) {
-      for (let pg = 0; pg < this.flowPageData[ch].length; pg++) {
-        const pageWords = this.flowPageData[ch][pg].wordCount;
-        totalBookWords += pageWords;
-        if (ch < this.chapterIndex || (ch === this.chapterIndex && pg < this.pageIndex)) {
-          currentAbsoluteWord += pageWords;
-        } else if (ch === this.chapterIndex && pg === this.pageIndex) {
-          currentAbsoluteWord += this.flowWordIndex + 1;
-        }
-      }
-    }
-    const progress = totalBookWords > 1 ? currentAbsoluteWord / totalBookWords : 1;
-    const flowState = this.isFlowRunning ? 'RUN' : 'PAUSE';
     const chapterTotalPages = this.chapterPages[this.chapterIndex]?.length ?? 1;
-    // Shorter than v1.4.0's "Flow RUN Nwpm Ch a/b Pg c/d W e/f" — that was
-    // ~40 cells and combined with the 7-cell clock prefix overflowed the
-    // footer to a second line on wide-glyph content. Drop the "Flow" prefix
-    // (redundant with RUN/PAUSE) and the W-index suffix (the progress bar
-    // already indicates within-page position).
-    const infoText = `${flowState} ${config.flowSpeedWpm}wpm Ch ${this.chapterIndex + 1}/${this.book.chapters.length} Pg ${this.pageIndex + 1}/${chapterTotalPages} `;
+    const { infoText, progress } = computeFlowProgress({
+      flowWordCounts: this.flowPageData.map((ch) => ch.map((pg) => pg.wordCount)),
+      chapterIndex: this.chapterIndex,
+      pageIndex: this.pageIndex,
+      flowWordIndex: this.flowWordIndex,
+      totalChapters: this.book.chapters.length,
+      chapterTotalPages,
+      flowSpeedWpm: config.flowSpeedWpm,
+      isFlowRunning: this.isFlowRunning,
+    });
 
     const hasBottomBar = config.statusBarPosition === 'bottom';
     const label = formatStatusLine({
@@ -949,7 +947,10 @@ export class EvenEpubClient {
           width: boxWidthPx,
           height: ROW_HEIGHT,
           borderWidth: isSelected ? 1 : 0,
-          borderColor: 5,
+          // 13 (bright) per design guidelines — the selection highlight is the
+          // primary navigation feedback on the monochrome display; 5 (subtle
+          // grey) was too dim to read at a glance.
+          borderColor: 13,
           borderRadius: 8,
           paddingLength: 2,
           containerID: i + 2,
@@ -1090,16 +1091,28 @@ export class EvenEpubClient {
       window.clearTimeout(this.flowTimerId);
       this.flowTimerId = null;
     }
-    this.flowTimerId = window.setTimeout(async () => {
-      await this.flowTick();
-      this.scheduleFlowTick();
+    this.flowTimerId = window.setTimeout(() => {
+      this.flowTick().catch((e) => console.warn('flow tick failed:', e));
     }, this.getFlowIntervalMs());
   }
 
   private async flowTick(): Promise<void> {
-    if (!this.book || !this.isFlowRunning || this.isFlowTickInFlight) return;
+    if (!this.book || !this.isFlowRunning) return;
+    if (this.isFlowTickInFlight) {
+      // Previous render still in flight (render time exceeded the WPM
+      // interval — e.g. slow bridge at 600 WPM = 100 ms). Reschedule so
+      // we don't stall; the next attempt gives the render time to finish.
+      this.scheduleFlowTick();
+      return;
+    }
     this.isFlowTickInFlight = true;
     try {
+      // Schedule the next tick BEFORE the render so the bridge I/O overlaps
+      // with the wait. This keeps the effective word interval close to the
+      // target WPM instead of accumulating render time on every tick
+      // (the old "await tick then schedule" path added 10-50 ms per word).
+      this.scheduleFlowTick();
+
       const pageData = this.getCurrentFlowPageData();
       if (!pageData) return;
 
@@ -1224,7 +1237,7 @@ export class EvenEpubClient {
         if (action.direction === 'down') {
           if (this.view === 'reading') await this.nextPage();
           else if (this.view === 'flowReading') await this.nextChapterInFlow();
-          else if (this.view === 'library') await this.nextChapterInList();
+          else if (this.view === 'chapterList') await this.nextChapterInList();
           else if (this.view === 'bookPicker') await this.nextBookInPicker();
           else if (this.view === 'mainMenu') await this.nextMainMenuSlot();
           else if (this.view === 'settings') await this.nextSettingsListItem();
@@ -1232,7 +1245,7 @@ export class EvenEpubClient {
         } else {
           if (this.view === 'reading') await this.prevPage();
           else if (this.view === 'flowReading') await this.prevChapterInFlow();
-          else if (this.view === 'library') await this.prevChapterInList();
+          else if (this.view === 'chapterList') await this.prevChapterInList();
           else if (this.view === 'bookPicker') await this.prevBookInPicker();
           else if (this.view === 'mainMenu') await this.prevMainMenuSlot();
           else if (this.view === 'settings') await this.prevSettingsListItem();
@@ -1243,7 +1256,9 @@ export class EvenEpubClient {
       case 'SELECT_HIGHLIGHTED':
         if (this.view === 'flowReading' && this.book) {
           this.toggleFlow();
-        } else if (this.view === 'library' && this.book) {
+        } else if (this.view === 'reading' && this.book) {
+          await this.toggleReadingInfo();
+        } else if (this.view === 'chapterList') {
           await this.selectCurrentChapter();
         } else if (this.view === 'bookPicker' && this.onBookSelected) {
           const selected = this.cachedBookList[this.bookPickerSelectedIndex];
@@ -1264,34 +1279,30 @@ export class EvenEpubClient {
         }
         break;
 
-      case 'GO_BACK':
-        if (this.view === 'reading' && this.book) {
+      case 'GO_BACK': {
+        const target = routeGoBack(this.view, this.isFlowRunning);
+        if (target === 'chapterList') {
+          // reading or paused flowReading → chapter list. Preserve the current
+          // chapter so the list highlights where the reader left off.
           this.librarySelectedIndex = this.chapterIndex;
           await this.showChapterList();
-        } else if (this.view === 'flowReading' && this.book) {
-          if (!this.isFlowRunning) {
-            this.librarySelectedIndex = this.chapterIndex;
-            await this.showChapterList();
+        } else if (target === 'mainMenu') {
+          // chapterList clears the open book; welcome/bookPicker/settings don't.
+          if (this.view === 'chapterList') {
+            this.book = null;
+            this.stopFlow();
           }
-        } else if (this.view === 'library' && this.book) {
-          // Back from chapter list now routes to mainMenu (was bookPicker/welcome).
-          this.book = null;
-          this.stopFlow();
           await this.showMainMenu();
-        } else if (this.view === 'bookPicker' || (this.view === 'library' && !this.book)) {
-          // Back from picker/welcome now routes to mainMenu (was exit-app).
-          await this.showMainMenu();
-        } else if (this.view === 'mainMenu') {
-          // Exit-app lives on mainMenu dbltap now.
-          try { await this.bridge.shutDownPageContainer(1); } catch { /* */ }
-        } else if (this.view === 'settings') {
-          await this.showMainMenu();
-        } else if (this.view === 'settingEditor') {
-          // Cancel: discard the highlighted value, return to settings list.
+        } else if (target === 'settings') {
+          // Cancel in-flight editor pick.
           this.editingSettingKey = null;
           await this.showSettingsMenu();
+        } else if (target === 'exit') {
+          try { await this.bridge.shutDownPageContainer(1); } catch { /* */ }
         }
+        // target === this.view (flowReading while running): no-op.
         break;
+      }
     }
   }
 
@@ -1379,6 +1390,34 @@ export class EvenEpubClient {
 
   public getView(): ViewState {
     return this.view;
+  }
+
+  /** Current book title, or null when no book is loaded. */
+  public getBookTitle(): string | null {
+    return this.book?.title ?? null;
+  }
+
+  /** Immutable identity of the open book, used to update the right library row. */
+  public getBookId(): string | null {
+    return this.currentBookId;
+  }
+
+  public isReadingInfoVisible(): boolean {
+    return config.statusBarPosition === 'bottom';
+  }
+
+  /**
+   * Toggle the 30 px footer. Hidden mode uses 10 text lines instead of 9.
+   * Paged reading maps this to the otherwise-unused tap gesture.
+   */
+  public async toggleReadingInfo(): Promise<void> {
+    config.statusBarPosition = toggleStatusBarPosition(config.statusBarPosition);
+    saveSettings();
+    await this.applySettings();
+    await saveSettingsToBridge(this.bridge);
+    resetGestureState();
+    const lines = getTextLayout().maxLines;
+    setStatus(`Reading info ${this.isReadingInfoVisible() ? 'shown' : 'hidden'} · ${lines} text lines per page`);
   }
 
   public isFlowActive(): boolean {
@@ -1492,43 +1531,28 @@ export class EvenEpubClient {
   private buildCurrentFooterLabel(): string | null {
     if (!this.book) return null;
     if (this.view === 'reading') {
-      const totalPages = this.chapterPages[this.chapterIndex]?.length ?? 1;
-      const totalChapters = this.book.chapters.length;
-      const infoText = `Ch ${this.chapterIndex + 1}/${totalChapters} Pg ${this.pageIndex + 1}/${totalPages} `;
-      let totalBookPages = 0, currentAbsolutePage = 0;
-      for (let i = 0; i < this.chapterPages.length; i++) {
-        if (i < this.chapterIndex) currentAbsolutePage += this.chapterPages[i].length;
-        else if (i === this.chapterIndex) currentAbsolutePage += this.pageIndex + 1;
-        totalBookPages += this.chapterPages[i].length;
-      }
-      const progress = totalBookPages > 1 ? currentAbsolutePage / totalBookPages : 1;
+      const { infoText, progress } = computePagedProgress({
+        chapterPages: this.chapterPages,
+        chapterIndex: this.chapterIndex,
+        pageIndex: this.pageIndex,
+        totalChapters: this.book.chapters.length,
+      });
       return formatStatusLine({ now: new Date(), infoText, maxChars: 59, progress });
     }
     // flowReading
     const pageData = this.flowPageData[this.chapterIndex]?.[this.pageIndex];
     if (!pageData) return null;
-    const totalPageWords = Math.max(1, pageData.wordCount);
-    const flowState = this.isFlowRunning ? 'RUN' : 'PAUSE';
     const chapterTotalPages = this.chapterPages[this.chapterIndex]?.length ?? 1;
-    // Shorter than v1.4.0's "Flow RUN Nwpm Ch a/b Pg c/d W e/f" — that was
-    // ~40 cells and combined with the 7-cell clock prefix overflowed the
-    // footer to a second line on wide-glyph content. Drop the "Flow" prefix
-    // (redundant with RUN/PAUSE) and the W-index suffix (the progress bar
-    // already indicates within-page position).
-    const infoText = `${flowState} ${config.flowSpeedWpm}wpm Ch ${this.chapterIndex + 1}/${this.book.chapters.length} Pg ${this.pageIndex + 1}/${chapterTotalPages} `;
-    let totalBookWords = 0, currentAbsoluteWord = 0;
-    for (let ch = 0; ch < this.flowPageData.length; ch++) {
-      for (let pg = 0; pg < this.flowPageData[ch].length; pg++) {
-        const pw = this.flowPageData[ch][pg].wordCount;
-        totalBookWords += pw;
-        if (ch < this.chapterIndex || (ch === this.chapterIndex && pg < this.pageIndex)) {
-          currentAbsoluteWord += pw;
-        } else if (ch === this.chapterIndex && pg === this.pageIndex) {
-          currentAbsoluteWord += this.flowWordIndex + 1;
-        }
-      }
-    }
-    const progress = totalBookWords > 1 ? currentAbsoluteWord / totalBookWords : 1;
+    const { infoText, progress } = computeFlowProgress({
+      flowWordCounts: this.flowPageData.map((ch) => ch.map((pg) => pg.wordCount)),
+      chapterIndex: this.chapterIndex,
+      pageIndex: this.pageIndex,
+      flowWordIndex: this.flowWordIndex,
+      totalChapters: this.book.chapters.length,
+      chapterTotalPages,
+      flowSpeedWpm: config.flowSpeedWpm,
+      isFlowRunning: this.isFlowRunning,
+    });
     return formatStatusLine({ now: new Date(), infoText, maxChars: 59, progress });
   }
 
@@ -1541,27 +1565,12 @@ export class EvenEpubClient {
         chapterIndex: this.chapterIndex,
         pageIndex: this.pageIndex,
       };
-      const json = JSON.stringify(pos);
-      const titleKey = `${STORAGE_KEY_POSITION}-${this.book.title}`;
-      if (this.currentBookId) {
-        await this.bridge.setLocalStorage(`${STORAGE_KEY_POSITION}-${this.currentBookId}`, json);
-      }
-      await this.bridge.setLocalStorage(titleKey, json);
-      await this.bridge.setLocalStorage(STORAGE_KEY_BOOK_TITLE, this.book.title);
-      // L3 invariant I1 (design §8.5): title, bookId, filename written together.
-      if (this.currentBookId) {
-        await this.bridge.setLocalStorage(STORAGE_KEY_LAST_BOOK_ID, this.currentBookId);
-      }
-      if (this.currentBookFilename) {
-        await this.bridge.setLocalStorage(STORAGE_KEY_LAST_BOOK_FILENAME, this.currentBookFilename);
-      }
-
-      // Also save to browser localStorage as fallback (bridge storage may not persist)
-      try { localStorage.setItem(titleKey, json); } catch { /* */ }
-      if (this.currentBookId) {
-        try { localStorage.setItem(`${STORAGE_KEY_POSITION}-${this.currentBookId}`, json); } catch { /* */ }
-      }
-
+      await storePagedPosition(
+        this.bridge as unknown as PositionBridge,
+        { title: this.book.title, bookId: this.currentBookId, filename: this.currentBookFilename },
+        pos,
+        localStorage,
+      );
       this.onPositionChanged?.(this.chapterIndex, this.pageIndex);
     } catch (e) {
       console.warn('Failed to save position:', e);
@@ -1569,39 +1578,30 @@ export class EvenEpubClient {
   }
 
   public async getSavedPosition(bookTitle: string, bookId?: string): Promise<ReadingPosition | null> {
-    try {
-      // Try bridge storage first, then browser localStorage fallback
-      let raw = '';
-      if (bookId) {
-        raw = await this.bridge.getLocalStorage(`${STORAGE_KEY_POSITION}-${bookId}`);
-        if (!raw) try { raw = localStorage.getItem(`${STORAGE_KEY_POSITION}-${bookId}`) || ''; } catch { /* */ }
-      }
-      if (!raw) {
-        raw = await this.bridge.getLocalStorage(`${STORAGE_KEY_POSITION}-${bookTitle}`);
-      }
-      if (!raw) {
-        try { raw = localStorage.getItem(`${STORAGE_KEY_POSITION}-${bookTitle}`) || ''; } catch { /* */ }
-      }
-      if (!raw) return null;
+    const keys = pagedPositionKeys({ title: bookTitle, bookId });
+    for (const key of keys) {
+      try {
+        let raw = await this.bridge.getLocalStorage(key);
+        if (!raw) try { raw = localStorage.getItem(key) || ''; } catch { /* */ }
+        if (!raw) continue;
 
-      const pos: ReadingPosition = JSON.parse(raw);
-      if (
-        Number.isInteger(pos.chapterIndex) &&
-        Number.isInteger(pos.pageIndex) &&
-        pos.chapterIndex >= 0 &&
-        pos.pageIndex >= 0
-      ) {
-        return pos;
-      }
-    } catch { /* no saved position */ }
+        const pos: ReadingPosition = JSON.parse(raw);
+        if (
+          Number.isInteger(pos.chapterIndex) &&
+          Number.isInteger(pos.pageIndex) &&
+          pos.chapterIndex >= 0 &&
+          pos.pageIndex >= 0
+        ) {
+          return pos;
+        }
+      } catch { /* try next legacy-compatible key */ }
+    }
 
     return null;
   }
 
   private async restorePagedPosition(bookTitle: string): Promise<ReadingPosition | null> {
-    const keys = [];
-    if (this.currentBookId) keys.push(`${STORAGE_KEY_POSITION}-${this.currentBookId}`);
-    keys.push(`${STORAGE_KEY_POSITION}-${bookTitle}`);
+    const keys = pagedPositionKeys({ title: bookTitle, bookId: this.currentBookId });
 
     for (const key of keys) {
       try {
@@ -1632,26 +1632,13 @@ export class EvenEpubClient {
         pageIndex: this.pageIndex,
         wordIndex: this.flowWordIndex,
       };
-      const json = JSON.stringify(pos);
-      if (persistToBridge) {
-        if (this.currentBookId) {
-          await this.bridge.setLocalStorage(`${STORAGE_KEY_FLOW_POSITION}-${this.currentBookId}`, json);
-        }
-        await this.bridge.setLocalStorage(`${STORAGE_KEY_FLOW_POSITION}-${this.book.title}`, json);
-        await this.bridge.setLocalStorage(STORAGE_KEY_BOOK_TITLE, this.book.title);
-        // L3 invariant I1 (design §8.5): title, bookId, filename written together.
-        if (this.currentBookId) {
-          await this.bridge.setLocalStorage(STORAGE_KEY_LAST_BOOK_ID, this.currentBookId);
-        }
-        if (this.currentBookFilename) {
-          await this.bridge.setLocalStorage(STORAGE_KEY_LAST_BOOK_FILENAME, this.currentBookFilename);
-        }
-      }
-      // Browser localStorage fallback
-      try {
-        localStorage.setItem(`${STORAGE_KEY_FLOW_POSITION}-${this.book.title}`, json);
-        if (this.currentBookId) localStorage.setItem(`${STORAGE_KEY_FLOW_POSITION}-${this.currentBookId}`, json);
-      } catch { /* */ }
+      await storeFlowPosition(
+        this.bridge as unknown as PositionBridge,
+        { title: this.book.title, bookId: this.currentBookId, filename: this.currentBookFilename },
+        pos,
+        persistToBridge,
+        localStorage,
+      );
       this.onPositionChanged?.(this.chapterIndex, this.pageIndex);
     } catch (e) {
       console.warn('Failed to save flow position:', e);
@@ -1659,9 +1646,7 @@ export class EvenEpubClient {
   }
 
   private async restoreFlowPosition(bookTitle: string): Promise<ReadingPosition | null> {
-    const keys = [];
-    if (this.currentBookId) keys.push(`${STORAGE_KEY_FLOW_POSITION}-${this.currentBookId}`);
-    keys.push(`${STORAGE_KEY_FLOW_POSITION}-${bookTitle}`);
+    const keys = flowPositionKeys({ title: bookTitle, bookId: this.currentBookId });
 
     for (const key of keys) {
       try {

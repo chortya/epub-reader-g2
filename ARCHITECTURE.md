@@ -51,8 +51,8 @@ constants.ts         DISPLAY_* / LINE_HEIGHT_PX, the persistent `config` object,
                      getTextLayout() — central layout math.
 types.ts             Shared type aliases: Chapter, Book, ViewState, ReadingPosition, CachedBookMeta.
 utils.ts             setStatus / appendEventLog / withTimeout / clamp / truncateForList.
-db.ts                Local book cache: IndexedDB primary + bridge-localStorage fallback (base64),
-                     max 3 books. pruneBridgeBooks() is pure and unit-tested.
+db.ts                Local book library: SHA-256 content identity, IndexedDB primary +
+                     bridge-localStorage fallback (base64), serialized mutations, no silent eviction.
 mock-bridge.ts       Browser-simulator bridge: intercepts SDK methods and renders containers into
                      a DOM canvas; provides Prev/Next/Tap/DblTap buttons.
 splash-bridge.ts     Adapter exposing an even-toolkit SplashBridge interface on top of the raw SDK.
@@ -321,7 +321,7 @@ Five independent storage lanes:
 | Data              | Primary              | Fallback                      | Key pattern                   |
 +-------------------+----------------------+-------------------------------+-------------------------------+
 | Book files        | IndexedDB            | bridge.setLocalStorage        | BRIDGE_BOOKS_KEY (array,      |
-| (max 3)           | (db.ts, store:books) | base64, max 3                 |  each { filename, title, ...})|
+| (local library)   | (db.ts, store:books) | base64 library fallback       | each { bookId, filename, ...})|
 +-------------------+----------------------+-------------------------------+-------------------------------+
 | Cached book list  | bridge local storage | (none)                        | 'epub-book-list'              |
 | (glasses picker)  |                      |                               |                               |
@@ -347,9 +347,11 @@ against `cachedBookList`: bookId first, then `makeBookId(filename, title)` as
 a tiebreaker. Title-only resume is intentionally rejected to avoid duplicate-
 title footguns (design decision Q6).
 
-- **Book files** use IndexedDB for fast local reads; `db.ts` also keeps a
-  bridge-localStorage base64 fallback so recent books survive the device's
-  constrained environment.
+- **Book files** use SHA-256 content IDs in IndexedDB, so different EPUB bytes
+  remain separate even when filenames and titles collide. Schema v3 migrates
+  surviving filename-keyed rows without clearing the store. `db.ts` also keeps
+  a bridge-localStorage base64 fallback; its read-modify-write mutations are
+  serialized, and neither store silently evicts a fourth book.
 - **Cached book list** is separate from the book bytes: `EvenEpubClient`
   stores a compact metadata array under `'epub-book-list'` so startup can
   render the glasses-side picker before any EPUB is parsed.

@@ -21,13 +21,17 @@ export const EDGE_MARGIN = 16;
 // Visual border + inner padding allowance baked into the box width so the
 // border doesn't crowd the text.
 export const BORDER_INSET = 4;
+export const BOX_TEXT_PADDING_CELLS = 2;
 
 export function computeBoxWidthPx(labels: readonly string[]): number {
   const lengths = labels.filter((s) => s.length > 0).map((s) => s.length);
   // Math.max() with no args returns -Infinity; guard with a 0 sentinel so an
   // all-empty input falls through to MIN_BOX_PX rather than NaN.
   const longest = Math.max(0, ...lengths);
-  const raw = Math.ceil(longest * CHAR_PITCH_PX) + 2 * BORDER_INSET;
+  // Reserve a full cell on each side. The G2 font is proportional and some
+  // labels render wider than the nominal pitch; the previous exact-fit math
+  // visibly clipped the closing parenthesis in "(No recent book)".
+  const raw = Math.ceil((longest + BOX_TEXT_PADDING_CELLS) * CHAR_PITCH_PX) + 2 * BORDER_INSET;
   return clamp(raw, MIN_BOX_PX, DISPLAY_WIDTH - 2 * EDGE_MARGIN);
 }
 

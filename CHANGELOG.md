@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.4.6] - 2026-07-19
+
+### Added
+- Searchable companion library with visible filenames and a collision-aware on-glasses book picker.
+- Tap in paged reading (or use the companion Reader control) to hide/show reading info. Hidden mode uses the full 10-line canvas instead of 9 lines with the footer.
+
+### Fixed
+- Removed the hard three-book eviction from IndexedDB and bridge fallback storage.
+- Replaced filename-keyed book storage with SHA-256 content identities, so different EPUBs with the same filename/title no longer overwrite or open/delete one another.
+- Serialized bridge-library mutations so rapid uploads cannot lose an entry through stale read-modify-write races.
+
 ## [v1.4.3] - 2026-05-15
 
 ### Changed

@@ -319,9 +319,9 @@ export function formatSettingsRow(key: SettingKey, cfg: AppConfig): string {
 
 /**
  * Mutate `cfg` in place, setting the slot named by `key` from the editor's
- * value-list at position `index`. Index bounds are assumed to come from a
- * paginated list whose length matches the value array; callers must not pass
- * out-of-range indices.
+ * value-list at position `index`. The index is clamped to the valid range for
+ * `key` so a stale or out-of-bounds editor state can never read past the end
+ * of the value array (which would yield `undefined` and corrupt the config).
  */
 export function applyEditorValue(cfg: AppConfig, key: SettingKey, index: number): void {
   switch (key) {
@@ -337,11 +337,15 @@ export function applyEditorValue(cfg: AppConfig, key: SettingKey, index: number)
       // Editor list: [Paged, Flow] → ['paged', 'flow'].
       cfg.readingMode = index === 0 ? 'paged' : 'flow';
       return;
-    case 'flowSpeedWpm':
-      cfg.flowSpeedWpm = FLOW_SPEED_VALUES[index];
+    case 'flowSpeedWpm': {
+      const i = Math.max(0, Math.min(FLOW_SPEED_VALUES.length - 1, index));
+      cfg.flowSpeedWpm = FLOW_SPEED_VALUES[i];
       return;
-    case 'textHeightPercent':
-      cfg.textHeightPercent = TEXT_HEIGHT_VALUES[index];
+    }
+    case 'textHeightPercent': {
+      const i = Math.max(0, Math.min(TEXT_HEIGHT_VALUES.length - 1, index));
+      cfg.textHeightPercent = TEXT_HEIGHT_VALUES[i];
       return;
+    }
   }
 }

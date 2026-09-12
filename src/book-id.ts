@@ -1,5 +1,20 @@
 import type { CachedBookMeta } from './types.ts';
 
+/**
+ * Create an immutable identity from the EPUB bytes. Display metadata such as
+ * filename and title can change without changing this ID, while two different
+ * books that happen to share both remain isolated.
+ */
+export async function makeContentBookId(buffer: ArrayBuffer): Promise<string> {
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', buffer);
+  const hex = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `epub-${hex}`;
+}
+
+export function isContentBookId(bookId: string | null | undefined): boolean {
+  return typeof bookId === 'string' && /^epub-[a-f0-9]{64}$/.test(bookId);
+}
+
 export function makeBookId(filename: string, title: string): string {
   const input = `${filename}|${title}`.toLowerCase();
   let hash = 0;

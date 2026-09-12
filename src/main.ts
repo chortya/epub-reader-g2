@@ -17,13 +17,13 @@ import {
   TEXT_HEIGHT_STEP_PERCENT,
 } from './constants';
 import type { CachedBookMeta } from './types';
-import { makeBookId } from './book-id';
+import { matchesBookQuery } from './book-selection';
 
 import { MockBridge } from './mock-bridge';
 
-function toCachedBookMeta(book: Pick<StoredBook, 'filename' | 'title' | 'timestamp'>): CachedBookMeta {
+function toCachedBookMeta(book: Pick<StoredBook, 'bookId' | 'filename' | 'title' | 'timestamp'>): CachedBookMeta {
   return {
-    bookId: makeBookId(book.filename, book.title),
+    bookId: book.bookId,
     title: book.title,
     filename: book.filename,
     uploadedAt: book.timestamp,
@@ -79,20 +79,15 @@ async function main() {
       try {
         setStatus(`Loading: ${meta.title}...`);
         const recent = await getRecentBooksFromDB(bridge as any);
-        // Match by bookId first (strongest signal — see resolveLastBook in
-        // book-id.ts), then filename, then title as a last resort for legacy
-        // cache entries. Title-first matching opened the wrong book when two
-        // books shared a title.
-        const cached =
-          recent.find((r) => makeBookId(r.filename, r.title) === meta.bookId) ??
-          recent.find((r) => r.filename === meta.filename) ??
-          recent.find((r) => r.title === meta.title);
+        // Immutable identity only. Falling back to filename/title can open the
+        // wrong EPUB when two downloads share metadata.
+        const cached = recent.find((book) => book.bookId === meta.bookId);
         if (!cached) {
           setStatus(`Book not available locally: ${meta.title}`);
           return;
         }
         const book = await parseEpub(cached.buffer, cached.filename);
-        await client!.loadBook(book, true, makeBookId(cached.filename, cached.title), cached.filename);
+        await client!.loadBook(book, true, cached.bookId, cached.filename);
         await renderLibrary(client!, bridge as any);
       } catch (e) {
         console.error('Failed to load book from picker:', e);
@@ -128,11 +123,10 @@ async function main() {
     client.onPositionChanged = (ch, pg) => {
       renderReaderControls(client as EvenEpubClient);
       const items = document.querySelectorAll('#library-container .lib-item');
-      const bookTitle = client?.['book']?.title;
-      if (!bookTitle) return;
+      const bookId = client.getBookId();
+      if (!bookId) return;
       for (const item of items) {
-        const titleEl = item.querySelector('.title');
-        if (titleEl?.textContent === bookTitle) {
+        if ((item as HTMLElement).dataset.bookId === bookId) {
           const metaEl = item.querySelector('.meta');
           if (metaEl) {
             const parts = metaEl.textContent?.split('·').map((part) => part.trim()) || [];
@@ -249,11 +243,10 @@ async function main() {
       try {
         const data = await file.arrayBuffer();
         const book = await parseEpub(data, file.name);
-        await saveEpubBufferToDB(data, file.name, book.title, bridge as any);
+        const stored = await saveEpubBufferToDB(data, file.name, book.title, bridge as any);
 
         if (client) {
-          const id = makeBookId(file.name, book.title);
-          await client.loadBook(book, false, id, file.name);
+          await client.loadBook(book, false, stored.bookId, stored.filename);
           await renderLibrary(client, bridge as any);
         }
         setStatus(`Loaded: ${book.title}`);
@@ -293,10 +286,15 @@ async function main() {
               const arrayBuffer = await downloadGutenbergEpub(b.id);
               setStatus(`Parsing: ${b.title}...`);
               const book = await parseEpub(arrayBuffer, b.title + '.epub');
-              await saveEpubBufferToDB(arrayBuffer, b.title + '.epub', book.title, bridge as any);
+              const stored = await saveEpubBufferToDB(
+                arrayBuffer,
+                b.title + '.epub',
+                book.title,
+                bridge as any,
+              );
 
               if (client) {
-                await client.loadBook(book, false, makeBookId(b.title + '.epub', book.title), b.title + '.epub');
+                await client.loadBook(book, false, stored.bookId, stored.filename);
                 await renderLibrary(client, bridge as any);
               }
               setStatus(`Loaded: ${book.title}`);
@@ -324,14 +322,21 @@ async function main() {
     try {
       const localBooks = await getRecentBooksFromDB(bridgeRef);
       const metas = localBooks.map(toCachedBookMeta);
-      const localById = new Map(localBooks.map((book) => [makeBookId(book.filename, book.title), book]));
+      const localById = new Map(localBooks.map((book) => [book.bookId, book]));
       container.innerHTML = '';
 
       if (metas.length === 0) {
         container.innerHTML = '<div class="lib-empty">No books yet. Upload an EPUB or browse Gutenberg.</div>';
+        const search = document.getElementById('library-search') as HTMLInputElement | null;
+        if (search) search.hidden = true;
+        const count = document.getElementById('library-count');
+        if (count) count.textContent = '0';
         await clientToUse.cacheBookList([]);
         return;
       }
+
+      const search = document.getElementById('library-search') as HTMLInputElement | null;
+      if (search) search.hidden = false;
 
       await clientToUse.cacheBookList(metas);
 
@@ -340,6 +345,9 @@ async function main() {
         if (!local) continue;
         const item = document.createElement('div');
         item.className = 'lib-item';
+        item.dataset.bookId = meta.bookId;
+        item.dataset.title = meta.title;
+        item.dataset.filename = meta.filename;
 
         let posText = 'Not started';
         try {
@@ -359,12 +367,15 @@ async function main() {
             <div class="title-row">
               <div class="title"></div>
             </div>
+            <div class="filename"></div>
             <div class="meta"></div>
           </div>
           <button class="del" title="Delete">&times;</button>
         `;
         const titleEl = item.querySelector('.title');
         if (titleEl) titleEl.textContent = meta.title;
+        const filenameEl = item.querySelector('.filename');
+        if (filenameEl) filenameEl.textContent = meta.filename;
         const metaEl = item.querySelector('.meta');
         if (metaEl) metaEl.textContent = `${posText} · ${dateStr}`;
 
@@ -387,7 +398,7 @@ async function main() {
           }
           setStatus(`Deleting: ${meta.title}...`);
           try {
-            await deleteFromDB(meta.filename, bridgeRef);
+            await deleteFromDB(meta.bookId, bridgeRef);
             await renderLibrary(clientToUse, bridgeRef);
             setStatus('Book deleted.');
           } catch (e) {
@@ -398,6 +409,7 @@ async function main() {
 
         container.appendChild(item);
       }
+      applyLibraryFilter();
     } catch (e) {
       console.error('Error loading library:', e);
     }
@@ -419,12 +431,14 @@ async function main() {
     const toggleFlowBtn = document.getElementById('rc-toggle-flow') as HTMLButtonElement | null;
     const prevChapterBtn = document.getElementById('rc-prev-chapter') as HTMLButtonElement | null;
     const nextChapterBtn = document.getElementById('rc-next-chapter') as HTMLButtonElement | null;
+    const toggleInfoBtn = document.getElementById('rc-toggle-info') as HTMLButtonElement | null;
 
     prevPageBtn?.addEventListener('click', () => { c.pagedPrev().catch((e) => console.warn(e)); });
     nextPageBtn?.addEventListener('click', () => { c.pagedNext().catch((e) => console.warn(e)); });
     toggleFlowBtn?.addEventListener('click', () => { c.toggleFlowPlayback(); });
     prevChapterBtn?.addEventListener('click', () => { c.flowPrevChapter().catch((e) => console.warn(e)); });
     nextChapterBtn?.addEventListener('click', () => { c.flowNextChapter().catch((e) => console.warn(e)); });
+    toggleInfoBtn?.addEventListener('click', () => { c.toggleReadingInfo().catch((e) => console.warn(e)); });
   }
 
   function renderReaderControls(c: EvenEpubClient) {
@@ -432,6 +446,12 @@ async function main() {
     if (!card) return;
     const view = c.getView();
     const meta = document.getElementById('reader-meta');
+    const toggleInfo = document.getElementById('rc-toggle-info');
+    if (toggleInfo) {
+      toggleInfo.textContent = c.isReadingInfoVisible()
+        ? 'Hide reading info · gain 1 line'
+        : 'Show reading info';
+    }
 
     if (view === 'reading') {
       card.classList.add('open', 'paged');
@@ -455,6 +475,24 @@ async function main() {
       card.classList.remove('open', 'paged', 'flow');
     }
   }
+
+  function applyLibraryFilter() {
+    const query = (document.getElementById('library-search') as HTMLInputElement | null)?.value ?? '';
+    const items = Array.from(document.querySelectorAll<HTMLElement>('#library-container .lib-item'));
+    let visible = 0;
+    for (const item of items) {
+      const matches = matchesBookQuery({
+        title: item.dataset.title ?? '',
+        filename: item.dataset.filename ?? '',
+      }, query);
+      item.hidden = !matches;
+      if (matches) visible++;
+    }
+    const count = document.getElementById('library-count');
+    if (count) count.textContent = query.trim() ? `${visible}/${items.length}` : String(items.length);
+  }
+
+  document.getElementById('library-search')?.addEventListener('input', applyLibraryFilter);
 }
 
 main().catch((e) => {
