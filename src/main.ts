@@ -20,6 +20,7 @@ import type { CachedBookMeta } from './types';
 import { matchesBookQuery } from './book-selection';
 
 import { MockBridge } from './mock-bridge';
+import { version as APP_VERSION } from '../package.json';
 
 function toCachedBookMeta(book: Pick<StoredBook, 'bookId' | 'filename' | 'title' | 'timestamp'>): CachedBookMeta {
   return {
@@ -31,10 +32,10 @@ function toCachedBookMeta(book: Pick<StoredBook, 'bookId' | 'filename' | 'title'
 }
 
 async function main() {
-  // Web-UI badge from the compile-time version constant (vite define) —
-  // same source as the glasses splash; no manual sync.
+  // Web-UI badge from package.json (JSON import) — same source as the
+  // glasses splash; no manual sync.
   const versionBadge = document.getElementById('app-version');
-  if (versionBadge) versionBadge.textContent = `v${__APP_VERSION__}`;
+  if (versionBadge) versionBadge.textContent = `v${APP_VERSION}`;
 
   setStatus('Connecting...');
 

@@ -18,6 +18,7 @@ import { notifyTextUpdate, resetGestureState } from 'even-toolkit/gestures';
 import { createSplash } from 'even-toolkit/splash';
 import { encodeTilesBatch } from 'even-toolkit/png-utils';
 import { drawBookMark, GREY_BRIGHT, GREY_DIM, GREY_MID } from './brand';
+import { version as APP_VERSION } from '../package.json';
 import type { Book, ReadingPosition, ViewState, CachedBookMeta } from './types';
 import type { LaunchIntent } from './launch';
 import { pickInitialView } from './launch';
@@ -581,11 +582,11 @@ export class EvenEpubClient {
         // Thin rule between mark and version — 2px, mid grey
         ctx.fillStyle = GREY_MID;
         ctx.fillRect(cx - 24, 162, 48, 2);
-        // Version — dim tier. __APP_VERSION__ is injected by vite.config.ts
-        // from package.json — never edit the version string here.
+        // Version — dim tier. APP_VERSION comes from package.json (JSON
+        // import, resolveJsonModule) — single source of truth, never edit it here.
         ctx.fillStyle = GREY_DIM;
         ctx.font = '12px monospace';
-        ctx.fillText(`v${__APP_VERSION__} · Even G2`, cx, 180);
+        ctx.fillText(`v${APP_VERSION} · Even G2`, cx, 180);
       },
       tiles: 2,
       tileLayout: 'vertical',
