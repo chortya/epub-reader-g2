@@ -581,10 +581,11 @@ export class EvenEpubClient {
         // Thin rule between mark and version — 2px, mid grey
         ctx.fillStyle = GREY_MID;
         ctx.fillRect(cx - 24, 162, 48, 2);
-        // Version — dim tier
+        // Version — dim tier. __APP_VERSION__ is injected by vite.config.ts
+        // from package.json — never edit the version string here.
         ctx.fillStyle = GREY_DIM;
         ctx.font = '12px monospace';
-        ctx.fillText('v1.5.0 · Even G2', cx, 180);
+        ctx.fillText(`v${__APP_VERSION__} · Even G2`, cx, 180);
       },
       tiles: 2,
       tileLayout: 'vertical',

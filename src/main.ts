@@ -31,6 +31,11 @@ function toCachedBookMeta(book: Pick<StoredBook, 'bookId' | 'filename' | 'title'
 }
 
 async function main() {
+  // Web-UI badge from the compile-time version constant (vite define) —
+  // same source as the glasses splash; no manual sync.
+  const versionBadge = document.getElementById('app-version');
+  if (versionBadge) versionBadge.textContent = `v${__APP_VERSION__}`;
+
   setStatus('Connecting...');
 
   const urlParams = new URLSearchParams(window.location.search);

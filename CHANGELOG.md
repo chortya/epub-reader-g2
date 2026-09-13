@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [v1.5.1] - 2026-09-13 (portal upload pending)
 
 ### Changed
 - **Redesigned splash screen** per the official Even Realities design guidelines: flat filled open-book mark (no hairline outlines), bold wordmark, thin rule, and dim version line using 4-bit greyscale depth tiers. Canvas doubled to 200×200 (two vertical image tiles, centered) instead of a single 200×100 tile.
