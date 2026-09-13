@@ -2,6 +2,8 @@
 import {
   CreateStartUpPageContainer,
   DeviceConnectType,
+  ImageContainerProperty,
+  ImageRawDataUpdate,
   MenuContainerProperty,
   MenuItemProperty,
   OsEventTypeList,
@@ -14,6 +16,8 @@ import {
 import { mapGlassEvent } from 'even-toolkit/action-map';
 import { notifyTextUpdate, resetGestureState } from 'even-toolkit/gestures';
 import { createSplash } from 'even-toolkit/splash';
+import { encodeTilesBatch } from 'even-toolkit/png-utils';
+import { drawBookMark, GREY_BRIGHT, GREY_DIM, GREY_MID } from './brand';
 import type { Book, ReadingPosition, ViewState, CachedBookMeta } from './types';
 import type { LaunchIntent } from './launch';
 import { pickInitialView } from './launch';
@@ -201,6 +205,8 @@ export class EvenEpubClient {
   private settingsListSelectedIndex = 0;
   private editingSettingKey: SettingKey | null = null;
   private editorSelectedIndex = 0;
+  /** Index of the currently-SAVED value — marked with `●` in the editor list. */
+  private editorSavedIndex = 0;
 
   // Clock ticker state (Stage 4). Only runs while the view is reading/flowReading.
   // 10 s poll period with a string-compare gate — wakes up often enough to catch
@@ -391,6 +397,13 @@ export class EvenEpubClient {
 
   // --- UI Setup ---
 
+  /**
+   * Welcome-screen text containers. Hierarchy per the design guidelines:
+   * title at full device brightness (textColor omitted = 4), instruction
+   * dimmed to level 2 — the "dim secondary text" pattern. Used text-only in
+   * the startup page (images are not supported there) and, with the brand
+   * mark image, in the showWelcome() rebuild path.
+   */
   private getWelcomeContainers(): TextContainerProperty[] {
     const title = 'G2 ePUB Reader';
     const maxChars = 59;
@@ -421,9 +434,98 @@ export class EvenEpubClient {
       containerName: 'instruction',
       content: centeredInstruction,
       isEventCapture: 1,
+      textColor: 2,
     });
 
     return [titleContainer, instructionContainer];
+  }
+
+  /**
+   * Full welcome page for the runtime rebuild path (showWelcome): the brand
+   * mark as an image container plus the text hierarchy. Container budget:
+   * 3 text + 1 image (limits: 8 text-like / 4 image). Exactly one
+   * event-capture container — a full-screen invisible rect declared first,
+   * same pattern as rebuildSlots. The caller must push the returned PNG
+   * bytes with updateImageRawData after the rebuild (image containers start
+   * empty by SDK design).
+   */
+  private getWelcomeRuntimePage(): {
+    textObject: TextContainerProperty[];
+    imageObject: ImageContainerProperty[];
+    brandPngBytes: Uint8Array;
+  } {
+    const brandW = 120;
+    const brandH = 72;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = brandW;
+    canvas.height = brandH;
+    const ctx = canvas.getContext('2d')!;
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, brandW, brandH);
+    drawBookMark(ctx, { cx: brandW / 2, topY: 8, pageH: 46, halfW: 34 });
+    const enc = encodeTilesBatch(
+      canvas,
+      [{ crop: { sx: 0, sy: 0, sw: brandW, sh: brandH }, name: 'brand-mark' }],
+      brandW,
+      brandH,
+    )[0]!;
+
+    const capture = new TextContainerProperty({
+      xPosition: 0,
+      yPosition: 0,
+      width: DISPLAY_WIDTH,
+      height: DISPLAY_HEIGHT,
+      borderWidth: 0,
+      borderColor: 0,
+      paddingLength: 0,
+      containerID: 1,
+      containerName: 'swipe',
+      content: '',
+      isEventCapture: 1,
+    });
+
+    const title = 'G2 ePUB Reader';
+    const titlePad = Math.floor((59 - title.length) / 2);
+    const titleContainer = new TextContainerProperty({
+      xPosition: 0,
+      yPosition: 130,
+      width: DISPLAY_WIDTH,
+      height: 40,
+      containerID: 2,
+      containerName: 'title',
+      content: ' '.repeat(Math.max(0, titlePad)) + title,
+      isEventCapture: 0,
+    });
+
+    const instruction = 'Upload ePub file via WebUI to start reading';
+    const instrPad = Math.floor((59 - instruction.length) / 2);
+    const instructionContainer = new TextContainerProperty({
+      xPosition: 0,
+      yPosition: 195,
+      width: DISPLAY_WIDTH,
+      height: 40,
+      containerID: 3,
+      containerName: 'instruction',
+      content: ' '.repeat(Math.max(0, instrPad)) + instruction,
+      isEventCapture: 0,
+      textColor: 2,
+    });
+
+    const brandImage = new ImageContainerProperty({
+      xPosition: Math.floor((DISPLAY_WIDTH - brandW) / 2),
+      yPosition: 40,
+      width: brandW,
+      height: brandH,
+      containerID: 20,
+      containerName: 'brand-mark',
+    });
+
+    return {
+      textObject: [capture, titleContainer, instructionContainer],
+      imageObject: [brandImage],
+      brandPngBytes: enc.bytes,
+    };
   }
 
   private async ensureStartupUi(): Promise<void> {
@@ -463,44 +565,13 @@ export class EvenEpubClient {
     // strokes >= 2px, silhouette-readable single subject, no hairline outlines;
     // 4-bit greyscale depth via distinct luminance tiers (the encoder quantizes
     // to 16 levels, ~17 per step). Canvas: 2 vertical tiles = 200x200, centered.
-    const GREY_BRIGHT = '#f2f2f2';   // quantizes to level 14 — icon + title
-    const GREY_MID = '#9a9a9a';      // level 9 — page text lines, rule
-    const GREY_DIM = '#5a5a5a';      // level 5 — version line
+    // The mark itself lives in src/brand.ts (shared with the welcome screen).
     const cx = 100;                  // canvas center x
-    const topY = 40;                 // book icon top
-    const pageH = 52;                // page height
-    const halfW = 38;                // page half width
 
     const splash = createSplash({
       render: (ctx, w, h) => {
         // ── Open-book mark: solid filled pages (silhouette-first, no outlines)
-        ctx.fillStyle = GREY_BRIGHT;
-        // Left page: spine (lower) to outer edge (higher) — open-book dip
-        ctx.beginPath();
-        ctx.moveTo(cx, topY + 6);
-        ctx.lineTo(cx - halfW, topY);
-        ctx.lineTo(cx - halfW, topY + pageH);
-        ctx.lineTo(cx, topY + pageH + 6);
-        ctx.closePath();
-        ctx.fill();
-        // Right page (mirror)
-        ctx.beginPath();
-        ctx.moveTo(cx, topY + 6);
-        ctx.lineTo(cx + halfW, topY);
-        ctx.lineTo(cx + halfW, topY + pageH);
-        ctx.lineTo(cx, topY + pageH + 6);
-        ctx.closePath();
-        ctx.fill();
-        // Spine shading: dark notch so the fold reads at a glance
-        ctx.fillStyle = '#101010';
-        ctx.fillRect(cx - 1, topY + 8, 2, pageH - 4);
-        // Text lines on the pages — mid grey, 3px (above the 2px floor)
-        ctx.fillStyle = GREY_MID;
-        for (let i = 0; i < 3; i++) {
-          const ly = topY + 13 + i * 11;
-          ctx.fillRect(cx - halfW + 6, ly, halfW - 14, 3);
-          ctx.fillRect(cx + 8, ly, halfW - 14, 3);
-        }
+        drawBookMark(ctx, { cx, topY: 40 });
         // ── Wordmark
         ctx.fillStyle = GREY_BRIGHT;
         ctx.font = 'bold 27px monospace';
@@ -628,6 +699,7 @@ export class EvenEpubClient {
     this.view = 'settingEditor';
     this.editingSettingKey = key;
     this.editorSelectedIndex = currentEditorIndex(key);
+    this.editorSavedIndex = this.editorSelectedIndex;
 
     const values = EDITOR_VALUE_LABELS[key];
     const total = values.length;
@@ -637,7 +709,15 @@ export class EvenEpubClient {
     const labels: string[] = [];
     for (let i = 0; i < ITEMS_PER_PAGE; i++) {
       const idx = pageStart + i;
-      labels.push(idx < total ? values[idx] : '');
+      if (idx >= total) {
+        labels.push('');
+        continue;
+      }
+      // State glyphs (official glyph set: ●○) distinguish the SAVED value
+      // from the row the highlight currently rests on — the border alone
+      // cannot express "this is where you were" vs "this is where you are".
+      const glyph = idx === this.editorSavedIndex ? '● ' : '○ ';
+      labels.push(glyph + values[idx]);
     }
     await this.rebuildSlots(labels, selectedSlot);
     setStatus(`Edit ${key}: ${this.editorSelectedIndex + 1}/${total}. Swipe=move, Tap=save, DblTap=cancel`);
@@ -752,12 +832,26 @@ export class EvenEpubClient {
     this.view = 'welcome';
     this.readingRenderSig = null; // welcome rebuilds the page — stale upgrades must not fire
 
+    const page = this.getWelcomeRuntimePage();
     await this.bridge.rebuildPageContainer(
       new RebuildPageContainer({
-        containerTotalNum: 2,
-        textObject: this.getWelcomeContainers(),
+        containerTotalNum: page.textObject.length + page.imageObject.length,
+        textObject: page.textObject,
+        imageObject: page.imageObject,
       }),
     );
+    // Image containers start empty (SDK rule) — push the mark's pixels now.
+    try {
+      await this.bridge.updateImageRawData(
+        new ImageRawDataUpdate({
+          containerID: 20,
+          containerName: 'brand-mark',
+          imageData: page.brandPngBytes,
+        }),
+      );
+    } catch (e) {
+      console.warn('Welcome brand mark send failed:', e);
+    }
     // Order matters: notifyTextUpdate arms the 80 ms phantom-suppression window
     // (the device fires a spurious SCROLL right after rebuildPageContainer);
     // resetGestureState then clears stale cross-view tap/scroll history without

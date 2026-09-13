@@ -290,9 +290,14 @@ export class MockBridge {
                 div.dataset.containerId = String(obj.containerID ?? '');
                 div.dataset.containerName = obj.containerName ?? '';
 
-                if (obj.isEventCapture) {
+                if (obj.isEventCapture && obj.content) {
                     div.style.backgroundColor = 'rgba(0, 255, 0, 0.1)';
                 }
+                // Honor per-container text brightness (SDK 0.0.14+, levels 0-4):
+                // map to a dimming alpha over the phosphor green.
+                const tLevel = typeof obj.textColor === 'number' ? obj.textColor : 4;
+                const tAlpha = [0, 0.35, 0.55, 0.78, 1][Math.max(0, Math.min(4, tLevel))] ?? 1;
+                div.style.color = `rgba(0, 255, 0, ${tAlpha})`;
 
                 screen.appendChild(div);
             });
