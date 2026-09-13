@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- **Redesigned splash screen** per the official Even Realities design guidelines: flat filled open-book mark (no hairline outlines), bold wordmark, thin rule, and dim version line using 4-bit greyscale depth tiers. Canvas doubled to 200×200 (two vertical image tiles, centered) instead of a single 200×100 tile.
+
+### Fixed
+- Browser simulator (`MockBridge.updateImageRawData`) now decodes PNG payloads (the even-toolkit splash sends 4-bit indexed PNGs) instead of misreading them as raw pixel bytes, so image-based splash screens render faithfully in `dev:serve:sim`.
+
 ## [v1.5.0] - 2026-09-12
 
 Single release covering the three planned phases (docs/1.5.0-release-plan.md).

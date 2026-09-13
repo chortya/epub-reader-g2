@@ -117,21 +117,49 @@ export class MockBridge {
                         pixels = new Uint8Array(data.imageData as any);
                     }
 
-                    const imgData = ctx.createImageData(width, height);
+                    // PNG payloads (even-toolkit splash encodes 4-bit indexed PNGs)
+                    // must be decoded; raw payloads are one byte per pixel.
+                    const bytes = pixels instanceof Uint8Array
+                        ? pixels
+                        : new Uint8Array(pixels as number[]);
+                    const isPng = bytes.length > 8
+                        && bytes[0] === 0x89 && bytes[1] === 0x50
+                        && bytes[2] === 0x4e && bytes[3] === 0x47;
 
-                    // SAFETY: Don't overflow imgData.data (which is width * height * 4)
-                    // and don't overflow pixels array.
-                    const maxPixels = Math.min(pixels.length, width * height);
+                    if (isPng) {
+                        const blob = new Blob([bytes.slice().buffer as ArrayBuffer], { type: 'image/png' });
+                        const bmp = await createImageBitmap(blob);
+                        ctx.fillStyle = '#000';
+                        ctx.fillRect(0, 0, width, height);
+                        ctx.drawImage(bmp, 0, 0, width, height);
+                        bmp.close();
+                        // Green-phosphor mapping: greyscale luminance -> green channel
+                        const img = ctx.getImageData(0, 0, width, height);
+                        for (let i = 0; i < img.data.length; i += 4) {
+                            const lum = img.data[i]!; // PNG is greyscale: R==G==B
+                            img.data[i] = 0;
+                            img.data[i + 1] = lum;
+                            img.data[i + 2] = 0;
+                            img.data[i + 3] = lum > 0 ? 255 : 0;
+                        }
+                        ctx.putImageData(img, 0, 0);
+                    } else {
+                        const imgData = ctx.createImageData(width, height);
 
-                    for (let i = 0; i < maxPixels; i++) {
-                        const val = pixels[i];
-                        const offset = i * 4;
-                        imgData.data[offset] = 0;   // R
-                        imgData.data[offset + 1] = val; // G (Green phosphor)
-                        imgData.data[offset + 2] = 0; // B
-                        imgData.data[offset + 3] = val > 0 ? 255 : 0; // Alpha
+                        // SAFETY: Don't overflow imgData.data (which is width * height * 4)
+                        // and don't overflow pixels array.
+                        const maxPixels = Math.min(pixels.length, width * height);
+
+                        for (let i = 0; i < maxPixels; i++) {
+                            const val = pixels[i];
+                            const offset = i * 4;
+                            imgData.data[offset] = 0;   // R
+                            imgData.data[offset + 1] = val; // G (Green phosphor)
+                            imgData.data[offset + 2] = 0; // B
+                            imgData.data[offset + 3] = val > 0 ? 255 : 0; // Alpha
+                        }
+                        ctx.putImageData(imgData, 0, 0);
                     }
-                    ctx.putImageData(imgData, 0, 0);
                 }
             }
         }

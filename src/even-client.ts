@@ -13,7 +13,7 @@ import {
 } from '@evenrealities/even_hub_sdk';
 import { mapGlassEvent } from 'even-toolkit/action-map';
 import { notifyTextUpdate, resetGestureState } from 'even-toolkit/gestures';
-import { createSplash, TILE_PRESETS } from 'even-toolkit/splash';
+import { createSplash } from 'even-toolkit/splash';
 import type { Book, ReadingPosition, ViewState, CachedBookMeta } from './types';
 import type { LaunchIntent } from './launch';
 import { pickInitialView } from './launch';
@@ -458,56 +458,69 @@ export class EvenEpubClient {
   }
 
   private async showSplashThenHome(): Promise<void> {
+    // Splash design follows the official Even Realities design guidelines
+    // (hub.evenrealities.com/docs/build/design-guidelines): flat FILLED shapes,
+    // strokes >= 2px, silhouette-readable single subject, no hairline outlines;
+    // 4-bit greyscale depth via distinct luminance tiers (the encoder quantizes
+    // to 16 levels, ~17 per step). Canvas: 2 vertical tiles = 200x200, centered.
+    const GREY_BRIGHT = '#f2f2f2';   // quantizes to level 14 — icon + title
+    const GREY_MID = '#9a9a9a';      // level 9 — page text lines, rule
+    const GREY_DIM = '#5a5a5a';      // level 5 — version line
+    const cx = 100;                  // canvas center x
+    const topY = 40;                 // book icon top
+    const pageH = 52;                // page height
+    const halfW = 38;                // page half width
+
     const splash = createSplash({
       render: (ctx, w, h) => {
-        ctx.fillStyle = '#d0d0d0';
-        // Draw open book icon
-        const cx = w / 2;
-        const cy = h / 2 - 12;
-        ctx.lineWidth = 2;
-        ctx.strokeStyle = '#d0d0d0';
-        // Left page
+        // ── Open-book mark: solid filled pages (silhouette-first, no outlines)
+        ctx.fillStyle = GREY_BRIGHT;
+        // Left page: spine (lower) to outer edge (higher) — open-book dip
         ctx.beginPath();
-        ctx.moveTo(cx, cy - 15);
-        ctx.lineTo(cx - 25, cy - 12);
-        ctx.lineTo(cx - 25, cy + 15);
-        ctx.lineTo(cx, cy + 18);
+        ctx.moveTo(cx, topY + 6);
+        ctx.lineTo(cx - halfW, topY);
+        ctx.lineTo(cx - halfW, topY + pageH);
+        ctx.lineTo(cx, topY + pageH + 6);
         ctx.closePath();
-        ctx.stroke();
-        // Right page
+        ctx.fill();
+        // Right page (mirror)
         ctx.beginPath();
-        ctx.moveTo(cx, cy - 15);
-        ctx.lineTo(cx + 25, cy - 12);
-        ctx.lineTo(cx + 25, cy + 15);
-        ctx.lineTo(cx, cy + 18);
+        ctx.moveTo(cx, topY + 6);
+        ctx.lineTo(cx + halfW, topY);
+        ctx.lineTo(cx + halfW, topY + pageH);
+        ctx.lineTo(cx, topY + pageH + 6);
         ctx.closePath();
-        ctx.stroke();
-        // Spine
-        ctx.beginPath();
-        ctx.moveTo(cx, cy - 15);
-        ctx.lineTo(cx, cy + 18);
-        ctx.stroke();
-        // Text lines on pages
-        ctx.lineWidth = 1;
-        ctx.strokeStyle = '#999';
+        ctx.fill();
+        // Spine shading: dark notch so the fold reads at a glance
+        ctx.fillStyle = '#101010';
+        ctx.fillRect(cx - 1, topY + 8, 2, pageH - 4);
+        // Text lines on the pages — mid grey, 3px (above the 2px floor)
+        ctx.fillStyle = GREY_MID;
         for (let i = 0; i < 3; i++) {
-          ctx.beginPath();
-          ctx.moveTo(cx - 22, cy - 6 + i * 6);
-          ctx.lineTo(cx - 5, cy - 6 + i * 6);
-          ctx.stroke();
-          ctx.beginPath();
-          ctx.moveTo(cx + 5, cy - 6 + i * 6);
-          ctx.lineTo(cx + 22, cy - 6 + i * 6);
-          ctx.stroke();
+          const ly = topY + 13 + i * 11;
+          ctx.fillRect(cx - halfW + 6, ly, halfW - 14, 3);
+          ctx.fillRect(cx + 8, ly, halfW - 14, 3);
         }
-        // Title
-        ctx.fillStyle = '#e0e0e0';
-        ctx.font = 'bold 14px monospace';
+        // ── Wordmark
+        ctx.fillStyle = GREY_BRIGHT;
+        ctx.font = 'bold 27px monospace';
         ctx.textAlign = 'center';
-        ctx.fillText('ePub Reader', cx, h - 8);
+        ctx.textBaseline = 'alphabetic';
+        ctx.fillText('ePub Reader', cx, 150);
+        // Thin rule between mark and version — 2px, mid grey
+        ctx.fillStyle = GREY_MID;
+        ctx.fillRect(cx - 24, 162, 48, 2);
+        // Version — dim tier
+        ctx.fillStyle = GREY_DIM;
+        ctx.font = '12px monospace';
+        ctx.fillText('v1.5.0 · Even G2', cx, 180);
       },
-      tiles: 1,
-      tilePositions: TILE_PRESETS.centered1,
+      tiles: 2,
+      tileLayout: 'vertical',
+      tilePositions: [
+        { x: Math.floor((576 - 200) / 2), y: 44 },  // (188, 44) — vertically centered stack
+        { x: Math.floor((576 - 200) / 2), y: 144 },
+      ],
       minTimeMs: 2000,
     });
 
