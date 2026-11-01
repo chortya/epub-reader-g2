@@ -1,4 +1,19 @@
 import { RELAY_ORIGIN } from './relay';
+import { DOWNLOAD_STALL_MS, MAX_DOWNLOAD_BYTES, readWithStallTimeout } from './bookorbit';
+
+/** Gutenberg EPUBs are small; anything near this is not a book. */
+const MAX_GUTENBERG_BYTES = 50 * 1024 * 1024;
+
+/** Body bytes with a stall timeout and a size cap (also when Content-Length is missing). */
+async function readEpubBody(res: Response): Promise<ArrayBuffer> {
+    const declared = Number(res.headers.get('content-length') ?? '');
+    if (Number.isFinite(declared) && declared > MAX_GUTENBERG_BYTES) {
+        res.body?.cancel().catch(() => {});
+        throw new Error('EPUB is too large');
+    }
+    const bytes = await readWithStallTimeout(res, DOWNLOAD_STALL_MS, null, () => {}, Math.min(MAX_GUTENBERG_BYTES, MAX_DOWNLOAD_BYTES));
+    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
 
 export interface GutenbergBook {
     id: string;
@@ -60,7 +75,7 @@ export async function downloadGutenbergEpub(id: string): Promise<ArrayBuffer> {
     if (!/^\d+$/.test(id)) throw new Error('Invalid Gutenberg book id');
     if (RELAY_ORIGIN) {
         const res = await fetch(`${RELAY_ORIGIN}/gutenberg/epub/${id}`);
-        if (res.ok) return res.arrayBuffer();
+        if (res.ok) return readEpubBody(res);
         throw new Error(res.status === 404 ? 'EPUB not found for this book' : `Download failed (HTTP ${res.status})`);
     }
 
@@ -72,7 +87,7 @@ export async function downloadGutenbergEpub(id: string): Promise<ArrayBuffer> {
     for (const directUrl of epubUrls) {
         const res = await fetch(devProxied(directUrl));
         if (res.ok) {
-            return res.arrayBuffer();
+            return readEpubBody(res);
         }
     }
     throw new Error('EPUB not found for this book');

@@ -104,6 +104,60 @@ async function loadHyphenationPatterns(lang: string): Promise<ConstructorParamet
   }
 }
 
+/** Inflated-size limits: one XHTML/TOC/OPF entry, and everything read from one book. */
+const MAX_ENTRY_BYTES = 16 * 1024 * 1024;
+const MAX_BOOK_TEXT_BYTES = 256 * 1024 * 1024;
+const MAX_SPINE_ITEMS = 5000;
+const inflatedBudget = new WeakMap<JSZip, { used: number }>();
+
+/**
+ * Inflate one entry as UTF-8 text, counting the bytes actually produced (the
+ * size a zip declares can lie) and stopping at the per-entry and per-book
+ * limits, so a small "zip bomb" EPUB can't exhaust the WebView's memory.
+ */
+function inflateLimited(zip: JSZip, file: JSZip.JSZipObject, path: string): Promise<string> {
+  let budget = inflatedBudget.get(zip);
+  if (!budget) {
+    budget = { used: 0 };
+    inflatedBudget.set(zip, budget);
+  }
+  const book = budget;
+  return new Promise<string>((resolve, reject) => {
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    let failed = false;
+    // internalStream is part of JSZip's API, missing from its typings.
+    const helper = (file as unknown as { internalStream(type: 'uint8array'): any }).internalStream('uint8array');
+    helper
+      .on('data', (chunk: Uint8Array) => {
+        if (failed) return;
+        size += chunk.byteLength;
+        book.used += chunk.byteLength;
+        if (size > MAX_ENTRY_BYTES || book.used > MAX_BOOK_TEXT_BYTES) {
+          failed = true;
+          helper.pause();
+          reject(new Error(`EPUB part too large to read: ${path}`));
+          return;
+        }
+        chunks.push(chunk);
+      })
+      .on('error', (e: Error) => {
+        if (!failed) reject(e);
+      })
+      .on('end', () => {
+        if (failed) return;
+        const bytes = new Uint8Array(size);
+        let offset = 0;
+        for (const c of chunks) {
+          bytes.set(c, offset);
+          offset += c.byteLength;
+        }
+        resolve(new TextDecoder('utf-8').decode(bytes));
+      })
+      .resume();
+  });
+}
+
 async function readZipFile(zip: JSZip, path: string): Promise<string> {
   const candidates = buildZipPathCandidates(path);
   let file = candidates.map((candidate) => zip.file(candidate)).find(Boolean) ?? null;
@@ -118,7 +172,7 @@ async function readZipFile(zip: JSZip, path: string): Promise<string> {
   if (!file) {
     throw new Error(`File not found in EPUB: ${path}`);
   }
-  return file.async('string');
+  return inflateLimited(zip, file, path);
 }
 
 function parseContainerXml(xml: string): string {
@@ -167,7 +221,7 @@ function parseOpf(xml: string, opfDir: string): { title: string; spineItems: Spi
 
   const spineItems: SpineItem[] = [];
   const spineRefs = doc.querySelectorAll('spine > itemref');
-  spineRefs.forEach((ref, spineIndex) => {
+  Array.from(spineRefs).slice(0, MAX_SPINE_ITEMS).forEach((ref, spineIndex) => {
     const idref = ref.getAttribute('idref');
     if (idref && manifestMap.has(idref)) {
       spineItems.push({ href: manifestMap.get(idref)!, title: '', spineIndex });

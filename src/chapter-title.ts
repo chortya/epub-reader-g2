@@ -16,7 +16,8 @@ export function pickChapterTitle(
 }
 
 export function normalizeChapterTitle(title: string): string {
-  return title.replace(/\s+/g, ' ').trim();
+  const t = title.slice(0, 1000).replace(/\s+/g, ' ').trim();
+  return t.length > 200 ? `${t.slice(0, 199)}…` : t;
 }
 
 export function isGenericChapterTitle(title: string): boolean {

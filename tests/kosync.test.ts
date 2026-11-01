@@ -435,3 +435,23 @@ test('acknowledgeReset reports DocFragment[1] at 0% even when the first chapter 
   await session.acknowledgeReset();
   assert.deepEqual([calls[0].body.progress, calls[0].body.percentage], ['/body/DocFragment[1]/body', 0]);
 });
+
+test('credentials never follow redirects and only travel over https (or loopback)', async () => {
+  const { impl, calls } = fakeFetch(() => ({ status: 200, body: { authorized: 'OK' } }));
+  let seenRedirect: unknown;
+  const spy = (async (url: string, init: RequestInit) => { seenRedirect = init.redirect; return impl(url, init); }) as unknown as typeof fetch;
+  await new KosyncClient({ server: SETTINGS.server, username: 'u', userkey: 'k', fetchImpl: spy }).authorize();
+  assert.equal(seenRedirect, 'error');
+  assert.equal(calls.length, 1);
+  assert.equal(normalizeServerUrl('http://books.example.org'), null);
+  assert.equal(normalizeServerUrl('http://192.168.1.5:3005'), null);
+  assert.equal(normalizeServerUrl('http://127.0.0.1:3106'), 'http://127.0.0.1:3106');
+  assert.equal(normalizeServerUrl('http://localhost:8080/kosync'), 'http://localhost:8080/kosync');
+  assert.equal(normalizeServerUrl('https://user:pw@books.example.org'), null);
+});
+
+test('oversized JSON bodies are rejected', async () => {
+  const huge = JSON.stringify({ percentage: 0.1, progress: 'x'.repeat(3 * 1024 * 1024) });
+  const c = new KosyncClient({ server: 'https://big.example.com', fetchImpl: (async () => new Response(huge, { status: 200 })) as unknown as typeof fetch });
+  await assert.rejects(c.getProgress('d'), /too large/);
+});

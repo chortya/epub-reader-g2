@@ -131,3 +131,13 @@ test('kosync body cap applies to streamed bodies without content-length', async 
   assert.ok(pulled < 30, `stopped reading early (read ${pulled} chunks)`);
   assert.equal(seen.length, 0);
 });
+
+test('gutenberg EPUB bodies are capped even without Content-Length', async () => {
+  // @ts-ignore — plain-JS module
+  const { capStream } = await import('../relay/src/worker.js');
+  const big = new ReadableStream({
+    pull(controller) { controller.enqueue(new Uint8Array(1024)); },
+  });
+  const capped = new Response(capStream(big, 10 * 1024));
+  await assert.rejects(capped.arrayBuffer());
+});

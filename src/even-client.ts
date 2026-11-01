@@ -70,6 +70,7 @@ export interface ReadingTracker {
   pageShown(page: number, totalPages: number): void;
   pause(): void;
   flush(keepalive?: boolean): Promise<void>;
+  dispose(): void;
 }
 import { sentenceStartBefore, nextSentenceStart } from './sentences';
 import { measureWidth, FOOTER_INNER_WIDTH } from './text-metrics';
@@ -479,7 +480,12 @@ export class EvenEpubClient {
 
   /** Re-create the open book's session after login/logout in the companion UI. */
   public refreshKosyncSession(): void {
-    this.flushKosync();
+    // Login, logout or account switch: send nothing more with the old login.
+    // A pending position stays local (the next login reconciles and uploads
+    // it); unsent reading time stays queued for its own account.
+    this.kosync?.cancelScheduledPush();
+    this.tracker?.pause();
+    this.tracker?.dispose();
     this.kosync = this.book ? this.createKosyncSession?.(this.book, this.currentBookFilename) ?? null : null;
     this.tracker = this.book ? this.createReadingTracker?.(this.book, this.currentBookFilename) ?? null : null;
     this.kosyncReconciled = false;

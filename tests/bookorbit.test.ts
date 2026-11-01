@@ -238,3 +238,36 @@ test('the reading-time outbox persists and is restored by a new run', async () =
   const t2 = new BookOrbitTracker({ client: c, hash: 'p1', device: DEVICE, now: () => now });
   assert.equal(t2.pendingEvents, 1);
 });
+
+test('catalog pages are capped to the requested size and sane values', async () => {
+  // 10k rows (under the 2 MB JSON cap), the first with a huge title and author list.
+  const items = Array.from({ length: 10_000 }, (_, i) => ({
+    id: i + 1,
+    title: i === 0 ? 'T'.repeat(5000) : `Book ${i}`,
+    authors: i === 0 ? Array(50).fill('A') : ['A'],
+    progressPercentage: i === 0 ? null : 250,
+  }));
+  const { impl } = fake(() => ({ status: 200, body: { items, total: 10_000, page: 1, hasNext: true } }));
+  const page = await client(impl).listBooks({ size: 20 });
+  assert.equal(page.items.length, 20);
+  assert.ok(page.items[0].title.length <= 300);
+  assert.ok(page.items[0].authors.length <= 10);
+  assert.equal(page.items[0].progressPercentage, null);
+  assert.equal(page.items[1].progressPercentage, 100);
+  // Over 2 MB in total: rejected outright instead of parsed.
+  const fat = fake(() => ({ status: 200, body: { items: Array.from({ length: 1000 }, (_, i) => ({ id: i + 1, title: 'x'.repeat(5000) })) } }));
+  await assert.rejects(client(fat.impl).listBooks(), /too large/);
+});
+
+test('a disposed tracker stops uploading with its login', async () => {
+  let now = 0;
+  const { impl, calls } = fake(() => ({ status: 503, body: {} }));
+  const c = new BookOrbitClient({ server: BASE, username: 'dispose-user', userkey: 'k'.repeat(32), fetchImpl: impl });
+  const t = new BookOrbitTracker({ client: c, hash: 'd1', device: DEVICE, now: () => now });
+  t.pageShown(1, 5); now += 30_000; t.pause();
+  t.dispose();
+  await t.flush();
+  t.pageShown(2, 5);
+  assert.equal(calls.length, 0);
+  assert.equal(t.pendingEvents, 1, 'events stay queued for that account');
+});

@@ -73,13 +73,19 @@ export function makeDeviceId(random: () => number = Math.random): string {
   return id.toUpperCase();
 }
 
+/**
+ * A sync server base URL: https, or http only on this device (loopback, for
+ * development) - the username and MD5 key work like a password and must not
+ * cross a network unencrypted. No credentials, query or fragment.
+ */
 export function normalizeServerUrl(raw: string): string | null {
   const trimmed = raw.trim().replace(/\/+$/, '');
   if (!trimmed) return null;
   try {
     const url = new URL(trimmed);
-    if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
-    if (url.search || url.hash) return null;
+    const loopback = url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]';
+    if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) return null;
+    if (url.search || url.hash || url.username || url.password) return null;
     return trimmed;
   } catch {
     return null;
@@ -260,6 +266,9 @@ export class KosyncClient {
     else KosyncClient.clockOffsets.set(this.opts.server, value);
   }
 
+  /** Lets body readers abort the request that produced a response. */
+  private static controllers = new WeakMap<Response, AbortController>();
+
   /** Per server, shared by every client instance (a new one is made per book). */
   private static clockOffsets = new Map<string, number>();
 
@@ -295,12 +304,13 @@ export class KosyncClient {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
-        res.body?.cancel().catch(() => {});
+        // Abort the fetch itself: that also ends a body stream already being read.
+        KosyncClient.controllers.get(res)?.abort();
         reject(new KosyncError('Sync server response timed out', null));
       }, timeoutMs);
     });
     try {
-      const text = await Promise.race([res.text(), timeout]);
+      const text = await Promise.race([readTextLimited(res, MAX_JSON_BYTES), timeout]);
       if (text.trim() === '') return null;
       try {
         return JSON.parse(text);
@@ -331,13 +341,18 @@ export class KosyncClient {
     const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? this.opts.timeoutMs ?? 10_000);
     try {
       const fetchImpl = this.opts.fetchImpl ?? fetch;
-      return await fetchImpl(url, {
+      const res = await fetchImpl(url, {
         method,
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: controller.signal,
         keepalive,
+        // Never follow a redirect with x-auth-key: it would hand the reusable
+        // key to whatever origin the redirect names.
+        redirect: 'error',
       });
+      KosyncClient.controllers.set(res, controller);
+      return res;
     } catch (e) {
       const aborted = (e as Error)?.name === 'AbortError';
       throw new KosyncError(aborted ? 'Sync server timed out' : 'Sync server unreachable', null);
@@ -352,6 +367,39 @@ export class KosyncClient {
     if (body && typeof body.message === 'string') message = `${fallback}: ${body.message.slice(0, 200)}`;
     return new KosyncError(message, res.status);
   }
+}
+
+/** Largest JSON body accepted from a sync/BookOrbit server. */
+export const MAX_JSON_BYTES = 2 * 1024 * 1024;
+
+/** Response text, rejecting once more than maxBytes arrive (cancels the stream). */
+async function readTextLimited(res: Response, maxBytes: number): Promise<string> {
+  const declared = Number(res.headers.get('content-length') ?? '');
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    res.body?.cancel().catch(() => {});
+    throw new KosyncError('Sync server response too large', res.status);
+  }
+  if (!res.body) return res.text();
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > maxBytes) {
+      reader.cancel().catch(() => {});
+      throw new KosyncError('Sync server response too large', res.status);
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const c of chunks) {
+    bytes.set(c, offset);
+    offset += c.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
 }
 
 export type PullDecision = 'apply' | 'none' | 'same' | 'ownDevice' | 'older';

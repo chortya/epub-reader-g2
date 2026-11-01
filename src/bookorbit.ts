@@ -71,7 +71,8 @@ export class BookOrbitClient extends KosyncClient {
     });
     if (query.q?.trim()) params.set('q', query.q.trim());
     const body = await this.getJson(`/plugin/catalog/books?${params}`, 'Listing your library failed');
-    const items = Array.isArray(body?.items) ? body.items : [];
+    // Never trust a server's page size: at most what was asked for (<= 100).
+    const items = (Array.isArray(body?.items) ? body.items : []).slice(0, Math.min(100, query.size ?? 20));
     return {
       items: items.map(toBook).filter((b: BookOrbitBook | null): b is BookOrbitBook => b !== null),
       total: Number(body?.total) || 0,
@@ -199,11 +200,12 @@ export const MAX_DOWNLOAD_BYTES = 300 * 1024 * 1024;
  * Read a body with a per-chunk stall timeout. With a known size the bytes go
  * straight into one preallocated buffer (no chunk list + copy).
  */
-async function readWithStallTimeout(
+export async function readWithStallTimeout(
   res: Response,
   stallMs: number,
   expected: number | null,
   onProgress: (received: number) => void,
+  maxBytes = MAX_DOWNLOAD_BYTES,
 ): Promise<Uint8Array> {
   if (!res.body) {
     const whole = new Uint8Array(await res.arrayBuffer());
@@ -230,7 +232,7 @@ async function readWithStallTimeout(
     }
     if (step.done) break;
     const chunk = step.value;
-    if (received + chunk.byteLength > (target ? target.byteLength : MAX_DOWNLOAD_BYTES)) {
+    if (received + chunk.byteLength > (target ? target.byteLength : maxBytes)) {
       reader.cancel().catch(() => {});
       throw new KosyncError(target ? 'Download larger than announced' : 'Book is too large', null);
     }
@@ -249,14 +251,21 @@ async function readWithStallTimeout(
   return out;
 }
 
+const MAX_TITLE_CHARS = 300;
+
 function toBook(raw: any): BookOrbitBook | null {
-  if (!raw || typeof raw.id !== 'number' || typeof raw.title !== 'string') return null;
+  if (!raw || !Number.isInteger(raw.id) || raw.id <= 0 || typeof raw.title !== 'string') return null;
+  const clip = (v: string, n: number) => (v.length > n ? `${v.slice(0, n - 1)}…` : v);
   return {
     id: raw.id,
-    title: raw.title,
-    authors: Array.isArray(raw.authors) ? raw.authors.filter((a: unknown) => typeof a === 'string') : [],
-    seriesName: typeof raw.seriesName === 'string' ? raw.seriesName : null,
-    progressPercentage: typeof raw.progressPercentage === 'number' ? raw.progressPercentage : null,
+    title: clip(raw.title, MAX_TITLE_CHARS),
+    authors: Array.isArray(raw.authors)
+      ? raw.authors.filter((a: unknown): a is string => typeof a === 'string').slice(0, 10).map((a: string) => clip(a, 120))
+      : [],
+    seriesName: typeof raw.seriesName === 'string' ? clip(raw.seriesName, 120) : null,
+    progressPercentage: typeof raw.progressPercentage === 'number' && Number.isFinite(raw.progressPercentage)
+      ? Math.min(100, Math.max(0, raw.progressPercentage))
+      : null,
     readStatus: typeof raw.readStatus === 'string' ? raw.readStatus : null,
     formats: Array.isArray(raw.formats) ? raw.formats.map(String) : [],
     lastReadAt: typeof raw.lastReadAt === 'string' ? raw.lastReadAt : null,
@@ -294,6 +303,19 @@ export class BookOrbitTracker {
   private finishedSent = false;
   private onError: (e: unknown) => void;
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  private disposed = false;
+
+  /**
+   * Stop this tracker (logout, account switch): no more timers or uploads
+   * with its login. Unsent events stay in the persisted outbox of that
+   * account and go out when it is used again.
+   */
+  dispose(): void {
+    this.disposed = true;
+    this.current = null;
+    if (this.flushTimer !== null) clearTimeout(this.flushTimer);
+    this.flushTimer = null;
+  }
 
   constructor(opts: { client: BookOrbitClient; hash: string; device: DeviceInfo; now?: Clock; onError?: (e: unknown) => void }) {
     this.client = opts.client;
@@ -435,6 +457,7 @@ export class BookOrbitTracker {
 
   /** A reading page is on screen (paged turn or Flow page change). */
   pageShown(page: number, totalPages: number): void {
+    if (this.disposed) return;
     if (this.current && this.current.page === page && this.current.totalPages === totalPages) return;
     this.closeCurrent();
     this.current = { page, totalPages, shownAt: this.now() };
@@ -450,6 +473,7 @@ export class BookOrbitTracker {
 
   /** Upload queued events (serialized). Failed batches are kept for the next try. */
   flush(keepalive = false): Promise<void> {
+    if (this.disposed) return Promise.resolve();
     if (this.flushTimer !== null) {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
@@ -467,7 +491,7 @@ export class BookOrbitTracker {
 
   /** Mark the book read in BookOrbit (once per tracker). */
   async markFinished(): Promise<boolean> {
-    if (this.finishedSent) return false;
+    if (this.finishedSent || this.disposed) return false;
     this.finishedSent = true;
     try {
       const bookId = (await this.client.matchCheck([this.hash], this.device)).get(this.hash);
@@ -498,7 +522,7 @@ export class BookOrbitTracker {
   }
 
   private scheduleFlush(): void {
-    if (this.flushTimer !== null) return;
+    if (this.flushTimer !== null || this.disposed) return;
     this.flushTimer = setTimeout(() => {
       this.flushTimer = null;
       void this.flush();

@@ -6,8 +6,12 @@
 
 export type TocEntry = { href: string; label: string };
 
+/** Longest TOC label kept (a hostile TOC can carry megabytes in one label). */
+const MAX_LABEL_CHARS = 200;
+
 function collapse(text: string | null | undefined): string {
-  return (text ?? '').replace(/\s+/g, ' ').trim();
+  const t = (text ?? '').slice(0, MAX_LABEL_CHARS * 4).replace(/\s+/g, ' ').trim();
+  return t.length > MAX_LABEL_CHARS ? `${t.slice(0, MAX_LABEL_CHARS - 1)}…` : t;
 }
 
 function localName(el: Element): string {

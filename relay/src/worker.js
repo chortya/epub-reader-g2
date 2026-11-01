@@ -34,6 +34,22 @@ function withCors(response, extra = {}) {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
+/** Pass a body through, erroring the stream once it exceeds maxBytes. */
+export function capStream(body, maxBytes) {
+  if (!body) return body;
+  let seen = 0;
+  return body.pipeThrough(new TransformStream({
+    transform(chunk, controller) {
+      seen += chunk.byteLength;
+      if (seen > maxBytes) {
+        controller.error(new Error('Upstream body exceeds the size limit'));
+        return;
+      }
+      controller.enqueue(chunk);
+    },
+  }));
+}
+
 function json(status, body) {
   return new Response(JSON.stringify(body), {
     status,
@@ -159,7 +175,8 @@ async function handleGutenberg(request, path, fetchImpl) {
       const res = await fetchGutenberg(candidate, fetchImpl, 7 * 86400);
       const length = Number(res.headers.get('content-length') ?? '0');
       if (res.ok && length <= MAX_EPUB_BYTES) {
-        return withCors(new Response(res.body, {
+        // Content-Length is optional: count what actually streams through.
+        return withCors(new Response(capStream(res.body, MAX_EPUB_BYTES), {
           status: 200,
           headers: {
             'Content-Type': 'application/epub+zip',
