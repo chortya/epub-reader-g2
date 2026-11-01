@@ -19,7 +19,7 @@ export async function parseEpub(data: ArrayBuffer, filenameHint?: string): Promi
   // 2. Parse the OPF to get spine order and manifest
   const opfXml = await readZipFile(zip, opfPath);
   const opfDir = dirnameZipPath(opfPath);
-  const { title, spineItems, toc } = parseOpf(opfXml, opfDir);
+  const { title, author, spineItems, toc } = parseOpf(opfXml, opfDir);
   await applyTocTitles(zip, toc, spineItems);
 
   // 3. Extract text from each spine item
@@ -75,6 +75,7 @@ export async function parseEpub(data: ArrayBuffer, filenameHint?: string): Promi
     chapters,
     partialMd5: partialMd5.digestHex(),
     language: lang,
+    author: author || undefined,
     // Lazy source access for the KOSync locator; keeps the zip, not the XHTML.
     loadChapterXhtml: (chapterIndex: number) => {
       const href = rawChapters[chapterIndex]?.href;
@@ -218,12 +219,18 @@ type SpineItem = { href: string; title: string; spineIndex: number };
 
 type TocSources = { navHref: string | null; ncxHref: string | null };
 
-function parseOpf(xml: string, opfDir: string): { title: string; spineItems: SpineItem[]; toc: TocSources } {
+function parseOpf(xml: string, opfDir: string): { title: string; author: string; spineItems: SpineItem[]; toc: TocSources } {
   const parser = new DOMParser();
   const doc = parser.parseFromString(xml, 'application/xml');
 
   const titleEl = doc.querySelector('metadata > *|title') ?? doc.querySelector('dc\\:title, title');
   const title = titleEl?.textContent?.trim() ?? '';
+  const author = Array.from(doc.getElementsByTagNameNS('*', 'creator'))
+    .map((el) => el.textContent?.replace(/\s+/g, ' ').trim() ?? '')
+    .filter(Boolean)
+    .slice(0, 3)
+    .join(', ')
+    .slice(0, 120);
 
   const manifestMap = new Map<string, string>();
   const toc: TocSources = { navHref: null, ncxHref: null };
@@ -255,7 +262,7 @@ function parseOpf(xml: string, opfDir: string): { title: string; spineItems: Spi
     }
   });
 
-  return { title, spineItems, toc };
+  return { title, author, spineItems, toc };
 }
 
 /**

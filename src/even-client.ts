@@ -22,6 +22,16 @@ import { version as APP_VERSION } from '../package.json';
 import type { Book, ReadingPosition, ViewState, CachedBookMeta } from './types';
 import type { LaunchIntent } from './launch';
 import { activateBookLanguage } from './epub-parser';
+import {
+  buildListScreen,
+  progressBar,
+  relativeTime,
+  withOverlay,
+  CARD_W,
+  type ListItem,
+  type ScreenSpec,
+} from './glasses-ui';
+import { bookPercentage } from './kosync-locator';
 import { pickInitialView } from './launch';
 import { resolveLastBook } from './book-id';
 import { formatBookPickerLabel } from './book-selection';
@@ -46,7 +56,7 @@ import {
   saveSettingsToBridge,
   type SettingKey,
 } from './constants';
-import { clamp, setStatus, truncateForList, appendEventLog } from './utils';
+import { clamp, setStatus, appendEventLog } from './utils';
 import { createSerialExecutor, type SerialExecutor } from './operation-queue';
 import {
   reduceLifecycle,
@@ -74,17 +84,8 @@ export interface ReadingTracker {
   dispose(): void;
 }
 import { sentenceStartBefore, nextSentenceStart } from './sentences';
-import { measureWidth, FOOTER_INNER_WIDTH } from './text-metrics';
+import { FOOTER_INNER_WIDTH } from './text-metrics';
 import { createSplashBridgeAdapter } from './splash-bridge';
-import {
-  ITEMS_PER_PAGE,
-  ROW_HEIGHT,
-  centerLabel,
-  computeBoxWidthPx,
-  computeRowOffsets,
-  trimTrailingEmptySlots,
-  CHAR_PITCH_PX,
-} from './layout';
 import {
   createPositionPersister,
   pagedPositionKeys,
@@ -109,6 +110,18 @@ type FlowPageData = {
 };
 
 const BOOK_LIST_KEY = 'epub-book-list';
+const BOOK_SUMMARY_KEY = 'epub-book-summary';
+
+/** What the menus show about a book without opening it. */
+type BookSummary = {
+  author?: string;
+  /** 0..1 through the whole book. */
+  percent?: number;
+  chapterIndex?: number;
+  chapterCount?: number;
+  chapterTitle?: string;
+  lastReadAt?: number;
+};
 
 // Order in which settings appear in the on-device menu. Kept here (not in
 // constants.ts) because the rendering concern is per-view.
@@ -130,6 +143,16 @@ const EDITOR_VALUE_LABELS: Record<SettingKey, readonly string[]> = {
   flowSpeedWpm: FLOW_SPEED_VALUES.map((v) => `${v} wpm`),
   textHeightPercent: TEXT_HEIGHT_VALUES.map((v) => `${v}%`),
   textBrightness: TEXT_BRIGHTNESS_VALUES.map((v) => `${v}/4`),
+};
+
+/** Paragraphs explaining a setting on its detail card (wrapped there). */
+const SETTING_HELP: Record<SettingKey, string[]> = {
+  hyphenation: ['Breaks long words at line ends for fuller lines.'],
+  statusBarPosition: ['Clock, chapter and progress line under the text.'],
+  readingMode: ['Paged: swipe page by page.', 'Flow: words appear at a steady pace (speed reading).'],
+  flowSpeedWpm: ['Words per minute in Flow. Hold > Faster/Slower while reading changes it too.'],
+  textHeightPercent: ['Leaves the top of the view free so the text sits lower.'],
+  textBrightness: ['Brightness of the reading text (the footer stays dim).'],
 };
 
 function currentEditorIndex(key: SettingKey): number {
@@ -254,6 +277,18 @@ export class EvenEpubClient {
   private pendingFlowAutoStart = false;
   private footerNoticeTimer: number | null = null;
 
+  // Menu screens (glasses-ui): the last rendered spec, so selection moves
+  // become content-only upgrades instead of rebuilds.
+  private lastScreen: ScreenSpec | null = null;
+  // Per-book summary for menus/cards (no need to open a book to show it).
+  private bookSummaries: Record<string, BookSummary> = {};
+  private summarySaveTimer: number | null = null;
+  private summaryDirty = false;
+  /** HH:MM in the current menu header. */
+  private menuClockShown: string | null = null;
+  /** Whether the contents list shows per-chapter page counts (kept across redraws). */
+  private chapterListPageCounts = true;
+
   public onViewChanged?: () => void;
   public onPositionChanged?: (chapterIndex: number, pageIndex: number) => void;
   public onFlowStateChanged?: (isRunning: boolean) => void;
@@ -292,6 +327,11 @@ export class EvenEpubClient {
       const raw = await this.bridge.getLocalStorage(BOOK_LIST_KEY);
       if (raw) this.cachedBookList = JSON.parse(raw);
     } catch { /* empty */ }
+    try {
+      const raw = await this.bridge.getLocalStorage(BOOK_SUMMARY_KEY);
+      const parsed = raw ? JSON.parse(raw) : null;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) this.bookSummaries = parsed;
+    } catch { /* start without summaries */ }
 
     const device = await this.bridge.getDeviceInfo();
     if (device?.status?.connectType === DeviceConnectType.Connected) {
@@ -326,6 +366,8 @@ export class EvenEpubClient {
     this.chapterPages = [];
     this.chapterPageStarts = [];
     this.layoutCache.clear();
+    this.wordCounts.clear();
+    this.updateBookSummary(this.currentBookId, { author: book.author, chapterCount: book.chapters.length });
     await activateBookLanguage(book);
     this.repaginateForLayout();
 
@@ -373,6 +415,19 @@ export class EvenEpubClient {
     // stored save time; opening and re-rendering it is not a move.
     this.locationKey = this.locationKeyForMode();
     this.locationChangedAt = restoredActive?.savedAt ?? null;
+    if (restoredActive) {
+      // noteLocation skips the baseline: seed the library card from it here
+      // (books read before summaries existed, or on another device).
+      const [ci, offset] = this.locationKey.split(':').map(Number);
+      this.updateBookSummary(this.currentBookId, {
+        percent: bookPercentage(book.chapters.map((c) => c.text.length), ci, offset),
+        chapterIndex: ci,
+        chapterTitle: book.chapters[ci]?.title,
+        ...(this.currentBookId && !this.bookSummaries[this.currentBookId]?.lastReadAt && restoredActive.savedAt
+          ? { lastReadAt: restoredActive.savedAt }
+          : {}),
+      });
+    }
 
     // Ensure this book is in the glasses-side cache (main.ts refreshes the full list right after;
     // this is a fallback for when loadBook is invoked outside the library-refresh flow).
@@ -468,6 +523,7 @@ export class EvenEpubClient {
     if (this.view === 'flowReading') await this.saveFlowPosition(true, true);
     else if (this.view === 'reading') await this.savePagedPosition(true);
     try { await this.persister.flush(); } catch { /* reported by the persister */ }
+    await this.flushBookSummary();
     this.flushKosync();
   }
 
@@ -512,6 +568,7 @@ export class EvenEpubClient {
    */
   private async flushBeforeExit(): Promise<void> {
     try { await this.persister.flush(); } catch { /* reported by the persister */ }
+    await this.flushBookSummary();
     const session = this.kosync;
     const tracker = this.tracker;
     tracker?.pause();
@@ -922,6 +979,7 @@ export class EvenEpubClient {
   private async ensureStartupUi(): Promise<void> {
     if (this.isInitializedUi) return;
 
+    this.lastScreen = null; // a different page: menus must rebuild, not upgrade
     const result = await this.bridge.createStartUpPageContainer(
       new CreateStartUpPageContainer({
         containerTotalNum: 2,
@@ -1010,7 +1068,8 @@ export class EvenEpubClient {
       if (idx >= 0) this.bookPickerSelectedIndex = idx;
       try {
         await this.onBookSelected(lastBook);
-        return;
+        // onBookSelected reports failures itself; still on the splash = not opened.
+        if (this.view !== 'welcome') return;
       } catch (e) {
         console.warn('glassesMenu auto-resume failed; falling back to mainMenu:', e);
       }
@@ -1046,21 +1105,50 @@ export class EvenEpubClient {
     this.stopFlow();
     this.stopClockTicker();
     this.tracker?.pause();
+    await this.saveFlowBeforeLeaving();
     this.view = 'mainMenu';
 
-    // Three semantic choices: Continue, Library (N), Settings (per v1.4.0
-    // decision Q3 — the three-option main menu is stable). Slot 0's label
-    // reflects whether a last book is resolvable (bookId-first via
-    // resolveLastBook). The trailing empty entry is dropped by
-    // rebuildSlots' trimTrailingEmptySlots so the three rows render
-    // vertically centered instead of padding a dead fourth row at the bottom.
+    // Three semantic choices (v1.4.0 decision Q3): Continue, Library, Settings.
     const resolved = await this.resolveLastBookFromBridge();
     this.continueReadingResolved = resolved;
-    const continueLabel = resolved ? 'Continue reading' : '(No recent book)';
-    const libraryLabel = `Library (${this.cachedBookList.length})`;
-    const labels = [continueLabel, libraryLabel, 'Settings', ''];
     const selectedSlot = Math.max(0, Math.min(2, this.mainMenuSelectedIndex));
-    await this.rebuildSlots(labels, selectedSlot);
+    this.mainMenuSelectedIndex = selectedSlot;
+    const n = this.cachedBookList.length;
+    const lastSummary = resolved ? this.bookSummaries[resolved.bookId] : undefined;
+    const items: ListItem[] = [
+      resolved
+        ? { label: 'Continue', icon: '●', meta: lastSummary?.percent !== undefined ? `${Math.round(lastSummary.percent * 100)}%` : '' }
+        : { label: 'Continue', icon: '○' },
+      { label: 'Library', icon: '■', meta: String(n) },
+      { label: 'Settings', icon: '□' },
+    ];
+    let card: { title: string; lines: string[] };
+    if (selectedSlot === 0) {
+      card = resolved
+        ? this.bookCard(resolved)
+        : { title: 'Nothing to continue', lines: ['', 'Open a book from the Library,', 'or upload one on the phone.'] };
+    } else if (selectedSlot === 1) {
+      const recent = [...this.cachedBookList]
+        .sort((a, b) => (this.bookSummaries[b.bookId]?.lastReadAt ?? b.uploadedAt) - (this.bookSummaries[a.bookId]?.lastReadAt ?? a.uploadedAt))
+        .slice(0, 4);
+      card = {
+        title: n === 1 ? '1 book on your glasses' : `${n} books on your glasses`,
+        lines: n === 0 ? ['', 'Upload EPUBs or download them', 'from BookOrbit on the phone.'] : ['', ...recent.map((b) => `${this.bookIcon(this.bookSummaries[b.bookId])} ${b.title}`)],
+      };
+    } else {
+      card = {
+        title: 'Settings',
+        lines: ['', ...SETTINGS_MENU_KEYS.map((k) => formatSettingsRow(k, config))],
+      };
+    }
+    await this.renderScreen(buildListScreen({
+      section: 'ePub Reader',
+      clock: this.clockNow(),
+      items,
+      selected: selectedSlot,
+      card,
+      hints: '● open   ●● exit',
+    }));
     setStatus(`Main menu: ${selectedSlot + 1}/3. Swipe=browse, Tap=open, DblTap=exit`);
     this.onViewChanged?.();
   }
@@ -1068,52 +1156,40 @@ export class EvenEpubClient {
   private async showSettingsMenu(): Promise<void> {
     this.stopFlow();
     this.stopClockTicker();
+    await this.saveFlowBeforeLeaving();
     this.view = 'settings';
     this.editingSettingKey = null;
 
     const total = SETTINGS_MENU_KEYS.length;
-    const pageStart = Math.floor(this.settingsListSelectedIndex / ITEMS_PER_PAGE) * ITEMS_PER_PAGE;
-    const selectedSlot = this.settingsListSelectedIndex - pageStart;
-
-    const labels: string[] = [];
-    for (let i = 0; i < ITEMS_PER_PAGE; i++) {
-      const idx = pageStart + i;
-      labels.push(idx < total ? formatSettingsRow(SETTINGS_MENU_KEYS[idx], config) : '');
-    }
-
-    await this.rebuildSlots(labels, selectedSlot);
-    setStatus(`Settings: ${this.settingsListSelectedIndex + 1}/${total}. Swipe=browse, Tap=edit, DblTap=back`);
+    const selected = clamp(this.settingsListSelectedIndex, 0, total - 1);
+    this.settingsListSelectedIndex = selected;
+    const items: ListItem[] = SETTINGS_MENU_KEYS.map((key) => {
+      const [label, value] = formatSettingsRow(key, config).split(': ');
+      return { label, meta: value ?? '' };
+    });
+    const key = SETTINGS_MENU_KEYS[selected];
+    await this.renderScreen(buildListScreen({
+      section: 'Settings',
+      position: `${selected + 1}/${total}`,
+      clock: this.clockNow(),
+      items,
+      selected,
+      card: { title: items[selected].label, lines: ['', `Now: ${items[selected].meta}`, '', ...SETTING_HELP[key]], wrap: true },
+      hints: '● change   ●● back',
+    }));
+    setStatus(`Settings: ${selected + 1}/${total}. Swipe=browse, Tap=edit, DblTap=back`);
     this.onViewChanged?.();
   }
 
   private async showSettingEditor(key: SettingKey): Promise<void> {
     this.stopFlow();
     this.stopClockTicker();
+    await this.saveFlowBeforeLeaving();
     this.view = 'settingEditor';
     this.editingSettingKey = key;
     this.editorSelectedIndex = currentEditorIndex(key);
     this.editorSavedIndex = this.editorSelectedIndex;
-
-    const values = EDITOR_VALUE_LABELS[key];
-    const total = values.length;
-    const pageStart = Math.floor(this.editorSelectedIndex / ITEMS_PER_PAGE) * ITEMS_PER_PAGE;
-    const selectedSlot = this.editorSelectedIndex - pageStart;
-
-    const labels: string[] = [];
-    for (let i = 0; i < ITEMS_PER_PAGE; i++) {
-      const idx = pageStart + i;
-      if (idx >= total) {
-        labels.push('');
-        continue;
-      }
-      // State glyphs (official glyph set: ●○) distinguish the SAVED value
-      // from the row the highlight currently rests on — the border alone
-      // cannot express "this is where you were" vs "this is where you are".
-      const glyph = idx === this.editorSavedIndex ? '● ' : '○ ';
-      labels.push(glyph + values[idx]);
-    }
-    await this.rebuildSlots(labels, selectedSlot);
-    setStatus(`Edit ${key}: ${this.editorSelectedIndex + 1}/${total}. Swipe=move, Tap=save, DblTap=cancel`);
+    await this.renderSettingEditor(key);
   }
 
   /**
@@ -1172,25 +1248,33 @@ export class EvenEpubClient {
   }
 
   private async rerenderEditor(): Promise<void> {
-    const key = this.editingSettingKey;
-    if (!key) return;
+    if (this.editingSettingKey) await this.renderSettingEditor(this.editingSettingKey);
+  }
+
+  private async renderSettingEditor(key: SettingKey): Promise<void> {
     const values = EDITOR_VALUE_LABELS[key];
     const total = values.length;
-    const pageStart = Math.floor(this.editorSelectedIndex / ITEMS_PER_PAGE) * ITEMS_PER_PAGE;
-    const selectedSlot = this.editorSelectedIndex - pageStart;
-
-    const labels: string[] = [];
-    for (let i = 0; i < ITEMS_PER_PAGE; i++) {
-      const idx = pageStart + i;
-      labels.push(idx < total ? values[idx] : '');
-    }
-    await this.rebuildSlots(labels, selectedSlot);
-    setStatus(`Edit ${key}: ${this.editorSelectedIndex + 1}/${total}. Swipe=move, Tap=save, DblTap=cancel`);
+    const selected = clamp(this.editorSelectedIndex, 0, total - 1);
+    this.editorSelectedIndex = selected;
+    // ● marks the SAVED value; the framed row is the one being picked.
+    const items: ListItem[] = values.map((v, i) => ({ label: v, icon: i === this.editorSavedIndex ? '●' : '○' }));
+    const label = formatSettingsRow(key, config).split(': ')[0];
+    await this.renderScreen(buildListScreen({
+      section: `Settings · ${label}`,
+      position: `${selected + 1}/${total}`,
+      clock: this.clockNow(),
+      items,
+      selected,
+      card: { title: label, lines: ['', `Saved: ${values[this.editorSavedIndex]}`, '', ...SETTING_HELP[key]], wrap: true },
+      hints: '● save   ●● cancel',
+    }));
+    setStatus(`Edit ${key}: ${selected + 1}/${total}. Swipe=move, Tap=save, DblTap=cancel`);
   }
 
   private async showBookPicker(): Promise<void> {
     this.stopFlow();
     this.stopClockTicker();
+    await this.saveFlowBeforeLeaving();
     this.view = 'bookPicker';
 
     const total = this.cachedBookList.length;
@@ -1198,32 +1282,37 @@ export class EvenEpubClient {
       await this.showWelcome();
       return;
     }
-
-    const pageStart =
-      Math.floor(this.bookPickerSelectedIndex / ITEMS_PER_PAGE) * ITEMS_PER_PAGE;
-    const selectedSlot = this.bookPickerSelectedIndex - pageStart;
-
-    const labels: string[] = [];
-    for (let i = 0; i < ITEMS_PER_PAGE; i++) {
-      const idx = pageStart + i;
-      if (idx < total) {
-        const label = formatBookPickerLabel(this.cachedBookList[idx], this.cachedBookList);
-        labels.push(truncateForList(`${idx + 1}. ${label}`, 42));
-      } else {
-        labels.push('');
-      }
-    }
-
-    await this.rebuildSlots(labels, selectedSlot);
-    setStatus(`Library: ${this.bookPickerSelectedIndex + 1}/${total}. Swipe=browse, Tap=open, DblTap=back`);
+    // Written back: taps and swipes act on the index (the list may have shrunk).
+    const selected = clamp(this.bookPickerSelectedIndex, 0, total - 1);
+    this.bookPickerSelectedIndex = selected;
+    const items: ListItem[] = this.cachedBookList.map((meta) => {
+      const s = this.bookSummaries[meta.bookId];
+      return {
+        label: formatBookPickerLabel(meta, this.cachedBookList),
+        icon: this.bookIcon(s),
+        meta: s?.percent !== undefined ? `${Math.round(s.percent * 100)}%` : '',
+      };
+    });
+    await this.renderScreen(buildListScreen({
+      section: 'Library',
+      position: `${selected + 1}/${total}`,
+      clock: this.clockNow(),
+      items,
+      selected,
+      card: this.bookCard(this.cachedBookList[selected]),
+      hints: '● open   ●● back',
+    }));
+    setStatus(`Library: ${selected + 1}/${total}. Swipe=browse, Tap=open, DblTap=back`);
     this.onViewChanged?.();
   }
 
   private async showWelcome(): Promise<void> {
     this.stopFlow();
     this.stopClockTicker();
+    await this.saveFlowBeforeLeaving();
     this.view = 'welcome';
     this.readingRenderSig = null; // welcome rebuilds the page — stale upgrades must not fire
+    this.lastScreen = null;
 
     const page = this.getWelcomeRuntimePage();
     await this.bridge.rebuildPageContainer(
@@ -1262,35 +1351,48 @@ export class EvenEpubClient {
     this.stopFlow();
     this.stopClockTicker();
     this.tracker?.pause();
+    await this.saveFlowBeforeLeaving();
     this.view = 'chapterList';
+    this.chapterListPageCounts = showPageCounts;
 
-    const total = this.book.chapters.length;
-    const pageStart =
-      Math.floor(this.librarySelectedIndex / ITEMS_PER_PAGE) * ITEMS_PER_PAGE;
-    const selectedSlot = this.librarySelectedIndex - pageStart;
-
-    const labels: string[] = [];
-    for (let i = 0; i < ITEMS_PER_PAGE; i++) {
-      const idx = pageStart + i;
-      if (idx < total) {
-        const ch = this.book.chapters[idx];
-        if (showPageCounts) {
-          const pgCount = this.chapterPages[idx]?.length ?? 0;
-          labels.push(truncateForList(`${idx + 1}. ${ch.title} (${pgCount}pg)`, 42));
-        } else {
-          labels.push(truncateForList(`${idx + 1}. ${ch.title}`, 50));
-        }
-      } else {
-        labels.push('');
-      }
+    const book = this.book;
+    const total = book.chapters.length;
+    const selected = clamp(this.librarySelectedIndex, 0, total - 1);
+    this.librarySelectedIndex = selected;
+    const lengths = book.chapters.map((c) => c.text.length);
+    const items: ListItem[] = book.chapters.map((ch, i) => ({
+      // The header shows "N/total"; titles often carry their own numbering.
+      label: ch.title,
+      // ● current, · already read, ○ ahead.
+      icon: i === this.chapterIndex ? '●' : i < this.chapterIndex ? '·' : '○',
+      meta: showPageCounts ? `${this.chapterPages[i]?.length ?? 0} p` : '',
+    }));
+    const ch = book.chapters[selected];
+    const pages = this.chapterPages[selected]?.length ?? 0;
+    const words = this.chapterWordCount(selected);
+    const minutes = Math.max(1, Math.round(words / 230));
+    const from = Math.round(bookPercentage(lengths, selected, 0) * 100);
+    const to = Math.round(bookPercentage(lengths, selected, lengths[selected]) * 100);
+    const lines = [
+      `${pages} pages · ~${minutes} min`,
+      `Book ${from}-${to}%`,
+    ];
+    if (selected === this.chapterIndex) {
+      lines.push(`${progressBar(pages > 0 ? (this.pageIndex + 1) / pages : 0, CARD_W - 90)}`);
+      lines.push(`You are on page ${this.pageIndex + 1}/${pages}`);
+    } else if (selected < this.chapterIndex) {
+      lines.push('', 'Already read');
     }
-
-    await this.rebuildSlots(labels, selectedSlot);
-
-    setStatus(
-      `Chapters: ${this.librarySelectedIndex + 1}/${total}. Swipe=browse, Tap=open, DblTap=exit`,
-    );
-    appendEventLog(`Chapter list page ${pageStart + 1}-${Math.min(pageStart + ITEMS_PER_PAGE, total)}`);
+    await this.renderScreen(buildListScreen({
+      section: book.title,
+      position: `${selected + 1}/${total}`,
+      clock: this.clockNow(),
+      items,
+      selected,
+      card: { title: ch.title, lines: ['', ...lines] },
+      hints: '● read   ●● back',
+    }));
+    setStatus(`Chapters: ${selected + 1}/${total}. Swipe=browse, Tap=open, DblTap=exit`);
   }
 
   private async showPage(): Promise<void> {
@@ -1386,6 +1488,7 @@ export class EvenEpubClient {
         );
       }
     } else {
+      this.lastScreen = null; // the reading page replaces the menu containers
       await this.bridge.rebuildPageContainer(
         new RebuildPageContainer({
           containerTotalNum: textObjects.length,
@@ -1529,6 +1632,7 @@ export class EvenEpubClient {
     } else {
       // Full rebuild to establish container layout; carries the contextual
       // menu (a rebuild without menuObject clears it — plan §3.1).
+      this.lastScreen = null;
       await this.bridge.rebuildPageContainer(
         new RebuildPageContainer({
           containerTotalNum: textObjects.length,
@@ -1554,82 +1658,176 @@ export class EvenEpubClient {
     );
   }
 
-  private async rebuildSlots(labels: string[], selectedSlot: number): Promise<void> {
-    // Menu/list views replace the reading containers — invalidate the reading
-    // render signature so returning to reading rebuilds instead of upgrading.
-    this.readingRenderSig = null;
-    // v1.4.3 layout: trim trailing empty slots so a partial page (3-item main
-    // menu, 2-option binary editors, last page of a paginated settings list)
-    // doesn't render dead rows; vertically center what remains; size every row
-    // to the page's longest label so the highlight outlines a button-shaped
-    // box rather than a full-width banner.
-    const visibleLabels = trimTrailingEmptySlots(labels);
-    const n = visibleLabels.length;
-    const boxWidthPx = computeBoxWidthPx(visibleLabels, measureWidth);
-    const boxChars = Math.floor(boxWidthPx / CHAR_PITCH_PX);
-    const xPosition = Math.floor((DISPLAY_WIDTH - boxWidthPx) / 2);
-    const yPositions = computeRowOffsets(n);
-    const safeSelected = n > 0 ? clamp(selectedSlot, 0, n - 1) : -1;
+  // --- Menu screens (glasses-ui) ---
 
-    const containers: TextContainerProperty[] = [];
-
-    // Container 1 must be declared FIRST so it sits beneath the option rows in
-    // the SDK's paint/event order (matches even-toolkit/glasses/bridge.ts).
-    // Empty content + zero border + zero padding renders nothing visible; the
-    // full-screen rect catches every swipe regardless of slot geometry.
-    containers.push(
-      new TextContainerProperty({
-        xPosition: 0,
-        yPosition: 0,
-        width: DISPLAY_WIDTH,
-        height: DISPLAY_HEIGHT,
-        borderWidth: 0,
-        borderColor: 0,
-        paddingLength: 0,
-        containerID: 1,
-        containerName: 'swipe',
-        content: '',
-        isEventCapture: 1,
-      }),
-    );
-
-    for (let i = 0; i < n; i++) {
-      const isSelected = i === safeSelected;
-      containers.push(
-        new TextContainerProperty({
-          xPosition,
-          yPosition: yPositions[i],
-          width: boxWidthPx,
-          height: ROW_HEIGHT,
-          borderWidth: isSelected ? 1 : 0,
-          // 13 (bright) per design guidelines — the selection highlight is the
-          // primary navigation feedback on the monochrome display; 5 (subtle
-          // grey) was too dim to read at a glance.
-          borderColor: 13,
-          borderRadius: 8,
-          paddingLength: 2,
-          containerID: i + 2,
-          containerName: `slot-${i}`,
-          content: centerLabel(visibleLabels[i], boxChars),
-          isEventCapture: 0,
-        }),
-      );
+  /**
+   * Show a menu screen. Same layout as the screen on display (selection moved,
+   * values changed): update only the text/brightness that changed - no
+   * rebuild, no flicker. Otherwise rebuild the page.
+   */
+  private async renderScreen(spec: ScreenSpec): Promise<void> {
+    const prev = this.lastScreen;
+    if (prev && prev.key === spec.key && this.readingRenderSig === null) {
+      for (const box of spec.boxes) {
+        const old = prev.boxes.find((b) => b.id === box.id);
+        if (!old || (old.content === box.content && old.textColor === box.textColor)) continue;
+        await this.bridge.textContainerUpgrade(
+          new TextContainerUpgrade({
+            containerID: box.id,
+            containerName: box.name,
+            content: box.content,
+            ...(box.textColor !== undefined ? { textColor: box.textColor } : {}),
+          }),
+        );
+      }
+      this.lastScreen = spec;
+      this.startClockTicker();
+      notifyTextUpdate();
+      return;
     }
-
-    await this.bridge.rebuildPageContainer(
-      new RebuildPageContainer({
-        containerTotalNum: containers.length,
-        textObject: containers,
-      }),
+    const containers = spec.boxes.map((b) => new TextContainerProperty({
+      xPosition: b.x,
+      yPosition: b.y,
+      width: b.w,
+      height: b.h,
+      borderWidth: b.border ?? 0,
+      borderColor: b.borderColor ?? 0,
+      borderRadius: b.radius ?? 0,
+      paddingLength: b.pad ?? 4,
+      containerID: b.id,
+      containerName: b.name,
+      content: b.content,
+      isEventCapture: b.capture ? 1 : 0,
+      ...(b.textColor !== undefined ? { textColor: b.textColor } : {}),
+    }));
+    const ok = await this.bridge.rebuildPageContainer(
+      new RebuildPageContainer({ containerTotalNum: containers.length, textObject: containers }),
     );
-    // Order matters: notifyTextUpdate first arms the 40 ms window that swallows
-    // the phantom SCROLL the device fires right after rebuildPageContainer
-    // (the one that used to snap the highlight back to where it started). Then
-    // resetGestureState clears stale cross-view tap/scroll history so the
-    // user's first real swipe in the new menu lands without being held by the
-    // 110 ms post-tap or 350 ms same-direction debounces from the previous view.
+    // The reading views render differently: make them rebuild on return.
+    this.readingRenderSig = null;
+    // A rejected rebuild leaves the old page up: never upgrade into it.
+    this.lastScreen = ok === false ? null : spec;
+    if (ok === false) console.warn(`renderScreen: rebuild rejected (${spec.boxes.length} containers)`);
+    this.startClockTicker(); // keeps the header clock current
+    // Same order as rebuildSlots: arm the phantom-scroll window, then clear
+    // stale gesture history so the first swipe in the new screen lands.
     notifyTextUpdate();
     resetGestureState();
+  }
+
+  /**
+   * A modal card over the current menu screen (e.g. while a book opens).
+   * Renders immediately: its caller (onBookSelected) already runs inside the
+   * gesture's serialGesture chain, so queueing here would only paint the card
+   * after the book had opened - over the reading page.
+   */
+  public async showOverlay(title: string, lines: string[]): Promise<void> {
+    const base = this.lastScreen;
+    if (!base || !this.isMenuView()) return;
+    await this.renderScreen(withOverlay(base, title, lines));
+  }
+
+  /** Back to the menu under the overlay (the book did not open). Same chain rule as showOverlay. */
+  public async dismissOverlay(): Promise<void> {
+    if (!this.lastScreen?.boxes.some((b) => b.name === 'overlay') || !this.isMenuView()) return;
+    await this.refreshCurrentView();
+  }
+
+  private isMenuView(): boolean {
+    return this.view === 'mainMenu' || this.view === 'bookPicker' || this.view === 'chapterList'
+      || this.view === 'settings' || this.view === 'settingEditor';
+  }
+
+  /**
+   * Leaving Flow for a menu: land the exact word in bridge storage. Mid-page
+   * Flow saves stay local, and the lifecycle exits only save reading views.
+   */
+  private async saveFlowBeforeLeaving(): Promise<void> {
+    if (this.view === 'flowReading' && this.book) await this.saveFlowPosition(true, true);
+  }
+
+  /** The time for a menu header; remembered so the ticker knows what is shown. */
+  private clockNow(): string {
+    this.menuClockShown = this.formatHHMM(new Date());
+    return this.menuClockShown;
+  }
+
+  /** Same menu, current data, keeping selections (incl. an unsaved editor pick). */
+  private async redrawMenu(): Promise<void> {
+    switch (this.view) {
+      case 'mainMenu': await this.showMainMenu(); return;
+      case 'bookPicker': await this.showBookPicker(); return;
+      case 'chapterList': await this.showChapterList(this.chapterListPageCounts); return;
+      case 'settings': await this.showSettingsMenu(); return;
+      case 'settingEditor':
+        if (this.editingSettingKey) await this.rerenderEditor();
+        else await this.showSettingsMenu();
+        return;
+      default:
+    }
+  }
+
+  private updateBookSummary(bookId: string | null, patch: BookSummary): void {
+    if (!bookId) return;
+    this.bookSummaries[bookId] = { ...this.bookSummaries[bookId], ...patch };
+    this.summaryDirty = true;
+    // Throttle, not debounce: Flow moves every few hundred ms and would
+    // otherwise postpone the save for the whole session.
+    if (this.summarySaveTimer === null) {
+      this.summarySaveTimer = window.setTimeout(() => void this.flushBookSummary(), 3000);
+    }
+  }
+
+  private async flushBookSummary(): Promise<void> {
+    if (this.summarySaveTimer !== null) {
+      window.clearTimeout(this.summarySaveTimer);
+      this.summarySaveTimer = null;
+    }
+    if (!this.summaryDirty) return;
+    this.summaryDirty = false;
+    try {
+      await this.bridge.setLocalStorage(BOOK_SUMMARY_KEY, JSON.stringify(this.bookSummaries));
+    } catch {
+      this.summaryDirty = true;
+    }
+  }
+
+
+  private wordCounts = new Map<number, number>();
+  private chapterWordCount(i: number): number {
+    let n = this.wordCounts.get(i);
+    if (n === undefined) {
+      n = (this.book?.chapters[i]?.text.match(/\S+/g) ?? []).length;
+      this.wordCounts.set(i, n);
+    }
+    return n;
+  }
+
+  /** ● reading, ★ finished, ○ not started. */
+  private bookIcon(summary: BookSummary | undefined): string {
+    const p = summary?.percent ?? 0;
+    if (p >= 0.99) return '★';
+    if (p > 0 || summary?.lastReadAt) return '●';
+    return '○';
+  }
+
+  private bookCard(meta: CachedBookMeta): { title: string; lines: string[] } {
+    const s = this.bookSummaries[meta.bookId];
+    const lines: string[] = [];
+    lines.push(s?.author ?? meta.filename);
+    if (s?.percent !== undefined) {
+      const pct = Math.round(s.percent * 100);
+      lines.push(`${progressBar(s.percent, CARD_W - 90)} ${pct}%`);
+      if (s.chapterIndex !== undefined && s.chapterCount) {
+        lines.push(`Ch ${s.chapterIndex + 1}/${s.chapterCount}${s.chapterTitle ? ` · ${s.chapterTitle}` : ''}`);
+      }
+      if (s.lastReadAt) lines.push(`Read ${relativeTime(s.lastReadAt)}`);
+    } else {
+      lines.push('');
+      lines.push('Not started yet');
+      lines.push(`Added ${relativeTime(meta.uploadedAt)}`);
+    }
+    return { title: meta.title, lines };
   }
 
   // --- Navigation ---
@@ -2020,6 +2218,9 @@ export class EvenEpubClient {
   }
 
   private async refreshCurrentView(): Promise<void> {
+    // Full redraw (reconnect, back from the background, overlay dismissed):
+    // the glasses may no longer show what lastScreen says.
+    this.lastScreen = null;
     // Exhaustive per-view refresh. Returning from a menu/background visit must
     // land the user back on the SAME view — the old if/else chain had no
     // branches for mainMenu/settings/settingEditor, so those fell through to
@@ -2036,7 +2237,7 @@ export class EvenEpubClient {
         await this.showBookPicker();
         return;
       case 'chapterList':
-        await this.showChapterList();
+        await this.showChapterList(this.chapterListPageCounts);
         return;
       case 'mainMenu':
         await this.showMainMenu();
@@ -2045,7 +2246,9 @@ export class EvenEpubClient {
         await this.showSettingsMenu();
         return;
       case 'settingEditor':
-        await this.showSettingEditor(this.editingSettingKey ?? SETTINGS_MENU_KEYS[0]);
+        // Keep the value the user is about to pick.
+        if (this.editingSettingKey) await this.rerenderEditor();
+        else await this.showSettingEditor(SETTINGS_MENU_KEYS[0]);
         return;
       case 'welcome':
         await this.showWelcome();
@@ -2092,8 +2295,12 @@ export class EvenEpubClient {
         this.pendingFlowAutoStart = false;
         if (this.isFlowRunning) this.stopFlow();
         this.stopClockTicker();
+        // From a menu the position was saved on leaving the book: a paged save
+        // here would override a newer Flow word.
         if (this.view === 'flowReading') await this.saveFlowPosition(true, true);
-        else await this.savePagedPosition(true);
+        else if (this.view === 'reading') await this.savePagedPosition(true);
+        else { try { await this.persister.flush(); } catch { /* reported by the persister */ } }
+        await this.flushBookSummary();
         this.flushKosync();
       }
       if (r.effects.runPendingMenuAction && wasPending !== null) {
@@ -2317,6 +2524,7 @@ export class EvenEpubClient {
           this.editingSettingKey = null;
           await this.showSettingsMenu();
         } else if (target === 'exit') {
+          this.stopClockTicker();
           await this.flushBeforeExit();
           try { await this.bridge.shutDownPageContainer(1); } catch { /* */ }
         }
@@ -2521,7 +2729,7 @@ export class EvenEpubClient {
     this.stopFlow();
     this.stopClockTicker();
     if (this.view === 'flowReading') await this.saveFlowPosition(true, true);
-    else await this.savePagedPosition(true);
+    else if (this.view === 'reading') await this.savePagedPosition(true);
     await this.flushBeforeExit();
     try { await this.bridge.shutDownPageContainer(); } catch { /* */ }
   }
@@ -2556,6 +2764,19 @@ export class EvenEpubClient {
   }
 
   private async tickClock(): Promise<void> {
+    // Menu screens: their header shows the time; a re-render with the same
+    // layout is a content-only upgrade of the header.
+    if (this.isMenuView() && this.lifecycleState === 'active') {
+      if (this.formatHHMM(new Date()) === this.menuClockShown) return;
+      // Re-checked in the queue: a gesture in flight (opening a book) may have
+      // left the menu by the time this runs.
+      await this.serialGesture(async () => {
+        if (!this.isMenuView() || this.lifecycleState !== 'active') return;
+        if (this.formatHHMM(new Date()) === this.menuClockShown) return;
+        await this.redrawMenu();
+      });
+      return;
+    }
     // Only refresh the footer for the two views that actually render it.
     if (this.view !== 'reading' && this.view !== 'flowReading') return;
     if (config.statusBarPosition !== 'bottom') return;
@@ -2628,6 +2849,19 @@ export class EvenEpubClient {
    */
   private noteLocation(chapterIndex: number, offset: number): number | undefined {
     const key = `${chapterIndex}:${offset}`;
+    // The library card follows what is on screen - also the very first page of
+    // a new book (the baseline below) - but never saves made from a menu.
+    const summary = this.currentBookId ? this.bookSummaries[this.currentBookId] : undefined;
+    if (this.book && (this.view === 'reading' || this.view === 'flowReading')
+      && (key !== this.locationKey || !summary?.lastReadAt)) {
+      this.updateBookSummary(this.currentBookId, {
+        percent: bookPercentage(this.book.chapters.map((c) => c.text.length), chapterIndex, offset),
+        chapterIndex,
+        chapterCount: this.book.chapters.length,
+        chapterTitle: this.book.chapters[chapterIndex]?.title,
+        lastReadAt: Date.now(),
+      });
+    }
     if (key === this.locationKey) return this.locationChangedAt ?? undefined;
     this.locationKey = key;
     if (this.adoptingRemoteAt !== null) {

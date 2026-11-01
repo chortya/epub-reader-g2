@@ -175,12 +175,15 @@ async function main() {
     client.onBookSelected = async (meta: CachedBookMeta) => {
       try {
         setStatus(`Loading: ${meta.title}...`);
+        // Feedback on the glasses while a big book unzips and paginates.
+        await client?.showOverlay(meta.title, ['', 'Opening the book...']);
         const recent = await getRecentBooksFromDB(bridge as any);
         // Immutable identity only. Falling back to filename/title can open the
         // wrong EPUB when two downloads share metadata.
         const cached = recent.find((book) => book.bookId === meta.bookId);
         if (!cached) {
           setStatus(`Book not available locally: ${meta.title}`);
+          await client?.dismissOverlay();
           return;
         }
         const book = await parseEpub(cached.buffer, cached.filename);
@@ -189,6 +192,7 @@ async function main() {
       } catch (e) {
         console.error('Failed to load book from picker:', e);
         setStatus('Failed to load book.');
+        await client?.dismissOverlay().catch(() => {});
       }
     };
 

@@ -22,8 +22,24 @@ All notable changes to this project will be documented in this file.
       signature, and get one retry.
     - An update replaces the old copy.
     - The phone warns if device storage is too full to keep a book across restarts.
+- **Redesigned glasses menus** (main menu, library, contents, settings, setting editor) in
+  `src/glasses-ui.ts`. Each screen has two framed panes:
+  - **Left: a list.** The selection sits in a framed middle row, with three neighbours above and
+    below. Swipes only update text, so there's no rebuild flicker.
+  - **Right: a detail card.** The library shows the title, author, a progress bar, the chapter and
+    when you last read. The contents show pages, reading time and the chapter's share of the book.
+    Settings show what each one does.
+  - A header carries the section, position and clock, and a footer carries the gesture hints.
+  - The book list marks progress (● reading, ○ new, ★ finished) and percent read.
+  - Opening a book shows an "Opening the book..." card.
+  - Layouts stay within SDK 0.0.16's limit of 8 text containers per page.
+- Chapter parsing reads the EPUB author (`dc:creator`) for the library card.
 - `npm run pack:personal` builds a package for your own Private/Beta testing that whitelists your
   servers (`PERSONAL_ORIGINS=…`). The committed app.json stays unchanged.
+
+### Fixed
+- Books whose chapters contain `<title/>` (e.g. Brave New World) failed with "No readable chapters";
+  chapters are now parsed as XHTML with an HTML fallback.
 
 ### Security and robustness (three review rounds)
 - **Credentials:** they never follow redirects, sync servers must be https (http only on

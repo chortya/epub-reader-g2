@@ -55,7 +55,7 @@ index.html → main.ts (bootstrap, UI wiring, file upload, settings panel, keep-
 
 **Entry point:** `index.html` is the whole app. `relay/` is a separate Cloudflare Worker (Gutenberg + kosync forwarding with CORS) the developer deploys; packaged builds require it (Even Hub whitelist + WebView CORS).
 
-**Glasses-side views:** `mainMenu` (Continue / Library (N) / Settings) → `bookPicker` → `library` (chapter list) → `reading` / `flowReading`. Also `settings` (5-item list) and `settingEditor` (per-setting value picker) reachable from `mainMenu`. Splash screen on startup via even-toolkit `createSplash`; after splash, `pickInitialView` (in `src/launch.ts`) decides between direct-resume (when launched from `glassesMenu` with a resolvable last book) and `mainMenu`.
+**Glasses-side views:** `mainMenu` (Continue / Library (N) / Settings) → `bookPicker` → `library` (chapter list) → `reading` / `flowReading`. Also `settings` and `settingEditor` (per-setting value picker) reachable from `mainMenu`. All menu screens are built by `src/glasses-ui.ts` (pure layout builders): list wheel with a framed fixed selection row + detail card + header/footer; same-layout updates go through `textContainerUpgrade` (`renderScreen` in even-client). Splash screen on startup via even-toolkit `createSplash`; after splash, `pickInitialView` (in `src/launch.ts`) decides between direct-resume (when launched from `glassesMenu` with a resolvable last book) and `mainMenu`.
 
 **Gesture mapping:** Swipe up/down = prev/next page or browse list items. Tap = select book/chapter/setting value or start/pause flow. Double-tap = back one level (reading→chapters→mainMenu→exit-app). Only 4 SDK gestures exist (`CLICK`, `DOUBLE_CLICK`, `SCROLL_TOP`, `SCROLL_BOTTOM`); no long-press / triple-tap / temple-swipe available — see `docs/1.4.0-on-device-settings-and-menu.md` §2.2.
 
@@ -65,7 +65,7 @@ index.html → main.ts (bootstrap, UI wiring, file upload, settings panel, keep-
 
 ## G2 Platform Constraints
 
-- **Display:** 576×288 px monochrome; max 12 containers per page; max 1 `isEventCapture=1` container per page (must cover the full tap area or swipes are lost — see the Text-height note above).
+- **Display:** 576×288 px monochrome; max 12 containers per page, of which max **8 text** containers (the simulator rejects the rebuild otherwise); containers have no fill, so overlapping text shows through; max 1 `isEventCapture=1` container per page (must cover the full tap area or swipes are lost — see the Text-height note above).
 - **Startup vs runtime:** `createStartUpPageContainer` is text-only (no images). Images only work in `rebuildPageContainer`.
 - **Text updates:** use `textContainerUpgrade` for flicker-free content swaps; `rebuildPageContainer` for layout changes (causes brief flicker). Always call `notifyTextUpdate()` after `rebuildPageContainer()`.
 - **Version sync:** `app.json.version` must match `package.json.version` — `tests/app-json.test.ts` fails otherwise. Same test checks the Even Hub SDK version referenced in `app.json`.

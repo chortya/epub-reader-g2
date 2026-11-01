@@ -8,6 +8,8 @@ export type Chapter = {
 export type Book = {
   title: string;
   chapters: Chapter[];
+  /** dc:creator(s) from the OPF, if any. */
+  author?: string;
   /** Detected language code (hyphenation patterns), e.g. 'en', 'de'. */
   language?: string;
   /** KOReader "binary" document digest of the EPUB file (KOSync). */
