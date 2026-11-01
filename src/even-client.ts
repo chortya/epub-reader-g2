@@ -58,8 +58,12 @@ import {
   MENU_MAIN_MENU,
   MENU_FASTER,
   MENU_SLOWER,
+  MENU_SYNC,
+  withSyncItem,
   type LifecycleState,
 } from './lifecycle';
+import { KosyncError } from './kosync';
+import type { KosyncSession, ReaderLocation } from './kosync-session';
 import { sentenceStartBefore, nextSentenceStart } from './sentences';
 import { measureWidth, FOOTER_INNER_WIDTH } from './text-metrics';
 import { createSplashBridgeAdapter } from './splash-bridge';
@@ -215,6 +219,14 @@ export class EvenEpubClient {
   private clockTickerId: number | null = null;
   private lastMinuteString: string | null = null;
 
+  // KOSync (issue #1): one session per open book, created by the host (main.ts)
+  // only while the user is logged in to a sync server.
+  private kosync: KosyncSession | null = null;
+  public createKosyncSession?: (book: Book, filename: string | null) => KosyncSession | null;
+  // Short-lived footer message (sync results), shown instead of the info text.
+  private footerNotice: { text: string; until: number } | null = null;
+  private footerNoticeTimer: number | null = null;
+
   public onViewChanged?: () => void;
   public onPositionChanged?: (chapterIndex: number, pageIndex: number) => void;
   public onFlowStateChanged?: (isRunning: boolean) => void;
@@ -269,10 +281,12 @@ export class EvenEpubClient {
   ): Promise<void> {
     // Land any pending position under the OLD book's ref before switching.
     await this.persister.flush();
+    this.flushKosync();
     this.stopFlow();
     this.book = book;
     this.currentBookId = bookId ?? null;
     this.currentBookFilename = filename ?? null;
+    this.kosync = this.createKosyncSession?.(book, this.currentBookFilename) ?? null;
     this.persister.setRef({
       title: book.title,
       bookId: this.currentBookId,
@@ -297,6 +311,8 @@ export class EvenEpubClient {
 
     const restoredPaged = await this.restorePagedPosition(book.title);
     const restoredFlow = await this.restoreFlowPosition(book.title);
+
+    const restoredActive = config.readingMode === 'flow' && restoredFlow ? restoredFlow : restoredPaged;
 
     if (config.readingMode === 'flow' && restoredFlow) {
       this.chapterIndex = restoredFlow.chapterIndex;
@@ -337,6 +353,141 @@ export class EvenEpubClient {
     } else {
       await this.showChapterList(false);
     }
+
+    if (this.kosync) {
+      // Background pull: the book opens at the local position immediately.
+      const hadLocal = !!(restoredPaged || restoredFlow);
+      void this.pullKosync(false, hadLocal ? restoredActive?.savedAt ?? null : undefined);
+    }
+  }
+
+  // --- KOSync (issue #1) ---
+
+  public hasKosyncSession(): boolean {
+    return this.kosync !== null;
+  }
+
+  /** Companion-UI "Sync now": same as the glasses menu item. */
+  public async syncKosyncNow(): Promise<void> {
+    await this.pullKosync(true);
+  }
+
+  /** Re-create the open book's session after login/logout in the companion UI. */
+  public refreshKosyncSession(): void {
+    this.flushKosync();
+    this.kosync = this.book ? this.createKosyncSession?.(this.book, this.currentBookFilename) ?? null : null;
+    // The reading menu lists "Sync progress" only with a session: re-declare it.
+    this.readingRenderSig = null;
+  }
+
+  /** Push any pending position without blocking (book switch, backgrounding). */
+  private flushKosync(): void {
+    const session = this.kosync;
+    if (!session) return;
+    session.flush({ keepalive: true }).catch((e) => this.reportKosyncError(e, false));
+  }
+
+  private currentLocation(): ReaderLocation {
+    return { chapterIndex: this.chapterIndex, offset: this.currentOffset() };
+  }
+
+  /**
+   * Pull remote progress. Automatic pulls (book open) only move forward and
+   * never yank the user away if they already turned a page; an interactive
+   * pull (menu) always applies the remote position, or pushes ours if the
+   * server has nothing newer.
+   *
+   * @param localSavedAt undefined = no local position (always adopt remote).
+   */
+  private async pullKosync(interactive: boolean, localSavedAt?: number | null): Promise<void> {
+    const session = this.kosync;
+    const book = this.book;
+    if (!session || !book) return;
+    const before = this.currentLocation();
+    const local = localSavedAt === undefined && !interactive
+      ? null
+      : { location: before, savedAtMs: localSavedAt ?? null };
+    try {
+      const result = await session.pull(local, interactive);
+      if (this.kosync !== session || this.book !== book) return; // book changed meanwhile
+      if (result.decision === 'apply' && result.target) {
+        const now = this.currentLocation();
+        if (!interactive && (now.chapterIndex !== before.chapterIndex || now.offset !== before.offset)) {
+          return; // the user is already reading; don't jump under them
+        }
+        await this.serialGesture(() => this.jumpToLocation(result.target!));
+        await session.markSynced(this.currentLocation());
+        const pct = Math.round((result.remote?.percentage ?? 0) * 100);
+        const from = result.remote?.device ? ` from ${result.remote.device}` : '';
+        this.showFooterNotice(`Synced ${pct}%${from}`);
+        setStatus(`KOReader sync: moved to ${pct}%${from}`);
+        return;
+      }
+      if (interactive) {
+        await session.push(this.currentLocation(), { force: true });
+        const pct = Math.round(session.percentageAt(this.currentLocation()) * 100);
+        this.showFooterNotice(`Sync sent ${pct}%`);
+        setStatus(`KOReader sync: progress sent (${pct}%)`);
+      }
+    } catch (e) {
+      this.reportKosyncError(e, interactive);
+    }
+  }
+
+  private reportKosyncError(e: unknown, visibleOnGlasses: boolean): void {
+    const message = e instanceof KosyncError ? e.message : 'Sync failed';
+    console.warn('KOSync:', e);
+    setStatus(`KOReader sync: ${message}`);
+    if (visibleOnGlasses) this.showFooterNotice(e instanceof KosyncError && e.status === 401 ? 'Sync: log in again' : 'Sync failed');
+  }
+
+  /** Move to a chapter/offset in the current view (bookmark jump, sync). */
+  private async jumpToLocation(target: ReaderLocation): Promise<void> {
+    if (!this.book || target.chapterIndex >= this.chapterPageStarts.length) return;
+    const starts = this.chapterPageStarts[target.chapterIndex] ?? [0];
+    this.chapterIndex = target.chapterIndex;
+    this.pageIndex = pageForOffset(starts, target.offset);
+    const pageText = this.chapterPages[this.chapterIndex]?.[this.pageIndex] ?? '';
+    const pageWords = this.flowPageData[this.chapterIndex]?.[this.pageIndex]?.wordCount ?? 1;
+    this.flowWordIndex = clamp(
+      flowWordForOffset(pageText, Math.max(0, target.offset - (starts[this.pageIndex] ?? 0))),
+      0,
+      Math.max(0, pageWords - 1),
+    );
+    this.librarySelectedIndex = this.chapterIndex;
+    if (this.view === 'flowReading') {
+      await this.showFlowFrame();
+    } else if (this.view === 'reading') {
+      await this.showPage();
+    } else if (this.view === 'chapterList') {
+      // A freshly opened book waiting on its chapter list: open the reading
+      // view at the location (choosing a chapter would restart it at page 1).
+      if (config.readingMode === 'flow') await this.showFlowReading(false);
+      else await this.showPage();
+      resetGestureState();
+    } else {
+      // Menus: only store the position so Continue Reading lands there.
+      if (config.readingMode === 'flow') await this.saveFlowPosition(true, true);
+      else await this.savePagedPosition(true);
+    }
+  }
+
+  /** Show a short message in the reading footer, then restore the info text. */
+  private showFooterNotice(text: string, durationMs = 4000): void {
+    this.footerNotice = { text, until: Date.now() + durationMs };
+    if (this.footerNoticeTimer !== null) window.clearTimeout(this.footerNoticeTimer);
+    this.footerNoticeTimer = window.setTimeout(() => {
+      this.footerNoticeTimer = null;
+      this.footerNotice = null;
+      this.serialGesture(() => this.refreshFooter()).catch(() => {});
+    }, durationMs);
+    // Queued (not awaited) so it never interleaves with a gesture's render.
+    this.serialGesture(() => this.refreshFooter()).catch(() => {});
+  }
+
+  private noticeOr(infoText: string): string {
+    if (this.footerNotice && this.footerNotice.until > Date.now()) return this.footerNotice.text;
+    return infoText;
   }
 
   async applySettings(): Promise<void> {
@@ -406,7 +557,7 @@ export class EvenEpubClient {
    * mark image, in the showWelcome() rebuild path.
    */
   private getWelcomeContainers(): TextContainerProperty[] {
-    const title = 'G2 ePUB Reader';
+    const title = 'ePub Reader';
     const maxChars = 59;
     const titlePad = Math.floor((maxChars - title.length) / 2);
     const centeredTitle = ' '.repeat(Math.max(0, titlePad)) + title;
@@ -486,7 +637,7 @@ export class EvenEpubClient {
       isEventCapture: 1,
     });
 
-    const title = 'G2 ePUB Reader';
+    const title = 'ePub Reader';
     const titlePad = Math.floor((59 - title.length) / 2);
     const titleContainer = new TextContainerProperty({
       xPosition: 0,
@@ -924,9 +1075,9 @@ export class EvenEpubClient {
     const hasBottomBar = config.statusBarPosition === 'bottom';
     const label = formatStatusLine({
       now: new Date(),
-      infoText,
+      infoText: this.noticeOr(infoText),
       maxChars: 59,
-        maxPx: FOOTER_INNER_WIDTH,
+      maxPx: FOOTER_INNER_WIDTH,
       progress,
     });
 
@@ -1696,6 +1847,7 @@ export class EvenEpubClient {
         this.stopClockTicker();
         if (this.view === 'flowReading') await this.saveFlowPosition(true, true);
         else await this.savePagedPosition(true);
+        this.flushKosync();
       }
       if (r.effects.runPendingMenuAction && wasPending !== null) {
         await this.dispatchMenuAction(wasPending);
@@ -1757,6 +1909,11 @@ export class EvenEpubClient {
       case MENU_GO_BOOKMARK:
         await this.goToBookmark();
         break;
+      case MENU_SYNC:
+        if (this.isFlowRunning) this.toggleFlow();
+        this.showFooterNotice('Syncing...', 10_000);
+        await this.pullKosync(true);
+        break;
     }
   }
 
@@ -1776,21 +1933,10 @@ export class EvenEpubClient {
         setStatus('Bookmark no longer valid');
         return;
       }
-      const starts = this.chapterPageStarts[pos.chapterIndex] ?? [0];
-      this.chapterIndex = pos.chapterIndex;
-      this.pageIndex = pageForOffset(starts, typeof pos.offset === 'number' ? pos.offset : 0);
-      if (this.view === 'flowReading') {
-        const pageText = this.chapterPages[this.chapterIndex]?.[this.pageIndex] ?? '';
-        const pageWords = this.flowPageData[this.chapterIndex]?.[this.pageIndex]?.wordCount ?? 1;
-        this.flowWordIndex = clamp(
-          flowWordForOffset(pageText, Math.max(0, (pos.offset ?? 0) - starts[this.pageIndex])),
-          0,
-          Math.max(0, pageWords - 1),
-        );
-        await this.showFlowFrame();
-      } else {
-        await this.showPage();
-      }
+      await this.jumpToLocation({
+        chapterIndex: pos.chapterIndex,
+        offset: typeof pos.offset === 'number' ? pos.offset : 0,
+      });
     } catch (e) {
       console.warn('Bookmark jump failed:', e);
       setStatus('Bookmark jump failed');
@@ -1823,7 +1969,8 @@ export class EvenEpubClient {
   /** Build the contextual-menu payload for the current reading view. */
   private buildMenuObject(): MenuContainerProperty | undefined {
     if (this.view !== 'reading' && this.view !== 'flowReading') return undefined;
-    const items = this.view === 'flowReading' ? FLOW_MENU_ITEMS : PAGED_MENU_ITEMS;
+    let items = this.view === 'flowReading' ? FLOW_MENU_ITEMS : PAGED_MENU_ITEMS;
+    if (this.kosync) items = withSyncItem(items);
     return new MenuContainerProperty({
       menuItems: items.map((m) => new MenuItemProperty({ itemID: m.id, itemName: m.label })),
     });
@@ -2110,6 +2257,7 @@ export class EvenEpubClient {
     this.stopClockTicker();
     if (this.view === 'flowReading') await this.saveFlowPosition(true, true);
     else await this.savePagedPosition(true);
+    this.flushKosync();
     try { await this.bridge.shutDownPageContainer(); } catch { /* */ }
   }
 
@@ -2148,6 +2296,13 @@ export class EvenEpubClient {
     const current = this.formatHHMM(new Date());
     if (current === this.lastMinuteString) return;
     this.lastMinuteString = current;
+    await this.refreshFooter();
+  }
+
+  /** Re-render only the reading footer, in place (flicker-free). */
+  private async refreshFooter(): Promise<void> {
+    if (this.view !== 'reading' && this.view !== 'flowReading') return;
+    if (config.statusBarPosition !== 'bottom') return;
 
     // §7.4 invariant: upgrade container 2 in place. Both showPage and
     // showFlowFrame render the footer as container ID 2 (names 'footer' and
@@ -2178,7 +2333,7 @@ export class EvenEpubClient {
         pageIndex: this.pageIndex,
         totalChapters: this.book.chapters.length,
       });
-      return formatStatusLine({ now: new Date(), infoText, maxChars: 59, maxPx: FOOTER_INNER_WIDTH, progress });
+      return formatStatusLine({ now: new Date(), infoText: this.noticeOr(infoText), maxChars: 59, maxPx: FOOTER_INNER_WIDTH, progress });
     }
     // flowReading
     const pageData = this.flowPageData[this.chapterIndex]?.[this.pageIndex];
@@ -2193,8 +2348,9 @@ export class EvenEpubClient {
       chapterTotalPages,
       flowSpeedWpm: config.flowSpeedWpm,
       isFlowRunning: this.isFlowRunning,
+      paceWpm: this.getFlowPaceWpm(),
     });
-    return formatStatusLine({ now: new Date(), infoText, maxChars: 59, maxPx: FOOTER_INNER_WIDTH, progress });
+    return formatStatusLine({ now: new Date(), infoText: this.noticeOr(infoText), maxChars: 59, maxPx: FOOTER_INNER_WIDTH, progress });
   }
 
   // --- Persistence ---
@@ -2209,8 +2365,10 @@ export class EvenEpubClient {
       v: 2,
       offset: typeof offset === 'number' ? offset : 0,
       paginationVersion: PAGINATION_VERSION,
+      savedAt: Date.now(),
     };
     this.persister.savePaged(pos, { immediate });
+    this.kosync?.schedulePush({ chapterIndex: pos.chapterIndex, offset: pos.offset! }, (e) => this.reportKosyncError(e, false));
     this.onPositionChanged?.(this.chapterIndex, this.pageIndex);
   }
 
@@ -2243,6 +2401,7 @@ export class EvenEpubClient {
         return {
           chapterIndex: pos.chapterIndex,
           pageIndex: Math.min(page, Math.max(0, starts.length - 1)),
+          savedAt: pos.savedAt,
         };
       }
     }
@@ -2266,8 +2425,10 @@ export class EvenEpubClient {
       v: 2,
       offset: pageStart + flowOffsetForWord(pageText, this.flowWordIndex),
       paginationVersion: PAGINATION_VERSION,
+      savedAt: Date.now(),
     };
     this.persister.saveFlow(pos, persistToBridge, { immediate });
+    this.kosync?.schedulePush({ chapterIndex: pos.chapterIndex, offset: pos.offset! }, (e) => this.reportKosyncError(e, false));
     this.onPositionChanged?.(this.chapterIndex, this.pageIndex);
   }
 
@@ -2298,6 +2459,7 @@ export class EvenEpubClient {
           chapterIndex: pos.chapterIndex,
           pageIndex: page,
           wordIndex: Math.min(flowWordForOffset(pageText, rel), Math.max(0, pageWords - 1)),
+          savedAt: pos.savedAt,
         };
       }
     }
@@ -2310,6 +2472,7 @@ export class EvenEpubClient {
         chapterIndex: pos.chapterIndex,
         pageIndex,
         wordIndex: Math.min(wordIndex, Math.max(0, (chapterPages[pageIndex]?.wordCount ?? 1) - 1)),
+        savedAt: pos.savedAt,
       };
     }
     return null;

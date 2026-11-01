@@ -23,7 +23,7 @@ export type LifecycleState = 'active' | 'overlayOpen' | 'backgrounded';
 export type LifecycleEvent =
   | { kind: 'foregroundEnter' }
   | { kind: 'foregroundExit' }
-  | { kind: 'menuClick' }
+  | { kind: 'menuClick'; itemID: number }
   | { kind: 'systemExit' };
 
 export interface LifecycleEffects {
@@ -108,6 +108,7 @@ export const MENU_GO_BOOKMARK = 4;
 export const MENU_MAIN_MENU = 5;
 export const MENU_FASTER = 6;
 export const MENU_SLOWER = 7;
+export const MENU_SYNC = 8;
 
 /** Static verb labels (≤32 UTF-8 bytes; labels never update without re-declare). */
 export const PAGED_MENU_ITEMS: Array<{ id: number; label: string }> = [
@@ -127,3 +128,11 @@ export const FLOW_MENU_ITEMS: Array<{ id: number; label: string }> = [
   { id: MENU_GO_BOOKMARK, label: 'Go to bookmark' },
   { id: MENU_MAIN_MENU, label: 'Main menu' },
 ];
+
+/** Reading menu with "Sync progress" before "Main menu" (KOSync logged in). */
+export function withSyncItem(items: Array<{ id: number; label: string }>): Array<{ id: number; label: string }> {
+  const out = items.filter((m) => m.id !== MENU_SYNC);
+  const at = out.findIndex((m) => m.id === MENU_MAIN_MENU);
+  out.splice(at < 0 ? out.length : at, 0, { id: MENU_SYNC, label: 'Sync progress' });
+  return out;
+}

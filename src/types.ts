@@ -1,11 +1,17 @@
 export type Chapter = {
   title: string;
   text: string;
+  /** Index of the source item in the OPF <spine> (KOReader DocFragment - 1). */
+  spineIndex?: number;
 };
 
 export type Book = {
   title: string;
   chapters: Chapter[];
+  /** KOReader "binary" document digest of the EPUB file (KOSync). */
+  partialMd5?: string;
+  /** Raw XHTML of a chapter's source document (KOSync position mapping). */
+  loadChapterXhtml?: (chapterIndex: number) => Promise<string>;
 };
 
 // `library` was previously overloaded to mean both the no-book welcome screen
@@ -38,6 +44,8 @@ export type ReadingPosition = {
   v?: number;
   offset?: number;
   paginationVersion?: number;
+  /** Wall-clock save time (ms); lets KOSync tell which side is newer. */
+  savedAt?: number;
 };
 
 export type CachedBookMeta = {

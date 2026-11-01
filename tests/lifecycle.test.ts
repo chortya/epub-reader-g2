@@ -5,6 +5,9 @@ import {
   reduceLifecycle,
   PAGED_MENU_ITEMS,
   FLOW_MENU_ITEMS,
+  MENU_MAIN_MENU,
+  MENU_SYNC,
+  withSyncItem,
 } from '../src/lifecycle.ts';
 
 test('active + EXIT backgrounds (pause+flush); re-ENTER restores view', () => {
@@ -62,10 +65,19 @@ test('SYSTEM_EXIT shuts down from any state', () => {
 
 test('menu payloads: unique non-zero ids, verb labels within 32 UTF-8 bytes', () => {
   const utf8 = (s: string) => new TextEncoder().encode(s).length;
-  for (const menu of [PAGED_MENU_ITEMS, FLOW_MENU_ITEMS]) {
+  for (const menu of [PAGED_MENU_ITEMS, FLOW_MENU_ITEMS, withSyncItem(PAGED_MENU_ITEMS), withSyncItem(FLOW_MENU_ITEMS)]) {
+    assert.ok(menu.length <= 10, 'native menu holds at most 10 items');
     const ids = menu.map((m) => m.id);
     assert.equal(new Set(ids).size, ids.length, 'ids unique');
     for (const id of ids) assert.ok(id > 0, 'ids non-zero (protobuf uint32, 0 reserved)');
     for (const item of menu) assert.ok(utf8(item.label) <= 32, `${item.label} exceeds 32 bytes`);
   }
+});
+
+test('withSyncItem inserts "Sync progress" once, just before Main menu', () => {
+  const menu = withSyncItem(withSyncItem(PAGED_MENU_ITEMS));
+  const ids = menu.map((m) => m.id);
+  assert.equal(ids.filter((id) => id === MENU_SYNC).length, 1);
+  assert.equal(ids.indexOf(MENU_SYNC) + 1, ids.indexOf(MENU_MAIN_MENU));
+  assert.equal(PAGED_MENU_ITEMS.some((m) => m.id === MENU_SYNC), false, 'base menu not mutated');
 });

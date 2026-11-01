@@ -1,0 +1,8 @@
+# Cloudflare Worker for the ePub Reader app (see README.md).
+name = "epub-reader-relay"
+main = "src/worker.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+# Optional: serve from your own domain instead of *.workers.dev.
+# routes = [{ pattern = "relay.example.com", custom_domain = true }]

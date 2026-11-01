@@ -71,24 +71,36 @@ test('app.json min_sdk_version matches installed @evenrealities/even_hub_sdk', (
   );
 });
 
-test('app.json network whitelist covers all hardcoded external hosts in src', () => {
+test('app.json network whitelist lists bare https origins only', () => {
+  // Even Hub matches full origins (no wildcards, no paths). Gutenberg and the
+  // KOSync servers are reached through the relay (src/relay.ts), whose origin
+  // scripts/check-release.mjs requires to be the whitelist at pack time.
   const app = readJson('app.json');
   const networkPerm = (app.permissions ?? []).find((p: any) => p.name === 'network');
   const whitelist: string[] = networkPerm?.whitelist ?? [];
-
-  const hostsToCheck = [
-    { host: 'gutenberg.org', src: 'src/gutenberg.ts' },
-  ];
-
-  for (const { host, src } of hostsToCheck) {
-    const fullPath = join(repoRoot, src);
-    if (!existsSync(fullPath)) continue;
-    const content = readFileSync(fullPath, 'utf8');
-    if (!content.includes(host) && !content.match(new RegExp(host.replace(/\./g, '\\.')))) continue;
-    const matched = whitelist.some((entry) => entry.includes(host));
-    assert.ok(
-      matched,
-      `app.json network whitelist must include "${host}" — ${src} makes requests to it.`,
-    );
+  assert.ok(whitelist.length > 0, 'network permission needs a whitelist');
+  for (const entry of whitelist) {
+    const url = new URL(entry);
+    assert.equal(url.protocol, 'https:', entry);
+    assert.equal(url.origin, entry, `${entry} must be a bare origin`);
   }
+  assert.ok(!whitelist.includes('https://evenhub.evenrealities.com'), 'unused origin');
+  assert.ok(networkPerm.desc.length >= 1 && networkPerm.desc.length <= 300, 'desc must be 1-300 chars');
+});
+
+test('app.json listing fields respect Even Hub limits', () => {
+  const app = readJson('app.json');
+  assert.ok(app.name.length >= 1 && app.name.length <= 20, 'name 1-20 chars');
+  assert.ok(!/even/i.test(app.name), 'name must not contain "Even"');
+  assert.match(app.package_id, /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/);
+  assert.ok(app.tagline.length <= 50, 'tagline <= 50 chars');
+  assert.ok(app.description.length <= 2000, 'description <= 2000 chars');
+});
+
+test('glasses and companion UI show the app.json name', () => {
+  const app = readJson('app.json');
+  const client = readFileSync(join(repoRoot, 'src/even-client.ts'), 'utf8');
+  const html = readFileSync(join(repoRoot, 'index.html'), 'utf8');
+  assert.ok(client.includes(`'${app.name}'`), 'glasses title must match app.json name');
+  assert.ok(html.includes(`<h1>${app.name} `), 'companion header must match app.json name');
 });

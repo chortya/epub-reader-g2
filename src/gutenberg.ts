@@ -1,18 +1,34 @@
+import { RELAY_ORIGIN } from './relay';
+
 export interface GutenbergBook {
     id: string;
     title: string;
 }
 
+// Dev-only fallback when no relay is configured. Packaged builds must set
+// VITE_RELAY_ORIGIN: public CORS proxies are unreliable and not traceable to
+// the developer (Even Hub submission rules).
+const DEV_CORS_PROXY = 'https://api.codetabs.com/v1/proxy?quest=';
+
+function devProxied(url: string): string {
+    return DEV_CORS_PROXY + encodeURIComponent(url);
+}
+
 export async function fetchTopGutenbergBooks(): Promise<GutenbergBook[]> {
-    const url = 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent('https://www.gutenberg.org/browse/scores/top');
+    const url = RELAY_ORIGIN
+        ? `${RELAY_ORIGIN}/gutenberg/top`
+        : devProxied('https://www.gutenberg.org/browse/scores/top');
     const response = await fetch(url);
     if (!response.ok) {
         throw new Error('Failed to fetch from Project Gutenberg');
     }
     const text = await response.text();
+    return parseTopBooksHtml(text);
+}
 
+export function parseTopBooksHtml(html: string): GutenbergBook[] {
     const parser = new DOMParser();
-    const doc = parser.parseFromString(text, 'text/html');
+    const doc = parser.parseFromString(html, 'text/html');
 
     const headers = Array.from(doc.querySelectorAll('h2'));
     const targetHeader = headers.find(h => h.id === 'books-last1' || (h.textContent && h.textContent.includes('Top 100 EBooks yesterday')));
@@ -39,17 +55,20 @@ export async function fetchTopGutenbergBooks(): Promise<GutenbergBook[]> {
 }
 
 export async function downloadGutenbergEpub(id: string): Promise<ArrayBuffer> {
-    const epubUrls = [
-        `https://www.gutenberg.org/ebooks/${id}.epub.noimages`,
-        `https://www.gutenberg.org/ebooks/${id}.epub.images`,
-        `https://www.gutenberg.org/files/${id}/${id}-h.zip`, // fallback if they're weird
-        `https://www.gutenberg.org/cache/epub/${id}/pg${id}-images.epub`,
-        `https://www.gutenberg.org/cache/epub/${id}/pg${id}.epub`
-    ];
+    if (!/^\d+$/.test(id)) throw new Error('Invalid Gutenberg book id');
+    if (RELAY_ORIGIN) {
+        const res = await fetch(`${RELAY_ORIGIN}/gutenberg/epub/${id}`);
+        if (res.ok) return res.arrayBuffer();
+        throw new Error(res.status === 404 ? 'EPUB not found for this book' : `Download failed (HTTP ${res.status})`);
+    }
 
+    const epubUrls = [
+        `https://www.gutenberg.org/cache/epub/${id}/pg${id}.epub`,
+        `https://www.gutenberg.org/cache/epub/${id}/pg${id}-images-3.epub`,
+        `https://www.gutenberg.org/cache/epub/${id}/pg${id}-images.epub`,
+    ];
     for (const directUrl of epubUrls) {
-        const url = 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(directUrl);
-        const res = await fetch(url);
+        const res = await fetch(devProxied(directUrl));
         if (res.ok) {
             return res.arrayBuffer();
         }

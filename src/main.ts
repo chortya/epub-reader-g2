@@ -18,6 +18,18 @@ import {
 } from './constants';
 import type { CachedBookMeta } from './types';
 import { matchesBookQuery } from './book-selection';
+import {
+  KosyncClient,
+  KosyncError,
+  isKosyncLoggedIn,
+  loadKosyncSettings,
+  normalizeServerUrl,
+  saveKosyncSettings,
+  type KosyncSettings,
+} from './kosync';
+import { KosyncSession } from './kosync-session';
+import { md5Hex } from './md5';
+import { RELAY_ORIGIN } from './relay';
 
 import { MockBridge } from './mock-bridge';
 import { version as APP_VERSION } from '../package.json';
@@ -58,6 +70,7 @@ async function main() {
   }
 
   let client: EvenEpubClient | null = null;
+  let kosyncSettings: KosyncSettings | null = null;
 
   if (bridge) {
     activateKeepAlive();
@@ -70,6 +83,14 @@ async function main() {
     await loadSettingsFromBridge(bridge as any);
 
     client = new EvenEpubClient(bridge as any);
+
+    // KOSync: settings load before any book opens so the first open can pull.
+    kosyncSettings = await loadKosyncSettings(bridge as any, window.localStorage);
+    client.createKosyncSession = (book, filename) => {
+      const s = kosyncSettings;
+      if (!isKosyncLoggedIn(s)) return null;
+      return new KosyncSession({ book, filename, settings: s, client: makeKosyncClient(s) });
+    };
 
     // Register onLaunchSource BEFORE client.init() so runStartup's pickInitialView
     // decision can consult the launch intent (per Codex #1 / design §3.1a).
@@ -129,7 +150,7 @@ async function main() {
     client.onPositionChanged = (ch, pg) => {
       renderReaderControls(client as EvenEpubClient);
       const items = document.querySelectorAll('#library-container .lib-item');
-      const bookId = client.getBookId();
+      const bookId = client?.getBookId();
       if (!bookId) return;
       for (const item of items) {
         if ((item as HTMLElement).dataset.bookId === bookId) {
@@ -228,6 +249,8 @@ async function main() {
   }
 
   setupCollapsible('gut-toggle', 'gut-body');
+  setupCollapsible('sync-toggle', 'sync-body');
+  setupKosyncUi(bridge);
   setupCollapsible('settings-toggle', 'settings-body');
 
   const toggleSettingsBtn = document.getElementById('toggle-settings');
@@ -419,6 +442,132 @@ async function main() {
     } catch (e) {
       console.error('Error loading library:', e);
     }
+  }
+
+  function makeKosyncClient(s: KosyncSettings, username = s.username, userkey = s.userkey): KosyncClient {
+    return new KosyncClient({ server: s.server, username, userkey, relayOrigin: RELAY_ORIGIN });
+  }
+
+  function setupKosyncUi(storageBridge: any) {
+    const serverEl = document.getElementById('sync-server') as HTMLInputElement | null;
+    const userEl = document.getElementById('sync-username') as HTMLInputElement | null;
+    const passEl = document.getElementById('sync-password') as HTMLInputElement | null;
+    const checksumEl = document.getElementById('sync-checksum') as HTMLSelectElement | null;
+    const loginBtn = document.getElementById('sync-login-btn') as HTMLButtonElement | null;
+    const registerBtn = document.getElementById('sync-register-btn') as HTMLButtonElement | null;
+    const syncNowBtn = document.getElementById('sync-now-btn') as HTMLButtonElement | null;
+    const logoutBtn = document.getElementById('sync-logout-btn') as HTMLButtonElement | null;
+    const outActions = document.getElementById('sync-actions-out');
+    const inActions = document.getElementById('sync-actions-in');
+    const stateEl = document.getElementById('sync-state');
+    if (!serverEl || !userEl || !passEl || !checksumEl || !loginBtn || !registerBtn
+      || !syncNowBtn || !logoutBtn || !outActions || !inActions || !stateEl) return;
+
+    const render = (message?: string) => {
+      const s = kosyncSettings;
+      if (!s) {
+        stateEl.textContent = 'Not available in this mode.';
+        return;
+      }
+      const loggedIn = isKosyncLoggedIn(s);
+      serverEl.value = s.server;
+      userEl.value = s.username;
+      checksumEl.value = s.checksum;
+      serverEl.disabled = loggedIn;
+      userEl.disabled = loggedIn;
+      const passRow = passEl.closest('.s-row') as HTMLElement | null;
+      if (passRow) passRow.style.display = loggedIn ? 'none' : '';
+      outActions.style.display = loggedIn ? 'none' : 'flex';
+      inActions.style.display = loggedIn ? 'flex' : 'none';
+      stateEl.textContent = message ?? (loggedIn
+        ? `Logged in as ${s.username}. Syncs when a book opens, while reading, and via "Sync progress" in the glasses menu.`
+        : 'Not logged in.');
+    };
+
+    const persist = async (next: KosyncSettings, message?: string) => {
+      await saveKosyncSettings(next, storageBridge, window.localStorage);
+      kosyncSettings = next;
+      client?.refreshKosyncSession();
+      render(message);
+    };
+
+    const readForm = (): { server: string; username: string; password: string } | null => {
+      const server = normalizeServerUrl(serverEl.value);
+      const username = userEl.value.trim();
+      const password = passEl.value;
+      if (!server) {
+        render('Enter the server address, e.g. https://sync.koreader.rocks');
+        return null;
+      }
+      if (!username || !password) {
+        render('Enter a username and password.');
+        return null;
+      }
+      return { server, username, password };
+    };
+
+    const busy = async (button: HTMLButtonElement, work: () => Promise<void>) => {
+      button.disabled = true;
+      try {
+        await work();
+      } catch (e) {
+        const msg = e instanceof KosyncError ? e.message : (e instanceof Error ? e.message : String(e));
+        render(msg);
+      } finally {
+        button.disabled = false;
+      }
+    };
+
+    loginBtn.addEventListener('click', () => busy(loginBtn, async () => {
+      const s = kosyncSettings;
+      const form = readForm();
+      if (!s || !form) return;
+      const userkey = md5Hex(form.password);
+      render('Logging in...');
+      const ok = await makeKosyncClient({ ...s, server: form.server }, form.username, userkey).authorize();
+      if (!ok) {
+        render('Wrong username or password.');
+        return;
+      }
+      passEl.value = '';
+      await persist({ ...s, server: form.server, username: form.username, userkey });
+    }));
+
+    registerBtn.addEventListener('click', () => busy(registerBtn, async () => {
+      const s = kosyncSettings;
+      const form = readForm();
+      if (!s || !form) return;
+      render('Creating account...');
+      const created = await makeKosyncClient({ ...s, server: form.server }, '', '').register(form.username, form.password);
+      if (!created) {
+        render('That username is already taken on this server.');
+        return;
+      }
+      passEl.value = '';
+      await persist({ ...s, server: form.server, username: form.username, userkey: md5Hex(form.password) });
+    }));
+
+    logoutBtn.addEventListener('click', () => busy(logoutBtn, async () => {
+      if (!kosyncSettings) return;
+      await persist({ ...kosyncSettings, userkey: '' }, 'Logged out.');
+    }));
+
+    syncNowBtn.addEventListener('click', () => busy(syncNowBtn, async () => {
+      if (!client?.hasKosyncSession()) {
+        render('Open a book to sync its progress.');
+        return;
+      }
+      await client.syncKosyncNow();
+      render();
+    }));
+
+    checksumEl.addEventListener('change', () => {
+      if (!kosyncSettings) return;
+      const checksum = checksumEl.value === 'filename' ? 'filename' : 'binary';
+      persist({ ...kosyncSettings, checksum }).catch((e) => render(String(e)));
+    });
+
+    render();
   }
 
   function setupCollapsible(headerId: string, bodyId: string) {
