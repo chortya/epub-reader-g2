@@ -98,7 +98,7 @@ npm run qr:sim
 ## Display Specs
 
 Optimized for the Even G2 display: **576×288 px**, using native text rendering.
-- **Layout**: ~59 characters per line in standard mode, fewer for right-side progress bar or wider Cyrillic glyphs.
+- **Layout**: lines wrap by pixel width using the firmware's own font metrics, so they fill the 564 px text area without the glasses re-wrapping them.
 - **Hyphenation**: English, German, Spanish, French, Dutch, Polish, Portuguese, Russian, Ukrainian.
 
 ## Startup Screen

@@ -294,7 +294,15 @@ string[]  (one entry per page)
 
 ### 8.1 Paginator
 
-- `maxChars` is 59 for Latin glyphs, 48 for wide Cyrillic glyphs.
+- Lines wrap by **pixel width** (v1.6.0), measured with the firmware glyph
+  metrics from `@evenrealities/pretext` (`PIXEL_MEASURE`). The limit is
+  `READING_LINE_LIMIT_PX` = 560: the 564 px inner width minus a rounding
+  margin, so the firmware never re-wraps a line.
+- Before 1.6.0, wrapping used a fixed 59 characters (48 for Cyrillic). The
+  font is proportional, so those lines ended at about 510 px. That method is
+  still available by passing a character count, which the tests use.
+- Saved positions are character offsets into the chapter text, so a change
+  in wrapping doesn't move them, and `PAGINATION_VERSION` stays 1.
 - `maxLines` comes from `getTextLayout()` — see §9.
 - Hyphenation is language-aware and applies either at end-of-line (preferred
   break inside a word that doesn't fit) or across a single word longer than

@@ -36,6 +36,16 @@ All notable changes to this project will be documented in this file.
   for simulator automation and is compiled out of production builds.
 
 ### Changed
+- **Lines now fill the display width.**
+  - Before: the paginator wrapped at a fixed 59 characters, but the G2 font is
+    proportional, so lines ended at about 510 px of the 564 px text area.
+    Hyphenation rarely triggered, and the right edge looked ragged.
+  - Now: lines are wrapped by pixel width with the firmware glyph metrics
+    (`@evenrealities/pretext`), and every line is checked to fit without the
+    firmware re-wrapping it.
+  - Result: the median gap at the right edge of lines within a paragraph drops
+    from 78 px to 20 px, and there are about 10 % fewer pages.
+  - Saved positions are character offsets, so they still resume exactly.
 - **One app name, "ePub Reader"**, in app.json, on the glasses and in the
   companion UI. Before this it was "epub-reader", "G2 ePUB Reader" and
   "ePub Reader".

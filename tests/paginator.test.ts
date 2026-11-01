@@ -267,3 +267,28 @@ test('flow offset helpers round-trip wordIndex through page text', async () => {
   assert.equal(flowWordForOffset(page, 15), 3, 'offset at word start counts preceding words');
   assert.equal(flowWordForOffset(page, 999), 4);
 });
+
+test('pixel wrapping: lines fill the 564 px text width but never make the firmware re-wrap', async () => {
+  const { paginateText, READING_LINE_LIMIT_PX } = await import('../src/paginator.ts');
+  const { getTextWidth, measureTextWrap } = await import('../src/text-metrics.ts');
+  const para = 'They were indeed a queer-looking party that assembled on the bank, the birds with draggled feathers, the animals with their fur clinging close to them, and all dripping wet, cross, and uncomfortable. The first question of course was, how to get dry again: they had a consultation about this, and after a few minutes it seemed quite natural to Alice to find herself talking familiarly with them, as if she had known them all her life.';
+  const text = Array.from({ length: 6 }, () => para).join('\n');
+  const lines = paginateText(text, undefined, 9).flatMap((p) => p.split('\n')).filter((l) => l.length > 0);
+  for (const line of lines) {
+    assert.ok(getTextWidth(line) <= READING_LINE_LIMIT_PX, `${getTextWidth(line)}px: ${line}`);
+    assert.equal(measureTextWrap(line, 564).lineCount, 1, line);
+  }
+  // Greedy fill: the next word never fits on the previous line.
+  const charLines = paginateText(text, 59, 9).flatMap((p) => p.split('\n')).filter((l) => l.length > 0);
+  assert.ok(lines.length < charLines.length, `pixel ${lines.length} vs chars ${charLines.length} lines`);
+});
+
+test('pixel wrapping: an unbreakable token longer than a line is split to fit', async () => {
+  const { paginateText, READING_LINE_LIMIT_PX } = await import('../src/paginator.ts');
+  const { getTextWidth } = await import('../src/text-metrics.ts');
+  const url = 'https://example.org/' + 'abcdefghij'.repeat(12);
+  const lines = paginateText(`see ${url} here`, undefined, 9).flatMap((p) => p.split('\n'));
+  assert.ok(lines.length >= 3);
+  for (const line of lines) assert.ok(getTextWidth(line) <= READING_LINE_LIMIT_PX, line);
+  assert.equal(lines.join('').replace(/-(?=.)/g, '').includes('abcdefghij'), true);
+});

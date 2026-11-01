@@ -1,5 +1,6 @@
 import { config, getTextLayout } from './constants.ts';
 import type Hypher from 'hypher';
+import { getTextWidth, READING_INNER_WIDTH } from './text-metrics.ts';
 
 let hyphenator: Hypher | null = null;
 let wideGlyphs = false;
@@ -9,22 +10,49 @@ export function setHyphenator(h: Hypher): void {
   hyphenator = h;
 }
 
-/** Flag that the book uses a script with wider glyphs (Cyrillic) */
+/**
+ * Flag that the book uses a script with wider glyphs (Cyrillic). Only the
+ * legacy character-count measure uses it; pixel wrapping measures glyphs.
+ */
 export function setWideGlyphs(wide: boolean): void {
   wideGlyphs = wide;
 }
 
+/** How wide a line is, and how wide it may be. */
+export type LineMeasure = { width: (line: string) => number; limit: number };
+
+/**
+ * Widest line we emit, in px. The reading container is 576 px wide with 6 px
+ * padding (564 px of text). The firmware wraps any longer line itself, which
+ * would push a line off the page, so keep a small margin for rounding.
+ */
+export const READING_LINE_LIMIT_PX = READING_INNER_WIDTH - 4;
+
+/** Default: firmware glyph metrics (the G2 font is proportional). */
+export const PIXEL_MEASURE: LineMeasure = { width: getTextWidth, limit: READING_LINE_LIMIT_PX };
+
+function charMeasure(maxChars: number): LineMeasure {
+  return { width: (line) => line.length, limit: maxChars };
+}
+
+function resolveMeasure(measure: number | LineMeasure | undefined): LineMeasure {
+  if (typeof measure === 'number') return charMeasure(measure);
+  return measure ?? PIXEL_MEASURE;
+}
+
 /**
  * Split chapter text into fixed-size pages.
- * Word-wraps at character count + end-of-line hyphenation.
- * When `maxLines` is omitted it's derived from the current text-height crop.
+ * Word-wraps to the measured line width + end-of-line hyphenation.
+ * `measure` is a LineMeasure, or a character count (legacy/tests); default
+ * is pixel-accurate. When `maxLines` is omitted it's derived from the
+ * current text-height crop.
  */
 export function paginateText(
   text: string,
-  maxChars = wideGlyphs ? 48 : 59,
+  measure?: number | LineMeasure,
   maxLines = getTextLayout().maxLines,
 ): string[] {
-  return paginateTextWithOffsets(text, maxChars, maxLines).pages;
+  return paginateTextWithOffsets(text, measure, maxLines).pages;
 }
 
 export interface PaginatedChapter {
@@ -33,24 +61,29 @@ export interface PaginatedChapter {
   pageStarts: number[];
 }
 
-/** Bump when the pagination algorithm/geometry changes meaningfully (plan §5). */
+/**
+ * Bump when the pagination algorithm/geometry changes meaningfully (plan §5).
+ * Saved offsets index the chapter text, not pages, so they stay exact across
+ * re-wrapping (v1.6.0 pixel wrapping kept 1); bump only if offsets change
+ * meaning (e.g. different text extraction).
+ */
 export const PAGINATION_VERSION = 1;
 
 /**
  * paginateText plus per-page source offsets. Offsets let a saved position
- * survive repagination (text-height changes, future pixel-accurate wrapping):
+ * survive repagination (text-height changes, pixel-accurate wrapping):
  * save the page's start offset, restore by finding the page containing it.
  */
 export function paginateTextWithOffsets(
   text: string,
-  maxChars = wideGlyphs ? 48 : 59,
+  measure?: number | LineMeasure,
   maxLines = getTextLayout().maxLines,
 ): PaginatedChapter {
   if (!text || text.trim().length === 0) {
     return { pages: ['(empty)'], pageStarts: [0] };
   }
 
-  const wrapped = wordWrapWithOffsets(text, maxChars);
+  const wrapped = wordWrapWithOffsets(text, resolveMeasure(measure));
 
   const pages: string[] = [];
   const pageStarts: number[] = [];
@@ -64,6 +97,11 @@ export function paginateTextWithOffsets(
   }
 
   return pages.length > 0 ? { pages, pageStarts } : { pages: ['(empty)'], pageStarts: [0] };
+}
+
+/** Legacy character budget (kept for callers that still think in chars). */
+export function defaultMaxChars(): number {
+  return wideGlyphs ? 48 : 59;
 }
 
 /**
@@ -87,7 +125,7 @@ interface WrappedLine {
   start: number;
 }
 
-function wordWrapWithOffsets(text: string, maxChars: number): WrappedLine[] {
+function wordWrapWithOffsets(text: string, measure: LineMeasure): WrappedLine[] {
   const lines: WrappedLine[] = [];
   let cursor = 0;
 
@@ -99,7 +137,7 @@ function wordWrapWithOffsets(text: string, maxChars: number): WrappedLine[] {
       cursor += para.length + 1;
       continue;
     }
-    wrapParagraphWithOffsets(trimmed, maxChars, lines, paraStart);
+    wrapParagraphWithOffsets(trimmed, measure, lines, paraStart);
     cursor += para.length + 1;
   }
 
@@ -108,10 +146,11 @@ function wordWrapWithOffsets(text: string, maxChars: number): WrappedLine[] {
 
 function wrapParagraphWithOffsets(
   text: string,
-  maxChars: number,
+  measure: LineMeasure,
   lines: WrappedLine[],
   paraStart: number,
 ): void {
+  const fits = (line: string) => measure.width(line) <= measure.limit;
   const words = text.split(/( +)/);
   let currentLine = '';
   let currentLineStart = paraStart;
@@ -131,7 +170,7 @@ function wrapParagraphWithOffsets(
 
     const testLine = currentLine.length > 0 ? currentLine + word : word;
 
-    if (testLine.length <= maxChars) {
+    if (fits(testLine)) {
       if (currentLine.length === 0) currentLineStart = cursor;
       currentLine = testLine;
       cursor += word.length;
@@ -140,8 +179,8 @@ function wrapParagraphWithOffsets(
 
     // Word doesn't fit. Try hyphenation on current line.
     if (config.hyphenation && hyphenator && word.length >= 5) {
-      const remaining = maxChars - currentLine.length;
-      const hyphenated = tryHyphenate(word, remaining);
+      const prefix = currentLine;
+      const hyphenated = tryHyphenate(word, (head) => fits(prefix + head + '-'));
       if (hyphenated) {
         if (currentLine.length === 0) currentLineStart = cursor;
         currentLine += hyphenated.head + '-';
@@ -160,13 +199,13 @@ function wrapParagraphWithOffsets(
     }
 
     // If word is longer than a full line, hyphenate across lines
-    if (word.length > maxChars) {
+    if (!fits(word)) {
       let rest = word;
       let restStart = cursor;
       currentLineStart = cursor;
-      while (rest.length > maxChars) {
+      while (!fits(rest)) {
         if (config.hyphenation && hyphenator) {
-          const hyp = tryHyphenate(rest, maxChars);
+          const hyp = tryHyphenate(rest, (head) => fits(head + '-'));
           if (hyp) {
             lines.push({ text: hyp.head + '-', start: restStart });
             rest = hyp.tail;
@@ -175,9 +214,12 @@ function wrapParagraphWithOffsets(
             continue;
           }
         }
-        const slice = rest.slice(0, maxChars - 1);
+        // Hard break: the longest prefix that fits with a trailing '-'.
+        let cut = Math.max(1, rest.length - 1);
+        while (cut > 1 && !fits(rest.slice(0, cut) + '-')) cut--;
+        const slice = rest.slice(0, cut);
         lines.push({ text: slice + '-', start: restStart });
-        rest = rest.slice(maxChars - 1);
+        rest = rest.slice(cut);
         restStart += slice.length;
         currentLineStart = restStart;
       }
@@ -195,13 +237,14 @@ function wrapParagraphWithOffsets(
 }
 
 /**
- * Try to hyphenate a word so the first part + '-' fits in `available` chars.
+ * Try to hyphenate a word at the latest syllable break where `fits(head)`
+ * (the caller appends its own prefix and the '-').
  */
 function tryHyphenate(
   word: string,
-  available: number,
+  fits: (head: string) => boolean,
 ): { head: string; tail: string } | null {
-  if (!hyphenator || available < 3) return null;
+  if (!hyphenator) return null;
 
   // Separate leading letters from trailing punctuation
   const match = word.match(/^([\p{L}\p{M}]+)(.*)/u);
@@ -219,7 +262,7 @@ function tryHyphenate(
 
   for (let i = 0; i < syllables.length - 1; i++) {
     const candidate = head + syllables[i];
-    if (candidate.length + 1 <= available) {
+    if (fits(candidate)) {
       head = candidate;
       bestSplit = i;
     } else {
