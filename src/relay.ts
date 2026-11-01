@@ -8,3 +8,10 @@
  * origin to the app.json network whitelist.
  */
 export const RELAY_ORIGIN: string | null = import.meta.env?.VITE_RELAY_ORIGIN?.replace(/\/+$/, '') || null;
+
+/**
+ * BookOrbit is reached directly (each user's own server), which only works
+ * where that origin can be whitelisted: personal builds (pack:personal) and
+ * dev builds without a relay. Public relay builds don't offer it.
+ */
+export const BOOKORBIT_AVAILABLE: boolean = !RELAY_ORIGIN || import.meta.env?.VITE_PERSONAL_BUILD === '1';

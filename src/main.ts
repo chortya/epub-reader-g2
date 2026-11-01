@@ -54,7 +54,7 @@ import {
 } from './bookorbit-cache';
 import { KosyncSession } from './kosync-session';
 import { md5Hex } from './md5';
-import { RELAY_ORIGIN } from './relay';
+import { BOOKORBIT_AVAILABLE, RELAY_ORIGIN } from './relay';
 
 import { MockBridge } from './mock-bridge';
 import { version as APP_VERSION } from '../package.json';
@@ -568,10 +568,12 @@ async function main() {
     };
 
     // The provider being edited (may differ from the saved one until login).
-    // Not logged in yet: offer BookOrbit first (the setup this reader is built around).
+    if (!BOOKORBIT_AVAILABLE) providerEl.querySelector('option[value="bookorbit"]')?.remove();
+    // Not logged in yet: offer BookOrbit first (the setup this reader is built
+    // around) where this build can reach it.
     let editingProvider: SyncProvider = kosyncSettings && isKosyncLoggedIn(kosyncSettings)
       ? kosyncSettings.provider
-      : 'bookorbit';
+      : BOOKORBIT_AVAILABLE ? 'bookorbit' : 'kosync';
 
     const addressFor = (s: KosyncSettings) => (s.provider === 'bookorbit' ? bookOrbitAddress(s.server) : s.server);
 
@@ -751,7 +753,8 @@ async function main() {
 
     // What is on the device (ids + titles, no book bytes) and the download index.
     let localIds = new Set<string>();
-    let localTitles = new Map<string, string>(); // lower-case title -> local book id
+    // "<title>.epub" (how BookOrbit downloads are named) -> local ids with that name.
+    let localByDownloadName = new Map<string, string[]>();
     let index: BookOrbitCacheEntry[] = [];
     let listTotal = 0;
     const updateSummary = () => {
@@ -771,7 +774,12 @@ async function main() {
     const refreshLocalState = () => indexOps(async () => {
       const local = await getLocalBookSummaries(storageBridge).catch(() => []);
       localIds = new Set(local.map((b) => b.bookId));
-      localTitles = new Map(local.filter((b) => b.title).map((b) => [b.title.toLowerCase(), b.bookId]));
+      localByDownloadName = new Map();
+      for (const b of local) {
+        if (!b.filename) continue;
+        const key = b.filename.toLowerCase();
+        localByDownloadName.set(key, [...(localByDownloadName.get(key) ?? []), b.bookId]);
+      }
       const loaded = await loadCacheIndex(storageBridge, window.localStorage);
       index = pruneCacheIndex(loaded, localIds);
       if (index.length !== loaded.length) await saveCacheIndex(index, storageBridge, window.localStorage).catch(() => {});
@@ -809,7 +817,7 @@ async function main() {
         const stored = await indexOps(async () => {
           const saved = await saveEpubBufferToDB(data, filename, parsed.title, storageBridge);
           localIds.add(saved.bookId);
-          localTitles.set(saved.title.toLowerCase(), saved.bookId);
+
           if (saved.durable === false) {
             // Only IndexedDB has it: don't call it "on device" (it may not
             // survive an app restart); the row keeps offering Download.
@@ -855,8 +863,9 @@ async function main() {
 
     /**
      * Open a book: the local copy if there is one (no network at all), else
-     * download it. If BookOrbit can't be reached, fall back to a local book
-     * with the same title (e.g. uploaded by hand) rather than failing.
+     * download it. If BookOrbit can't be reached and the download index lost
+     * track of the book, fall back to the one local copy saved under this
+     * book's download name ("<title>.epub"); never guess between several.
      */
     const read = async (b: BookOrbitBook, onProgress: (text: string) => void) => {
       const bo = makeBookOrbitClient();
@@ -873,10 +882,10 @@ async function main() {
           const done = await download(b, onProgress);
           if (done) ({ stored, parsed } = done);
         } catch (e) {
-          const sameTitle = localTitles.get(b.title.toLowerCase());
+          const candidates = localByDownloadName.get(`${b.title}.epub`.toLowerCase()) ?? [];
           const offline = e instanceof KosyncError && e.status === null;
-          if (!offline || !sameTitle) throw e;
-          stored = await getStoredBook(sameTitle, storageBridge);
+          if (!offline || candidates.length !== 1) throw e;
+          stored = await getStoredBook(candidates[0], storageBridge);
           if (!stored) throw e;
           setStatus(`BookOrbit is not reachable - opening your local copy of "${b.title}".`);
         }

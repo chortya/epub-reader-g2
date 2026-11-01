@@ -235,14 +235,23 @@ export class KosyncClient {
     if (res.status === 404 || res.status === 204) return null;
     if (!res.ok) throw await this.errorFrom(res, 'Fetching progress failed');
     const body = await this.readJson(res);
-    if (!body || typeof body !== 'object' || typeof body.percentage !== 'number') return null;
+    if (!body || typeof body !== 'object' || body.percentage === undefined || body.percentage === null) return null;
+    // Validate everything that feeds decisions or the screen: a broken or
+    // hostile server must not be able to force jumps or poison save times.
+    const percentage = body.percentage;
+    if (typeof percentage !== 'number' || !Number.isFinite(percentage) || percentage < 0 || percentage > 1) {
+      throw new KosyncError('Sync server sent an invalid position', res.status);
+    }
+    const progress = typeof body.progress === 'string' ? body.progress
+      : typeof body.progress === 'number' && Number.isFinite(body.progress) ? String(body.progress) : '';
+    const clip = (v: unknown, n: number) => (typeof v === 'string' ? v.slice(0, n) : undefined);
     return {
-      document: String(body.document ?? document),
-      progress: typeof body.progress === 'string' ? body.progress : String(body.progress ?? ''),
-      percentage: body.percentage,
-      device: typeof body.device === 'string' ? body.device : undefined,
-      device_id: typeof body.device_id === 'string' ? body.device_id : undefined,
-      timestamp: typeof body.timestamp === 'number' ? body.timestamp : undefined,
+      document: String(body.document ?? document).slice(0, 128),
+      progress: progress.slice(0, 2048),
+      percentage,
+      device: clip(body.device, 40),
+      device_id: clip(body.device_id, 100),
+      timestamp: saneTimestamp(body.timestamp),
     };
   }
 
@@ -287,7 +296,7 @@ export class KosyncClient {
     if (res.status === 401) throw new KosyncError('Not authorized', 401);
     if (!res.ok) throw await this.errorFrom(res, 'Pushing progress failed');
     const body = await this.readJson(res).catch(() => null); // the PUT itself succeeded
-    if (body && typeof body.timestamp === 'number' && Number.isFinite(body.timestamp)) {
+    if (body && saneTimestamp(body.timestamp) !== undefined) {
       const local = (sentAt + Date.now()) / 2; // midpoint of the round trip
       this.clockOffsetMs = body.timestamp * 1000 - local;
     }
@@ -367,6 +376,17 @@ export class KosyncClient {
     if (body && typeof body.message === 'string') message = `${fallback}: ${body.message.slice(0, 200)}`;
     return new KosyncError(message, res.status);
   }
+}
+
+/**
+ * A server Unix timestamp we are willing to use: after 2001 and at most a
+ * day ahead of this device. Anything else is ignored rather than allowed to
+ * dominate "which side is newer" forever.
+ */
+export function saneTimestamp(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  if (value < 1_000_000_000 || value > Date.now() / 1000 + 86_400) return undefined;
+  return value;
 }
 
 /** Largest JSON body accepted from a sync/BookOrbit server. */

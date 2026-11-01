@@ -31,7 +31,9 @@ for (const origin of origins) {
   } catch {
     url = null;
   }
-  if (!url || url.origin !== origin || (url.protocol !== 'https:' && url.hostname !== 'localhost')) {
+  const ok = url && url.origin === origin
+    && (url.protocol === 'https:' || (url.protocol === 'http:' && url.hostname === 'localhost'));
+  if (!ok) {
     console.error(`Not a bare https origin: ${origin}`);
     process.exit(1);
   }
@@ -39,13 +41,16 @@ for (const origin of origins) {
 
 const network = (app.permissions ?? []).find((p) => p.name === 'network');
 network.whitelist = [...new Set(origins)];
-network.desc = 'Syncs reading progress and downloads books from your own servers: ' + network.whitelist.join(', ');
+// Even Hub limits the description to 300 characters.
+const desc = 'Syncs reading progress and downloads books from your own servers: ' + network.whitelist.join(', ');
+network.desc = desc.length <= 300 ? desc : 'Syncs reading progress and downloads books from your own servers (see the whitelist).';
 mkdirSync(new URL('build/', root), { recursive: true });
 const manifest = new URL('build/app.personal.json', root);
 writeFileSync(manifest, JSON.stringify({ ...app, entrypoint: app.entrypoint }, null, 2) + '\n');
 
-const run = (cmd, args) => execFileSync(cmd, args, { stdio: 'inherit', cwd: root });
-run('npm', ['run', 'build']);
+const run = (cmd, args, env = {}) => execFileSync(cmd, args, { stdio: 'inherit', cwd: root, env: { ...process.env, ...env } });
+// Personal builds may reach the user's own servers directly (BookOrbit).
+run('npm', ['run', 'build'], { VITE_PERSONAL_BUILD: '1' });
 // evenhub resolves the entrypoint against the project folder, not the manifest's.
 run('npx', ['evenhub', 'pack', 'build/app.personal.json', './dist', '--sdk-ver', sdk, '--output', 'epub-reader-personal.ehpk']);
 console.log(`Personal build whitelists: ${network.whitelist.join(', ')}`);

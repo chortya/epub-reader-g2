@@ -42,7 +42,7 @@ const XP_PREFIX_RE = /^\/body\/DocFragment\[(\d+)\](?:\/body(?=\/|\.|$))?/;
 const XP_STEP_RE = /^\/(?:(text\(\))|([A-Za-z_][\w.-]*))(?:\[(\d+)\])?/;
 
 export function parseXPointer(xpointer: string): ParsedXPointer | null {
-  if (typeof xpointer !== 'string') return null;
+  if (typeof xpointer !== 'string' || xpointer.length > 2048) return null;
   const head = XP_PREFIX_RE.exec(xpointer);
   if (!head) return null;
   const fragment = Number(head[1]);
@@ -62,6 +62,7 @@ export function parseXPointer(xpointer: string): ParsedXPointer | null {
     const index = m[3] ? Number(m[3]) : 1;
     if (index < 1) return null;
     steps.push(m[1] ? { kind: 'text', index } : { kind: 'element', name: m[2].toLowerCase(), index });
+    if (steps.length > 256) return null;
     rest = rest.slice(m[0].length);
   }
   return { fragment, steps, point };

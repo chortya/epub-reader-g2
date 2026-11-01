@@ -57,3 +57,12 @@ test('pickChapterTitle ignores a document title that is just the book title', ()
   // Without a book title the old behaviour stands.
   assert.equal(pickChapterTitle('', '', 'Some Document', 2), 'Some Document');
 });
+
+test('a TOC nested 20,000 deep does not overflow the stack', () => {
+  const depth = 20_000;
+  const xml = '<ncx><navMap>' + '<navPoint><navLabel><text>x</text></navLabel><content src="a.xhtml"/>'.repeat(depth)
+    + '</navPoint>'.repeat(depth) + '</navMap></ncx>';
+  const doc = new DOMParser().parseFromString(xml, 'text/xml') as unknown as Document;
+  const entries = tocEntriesFromNcx(doc);
+  assert.ok(entries.length > 0);
+});

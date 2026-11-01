@@ -25,8 +25,14 @@ if (relay && (whitelist.length !== 1 || whitelist[0] !== relay)) {
   problems.push(`app.json network whitelist must be exactly ["${relay}"], got ${JSON.stringify(whitelist)}`);
 }
 const privacy = readFileSync(new URL('../PRIVACY.md', import.meta.url), 'utf8');
+if (privacy.includes('RELAY_ORIGIN')) {
+  problems.push('PRIVACY.md still contains the RELAY_ORIGIN placeholder.');
+}
 if (relay && !privacy.includes(relay)) {
-  problems.push(`PRIVACY.md must name the relay origin ${relay} (replace the RELAY_ORIGIN placeholder).`);
+  problems.push(`PRIVACY.md must name the relay origin ${relay}.`);
+}
+if (relay && /codetabs|corsproxy|allorigins/i.test(relay)) {
+  problems.push(`VITE_RELAY_ORIGIN must be your own relay, not a public CORS proxy (${relay}).`);
 }
 if (app.min_app_version !== '2.2.10') {
   problems.push(`app.json min_app_version should be 2.2.10 (SDK floor), got ${app.min_app_version}`);

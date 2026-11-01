@@ -21,6 +21,7 @@ import {
   type KosyncSettings,
 } from '../src/kosync.ts';
 import { KosyncSession, PUSH_DEBOUNCE_MS, PUSH_MAX_WAIT_MS } from '../src/kosync-session.ts';
+import { parseXPointer } from '../src/kosync-locator.ts';
 import type { Book } from '../src/types.ts';
 
 type Call = { url: string; method: string; headers: Record<string, string>; body: any; keepalive?: boolean };
@@ -299,7 +300,7 @@ test('pull reports "same" when remote and local land on the same paragraph', asy
   const { impl } = fakeFetch(() => ({
     status: 200,
     // KOReader's page-based percentage differs from ours for the same place.
-    body: { document: 'x', progress: '/body/DocFragment[2]/body/p[2]/text().5', percentage: 0.31, device_id: 'KOBO', timestamp: 10_000 },
+    body: { document: 'x', progress: '/body/DocFragment[2]/body/p[2]/text().5', percentage: 0.31, device_id: 'KOBO', timestamp: Math.floor(Date.now() / 1000) },
   }));
   const client = new KosyncClient({ server: SETTINGS.server, fetchImpl: impl });
   const session = new KosyncSession({ book: b, filename: null, settings: SETTINGS, client, parseBody });
@@ -454,4 +455,14 @@ test('oversized JSON bodies are rejected', async () => {
   const huge = JSON.stringify({ percentage: 0.1, progress: 'x'.repeat(3 * 1024 * 1024) });
   const c = new KosyncClient({ server: 'https://big.example.com', fetchImpl: (async () => new Response(huge, { status: 200 })) as unknown as typeof fetch });
   await assert.rejects(c.getProgress('d'), /too large/);
+});
+
+test('hostile progress values are rejected or ignored', async () => {
+  const respond = (body: unknown) => new KosyncClient({ server: 'https://hostile.example.com', fetchImpl: fakeFetch(() => ({ status: 200, body })).impl });
+  await assert.rejects(respond({ percentage: 1e100, progress: 'x' }).getProgress('d'), /invalid position/);
+  await assert.rejects(respond({ percentage: -10, progress: '/body/DocFragment[1]/body', device_id: 'bookorbit-web' }).getProgress('d'), /invalid position/);
+  const far = await respond({ percentage: 0.5, progress: 'x', timestamp: 9e12, device: 'D'.repeat(500) }).getProgress('d');
+  assert.equal(far?.timestamp, undefined, 'a timestamp in year 287,000 is ignored');
+  assert.equal(far?.device?.length, 40);
+  assert.equal(parseXPointer('/body/DocFragment[1]/body' + '/p'.repeat(300)), null);
 });

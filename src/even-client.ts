@@ -595,7 +595,8 @@ export class EvenEpubClient {
           if (!interactive && moved) return false; // the user is busy; don't jump under them
           // The adopted position is as old as the remote one, not "now".
           const remoteTs = result.remote?.timestamp;
-          this.adoptingRemoteAt = typeof remoteTs === 'number' ? remoteTs * 1000 : Date.now();
+          // (getProgress only passes sane timestamps; never later than now.)
+          this.adoptingRemoteAt = typeof remoteTs === 'number' ? Math.min(remoteTs * 1000, Date.now()) : Date.now();
           try {
             await this.jumpToLocation(target);
           } finally {

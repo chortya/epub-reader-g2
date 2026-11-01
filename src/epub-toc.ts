@@ -18,19 +18,24 @@ function localName(el: Element): string {
   return (el.localName || el.tagName || '').toLowerCase();
 }
 
-/** Elements named `name` (case-insensitive, any namespace) in document order. */
-function descendants(root: Document | Element, name: string): Element[] {
+/**
+ * Elements named `name` (case-insensitive, any namespace) in document order.
+ * Iterative with a node budget: a hostile TOC nested thousands deep must not
+ * overflow the stack or run unbounded.
+ */
+function descendants(root: Document | Element, name: string, maxNodes = 100_000): Element[] {
   const out: Element[] = [];
-  const walk = (el: Element): void => {
-    for (let c = el.firstElementChild; c; c = c.nextElementSibling) {
-      if (localName(c) === name) out.push(c);
-      walk(c);
-    }
-  };
   const start = 'documentElement' in root ? root.documentElement : root;
-  if (start) {
-    if (localName(start) === name) out.push(start);
-    walk(start);
+  if (!start) return out;
+  const stack: Element[] = [start];
+  let visited = 0;
+  while (stack.length > 0 && visited++ < maxNodes) {
+    const el = stack.pop()!;
+    if (localName(el) === name) out.push(el);
+    // Push children in reverse so they pop in document order.
+    const kids: Element[] = [];
+    for (let c = el.firstElementChild; c; c = c.nextElementSibling) kids.push(c);
+    for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
   }
   return out;
 }

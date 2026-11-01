@@ -65,6 +65,8 @@ export async function parseEpub(data: ArrayBuffer, filenameHint?: string): Promi
     }
   }
 
+  if (bookTitle.length > 300) bookTitle = `${bookTitle.slice(0, 299)}…`;
+
   const partialMd5 = new Md5();
   for (const sample of koreaderPartialMd5Samples(new Uint8Array(data))) partialMd5.update(sample);
 
@@ -152,10 +154,27 @@ function inflateLimited(zip: JSZip, file: JSZip.JSZipObject, path: string): Prom
           bytes.set(c, offset);
           offset += c.byteLength;
         }
-        resolve(new TextDecoder('utf-8').decode(bytes));
+        resolve(decodeXmlText(bytes));
       })
       .resume();
   });
+}
+
+/**
+ * Decode an EPUB text part: UTF-8 (or a BOM-marked UTF-16) by default, or
+ * the encoding an XML declaration names (older EPUBs use e.g. windows-1252).
+ */
+function decodeXmlText(bytes: Uint8Array): string {
+  if (bytes[0] === 0xff && bytes[1] === 0xfe) return new TextDecoder('utf-16le').decode(bytes);
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) return new TextDecoder('utf-16be').decode(bytes);
+  const head = new TextDecoder('latin1').decode(bytes.subarray(0, 200));
+  const declared = /^\s*<\?xml[^>]*encoding\s*=\s*["']([A-Za-z0-9._-]{1,40})["']/.exec(head)?.[1];
+  if (declared && !/^utf-?8$/i.test(declared)) {
+    try {
+      return new TextDecoder(declared).decode(bytes);
+    } catch { /* unknown label: fall back to UTF-8 */ }
+  }
+  return new TextDecoder('utf-8').decode(bytes);
 }
 
 async function readZipFile(zip: JSZip, path: string): Promise<string> {

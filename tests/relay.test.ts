@@ -32,6 +32,8 @@ test('kosync target must be a public https origin', () => {
   for (const bad of [
     null, '', 'http://sync.example.org', 'https://localhost', 'https://10.0.0.1', 'https://[::1]',
     'https://nas.local', 'https://user:pw@example.org', 'https://example.org/?x=1', 'not a url',
+    'https://localhost.', 'https://metadata.internal.', 'https://nas.local.', 'https://router.lan',
+    'https://example.org:8443', 'https://0x7f000001',
   ]) {
     assert.equal(parseKosyncTarget(bad as any), null, String(bad));
   }

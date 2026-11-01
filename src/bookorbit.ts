@@ -91,7 +91,7 @@ export class BookOrbitClient extends KosyncClient {
         format: 'epub',
         role: String(f.role ?? ''),
         downloadVariant: String(f.downloadVariant ?? 'original'),
-        sizeBytes: typeof f.sizeBytes === 'number' ? f.sizeBytes : null,
+        sizeBytes: Number.isSafeInteger(f.sizeBytes) && f.sizeBytes > 0 && f.sizeBytes <= MAX_DOWNLOAD_BYTES ? f.sizeBytes : null,
       }));
     const rank = (f: BookOrbitFile) => (f.role === 'primary' ? 0 : 2) + (f.downloadVariant === 'original' ? 0 : 1);
     return files.sort((a, b) => rank(a) - rank(b))[0] ?? null;
@@ -194,7 +194,11 @@ export class BookOrbitClient extends KosyncClient {
 export const DOWNLOAD_STALL_MS = 30_000;
 
 /** Hard cap on a single download (EPUBs are rarely above a few tens of MB). */
-export const MAX_DOWNLOAD_BYTES = 300 * 1024 * 1024;
+export const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
+/** Sizes up to this are preallocated; above it, chunks are collected (a lying header can't force a huge allocation). */
+const PREALLOCATE_MAX_BYTES = 32 * 1024 * 1024;
+/** Overall cap on one download, on top of the per-chunk stall timeout. */
+export const DOWNLOAD_DEADLINE_MS = 15 * 60_000;
 
 /**
  * Read a body with a per-chunk stall timeout. With a known size the bytes go
@@ -213,7 +217,10 @@ export async function readWithStallTimeout(
     return whole;
   }
   const reader = res.body.getReader();
-  const target = expected !== null ? new Uint8Array(expected) : null;
+  const target = expected !== null && Number.isSafeInteger(expected) && expected > 0 && expected <= PREALLOCATE_MAX_BYTES
+    ? new Uint8Array(expected)
+    : null;
+  const deadline = Date.now() + DOWNLOAD_DEADLINE_MS;
   const chunks: Uint8Array[] = [];
   let received = 0;
   for (;;) {
@@ -231,6 +238,10 @@ export async function readWithStallTimeout(
       if (timer !== null) clearTimeout(timer);
     }
     if (step.done) break;
+    if (Date.now() > deadline) {
+      reader.cancel().catch(() => {});
+      throw new KosyncError('Download took too long', null);
+    }
     const chunk = step.value;
     if (received + chunk.byteLength > (target ? target.byteLength : maxBytes)) {
       reader.cancel().catch(() => {});
@@ -347,7 +358,9 @@ export class BookOrbitTracker {
     if (!raw) return;
     try {
       const data = JSON.parse(raw) as Record<string, Record<string, PageStatEvent[]>>;
-      for (const [account, books] of Object.entries(data ?? {})) {
+      if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+      for (const [account, books] of Object.entries(data)) {
+        if (!books || typeof books !== 'object' || Array.isArray(books)) continue;
         let box = BookOrbitTracker.outboxes.get(account);
         if (!box) {
           box = new Map();
@@ -410,11 +423,13 @@ export class BookOrbitTracker {
     const storage = BookOrbitTracker.storage;
     if (!storage) return Promise.resolve();
     const write = () => {
-      const data: Record<string, Record<string, PageStatEvent[]>> = {};
+      // Null-prototype objects: account/hash strings are just keys (a
+      // "__proto__" key must not reach Object.prototype).
+      const data: Record<string, Record<string, PageStatEvent[]>> = Object.create(null);
       for (const [account, box] of BookOrbitTracker.outboxes) {
         for (const [hash, events] of box) {
           if (events.length === 0) continue;
-          (data[account] ??= {})[hash] = events;
+          (data[account] ??= Object.create(null))[hash] = events;
         }
       }
       return storage.save(JSON.stringify(data)).then(() => undefined, () => undefined);

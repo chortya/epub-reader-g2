@@ -67,9 +67,11 @@ export function parseKosyncTarget(raw) {
     return null;
   }
   if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) return null;
-  const host = url.hostname.toLowerCase();
-  if (!host.includes('.') || host.endsWith('.localhost') || host.endsWith('.local') || host.endsWith('.internal')) return null;
-  if (/^[\d.]+$/.test(host) || host.startsWith('[')) return null;
+  // A trailing root dot ("localhost.") names the same host: strip it first.
+  const host = url.hostname.toLowerCase().replace(/\.+$/, '');
+  if (!host.includes('.') || host === 'localhost' || /\.(localhost|local|internal|lan|home\.arpa)$/.test(host)) return null;
+  if (/^[\d.]+$/.test(host) || host.startsWith('[') || /^0x/i.test(host)) return null;
+  if (url.port && url.port !== '443') return null; // public https sync servers only
   return url.origin + url.pathname.replace(/\/+$/, '');
 }
 
@@ -130,14 +132,20 @@ async function handleKosync(request, path, fetchImpl) {
   }
   let upstream;
   try {
-    upstream = await fetchImpl(`${target}${path}`, { method: request.method, headers, body, redirect: 'manual' });
+    upstream = await fetchImpl(`${target}${path}`, {
+      method: request.method,
+      headers,
+      body,
+      redirect: 'manual',
+      signal: AbortSignal.timeout(15_000),
+    });
   } catch {
     return json(502, { message: 'Sync server unreachable' });
   }
   if (upstream.status >= 300 && upstream.status < 400) {
     return json(502, { message: 'Sync server redirected; use its final address' });
   }
-  return withCors(upstream, { 'Cache-Control': 'no-store' });
+  return withCors(new Response(capStream(upstream.body, MAX_KOSYNC_BODY * 64), upstream), { 'Cache-Control': 'no-store' });
 }
 
 async function fetchGutenberg(path, fetchImpl, cacheTtl) {
