@@ -7,5 +7,4 @@
  * through the relay. Set VITE_RELAY_ORIGIN at build time and add the same
  * origin to the app.json network whitelist.
  */
-export const RELAY_ORIGIN: string | null =
-  (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_RELAY_ORIGIN?.replace(/\/+$/, '') || null;
+export const RELAY_ORIGIN: string | null = import.meta.env?.VITE_RELAY_ORIGIN?.replace(/\/+$/, '') || null;

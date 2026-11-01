@@ -169,6 +169,21 @@ async function main() {
 
     client.onFlowStateChanged = () => renderReaderControls(client as EvenEpubClient);
 
+    // Dev-only (stripped from production builds): ?demo=<name> preloads
+    // samples/<name>.epub, e.g. for simulator screenshot automation.
+    const demo = urlParams.get('demo');
+    if (import.meta.env.DEV && demo && /^[a-z0-9_-]+$/i.test(demo)) {
+      try {
+        const data = await (await fetch(`/samples/${demo}.epub`)).arrayBuffer();
+        const book = await parseEpub(data, `${demo}.epub`);
+        const stored = await saveEpubBufferToDB(data, `${demo}.epub`, book.title, bridge as any);
+        await client.loadBook(book, true, stored.bookId, stored.filename);
+        await renderLibrary(client, bridge as any);
+      } catch (e) {
+        console.warn('Demo book failed to load:', e);
+      }
+    }
+
     setupReaderControls(client);
     renderReaderControls(client);
   } else {
@@ -557,8 +572,7 @@ async function main() {
         render('Open a book to sync its progress.');
         return;
       }
-      await client.syncKosyncNow();
-      render();
+      render(await client.syncKosyncNow());
     }));
 
     checksumEl.addEventListener('change', () => {

@@ -79,6 +79,8 @@ test('client maps status codes', async () => {
   assert.equal(await client.register('taken', 'pw'), false);
   assert.equal(await client.authorize(), false);
   assert.equal(await client.getProgress('missing'), null);
+  const notFound = new KosyncClient({ server: SETTINGS.server, fetchImpl: fakeFetch(() => ({ status: 404 })).impl });
+  assert.equal(await notFound.getProgress('never-synced'), null, '404 = no progress (Calibre-Web & co.)');
   await assert.rejects(client.getProgress('x'), (e: unknown) => e instanceof KosyncError && /boom/.test(e.message) && e.status === 500);
 });
 
@@ -124,7 +126,7 @@ test('documentDigest: binary uses the partial MD5, filename hashes the basename'
   assert.equal(documentDigest('filename', 'abc', null), null);
 });
 
-test('decidePull follows KOReader defaults (forward applies, backward is ignored)', () => {
+test('decidePull: newer position wins; without times, forward only (explicit sync applies)', () => {
   const remote = { document: 'd', progress: 'p', percentage: 0.5, device_id: 'OTHER', timestamp: 2_000 };
   assert.equal(decidePull(null, null, 'ME', false), 'none');
   assert.equal(decidePull({ ...remote, device_id: 'ME' }, null, 'ME', true), 'ownDevice');
@@ -132,7 +134,9 @@ test('decidePull follows KOReader defaults (forward applies, backward is ignored
   assert.equal(decidePull(remote, null, 'ME', false), 'apply');
   assert.equal(decidePull(remote, { percentage: 0.2, savedAtMs: 1_000_000 }, 'ME', false), 'apply');
   assert.equal(decidePull(remote, { percentage: 0.8, savedAtMs: 3_000_000 }, 'ME', false), 'older');
-  assert.equal(decidePull(remote, { percentage: 0.8, savedAtMs: 3_000_000 }, 'ME', true), 'apply');
+  // Explicit sync with known times still lets the newer side win (caller pushes ours).
+  assert.equal(decidePull(remote, { percentage: 0.8, savedAtMs: 3_000_000 }, 'ME', true), 'older');
+  assert.equal(decidePull(remote, { percentage: 0.8, savedAtMs: null }, 'ME', true), 'apply');
   // No timestamps: forward only.
   assert.equal(decidePull({ ...remote, timestamp: undefined }, { percentage: 0.8, savedAtMs: null }, 'ME', false), 'older');
   assert.equal(decidePull({ ...remote, timestamp: undefined }, { percentage: 0.2, savedAtMs: null }, 'ME', false), 'apply');
@@ -249,4 +253,43 @@ test('schedulePush debounces and caps the wait during continuous movement', asyn
   await session.flush({ keepalive: true });
   assert.equal(calls.at(-1)!.keepalive, true);
   assert.equal(clock.pending(), 0);
+});
+
+test('pushes are serialized and a superseded queued push is dropped', async () => {
+  const releases: Array<() => void> = [];
+  const order: number[] = [];
+  const impl = (async (_url: string, init: RequestInit) => {
+    const body = JSON.parse(init.body as string);
+    await new Promise<void>((r) => releases.push(r));
+    order.push(body.percentage);
+    return new Response('{}', { status: 200 });
+  }) as unknown as typeof fetch;
+  const client = new KosyncClient({ server: SETTINGS.server, fetchImpl: impl });
+  const session = new KosyncSession({ book: book(), filename: null, settings: SETTINGS, client, parseBody });
+  const b = book();
+  const first = session.push({ chapterIndex: 0, offset: 0 });
+  await new Promise((r) => setImmediate(r));
+  const second = session.push({ chapterIndex: 1, offset: 0 }); // queued behind the first
+  const third = session.push({ chapterIndex: 1, offset: b.chapters[1].text.length - 1 }); // supersedes the second
+  while (releases.length < 1) await new Promise((r) => setImmediate(r));
+  releases.shift()!();
+  while (releases.length < 1) await new Promise((r) => setImmediate(r));
+  releases.shift()!();
+  assert.deepEqual(await Promise.all([first, second, third]), [true, false, true]);
+  assert.equal(order.length, 2);
+  assert.ok(order[0] < order[1], 'older position never lands last');
+});
+
+test('pull reports "same" when remote and local land on the same paragraph', async () => {
+  const b = book();
+  const second = b.chapters[0].text.indexOf('Second');
+  const { impl } = fakeFetch(() => ({
+    status: 200,
+    // KOReader's page-based percentage differs from ours for the same place.
+    body: { document: 'x', progress: '/body/DocFragment[2]/body/p[2]/text().5', percentage: 0.31, device_id: 'KOBO', timestamp: 10_000 },
+  }));
+  const client = new KosyncClient({ server: SETTINGS.server, fetchImpl: impl });
+  const session = new KosyncSession({ book: b, filename: null, settings: SETTINGS, client, parseBody });
+  const result = await session.pull({ location: { chapterIndex: 0, offset: second + 2 }, savedAtMs: 1 }, false);
+  assert.equal(result.decision, 'same');
 });

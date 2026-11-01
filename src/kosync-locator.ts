@@ -196,7 +196,8 @@ export class ChapterLocator {
         if (name === 'script' || name === 'style') continue;
         const childPath = `${path}/${name}[${index}]`;
         if (isBlock(child)) {
-          const snippet = compact(leadingText(child)).slice(0, SNIPPET_CHARS);
+          const lead = compact(leadingText(child));
+          const snippet = lead.slice(0, SNIPPET_CHARS);
           if (snippet.length > 0) {
             const at = this.compactText.indexOf(snippet, cursor);
             if (at >= 0) {
@@ -208,8 +209,11 @@ export class ChapterLocator {
               };
               this.anchors.push(anchor);
               this.byElement.set(child, anchor);
-              // Not past the match: nested blocks may start at the same text.
-              cursor = at;
+              // Consume the block's leading text: nested blocks and later
+              // siblings start after it (leadingText stops at the first nested
+              // block), and paragraphs that open with the same words must not
+              // match the same occurrence.
+              cursor = at + lead.length;
             }
           }
         }
@@ -265,16 +269,24 @@ export class ChapterLocator {
       }
     }
     if (!anchor) {
-      // A pure container (or <body> itself): use its first anchored descendant.
+      // A pure container (or <body> itself): its first anchored descendant;
+      // an inline node outside any block: the last block before it.
       const container = node.nodeType === 1 ? (node as Element) : node.parentElement;
       anchor = this.anchors.find((a) => container && (container === this.body || container.contains(a.element)));
+      if (!anchor) {
+        const FOLLOWING = 4; // Node.DOCUMENT_POSITION_FOLLOWING
+        for (const a of this.anchors) {
+          if (a.element.compareDocumentPosition(node) & FOLLOWING) anchor = a;
+          else break;
+        }
+      }
       return anchor ? anchor.offset : null;
     }
 
     let compactIndex = anchor.compactIndex;
-    if (resolvedAll && node !== anchor.element) {
+    if (node !== anchor.element) {
       compactIndex += compactLengthBefore(anchor.element, node);
-      if (node.nodeType === 3 && point !== null) {
+      if (resolvedAll && node.nodeType === 3 && point !== null) {
         compactIndex += compact((node.textContent ?? '').slice(0, point)).length;
       }
     }

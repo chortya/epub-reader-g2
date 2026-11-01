@@ -24,6 +24,10 @@ const whitelist = network?.whitelist ?? [];
 if (relay && (whitelist.length !== 1 || whitelist[0] !== relay)) {
   problems.push(`app.json network whitelist must be exactly ["${relay}"], got ${JSON.stringify(whitelist)}`);
 }
+const privacy = readFileSync(new URL('../PRIVACY.md', import.meta.url), 'utf8');
+if (relay && !privacy.includes(relay)) {
+  problems.push(`PRIVACY.md must name the relay origin ${relay} (replace the RELAY_ORIGIN placeholder).`);
+}
 if (app.min_app_version !== '2.2.10') {
   problems.push(`app.json min_app_version should be 2.2.10 (SDK floor), got ${app.min_app_version}`);
 }

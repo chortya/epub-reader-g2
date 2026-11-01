@@ -75,8 +75,14 @@ test('kosync relay rejects other paths, bad targets, big bodies and redirects', 
   assert.equal((await handle(req('/kosync/users/auth', { method: 'DELETE', headers: target }), impl)).status, 404);
   assert.equal((await handle(req('/kosync/users/auth', { headers: { 'X-Kosync-Server': 'https://127.0.0.1' } }), impl)).status, 400);
   assert.equal((await handle(req('/kosync/users/create', {
-    method: 'POST', headers: target, body: 'x'.repeat(20_000),
+    method: 'POST', headers: { ...target, 'content-type': 'application/json' }, body: 'x'.repeat(20_000),
   }), impl)).status, 413);
+  assert.equal((await handle(req('/kosync/users/create', {
+    method: 'POST', headers: { ...target, 'content-type': 'text/plain' }, body: '{}',
+  }), impl)).status, 415);
+  // Document ids are MD5 hex only: no encoded path segments reach the server.
+  assert.equal((await handle(req('/kosync/syncs/progress/..%2F..%2Fadmin', { headers: target }), impl)).status, 404);
+  assert.equal((await handle(req('/kosync/syncs/progress/' + 'a'.repeat(31) + 'g', { headers: target }), impl)).status, 404);
   assert.equal(seen.length, 0);
   assert.equal((await handle(req('/kosync/users/auth', { headers: target }), impl)).status, 502);
 });
@@ -106,4 +112,22 @@ test('gutenberg routes fetch fixed URLs only', async () => {
   assert.equal((await handle(req('/gutenberg/epub/999999'), upstream(() => new Response(null, { status: 404 })).impl)).status, 404);
   assert.equal((await handle(req('/gutenberg/top', { method: 'POST' }), impl)).status, 405);
   assert.equal((await handle(req('/elsewhere'), impl)).status, 404);
+});
+
+test('kosync body cap applies to streamed bodies without content-length', async () => {
+  const { impl, seen } = upstream(() => new Response('{}', { status: 200 }));
+  let pulled = 0;
+  const stream = new ReadableStream({
+    pull(controller) {
+      pulled++;
+      if (pulled > 100) { controller.close(); return; }
+      controller.enqueue(new Uint8Array(1024));
+    },
+  });
+  const res = await handle(new Request('https://relay.test/kosync/syncs/progress', {
+    method: 'PUT', headers: { 'X-Kosync-Server': 'https://sync.example.org', 'content-type': 'application/json' }, body: stream, duplex: 'half',
+  } as RequestInit), impl);
+  assert.equal(res.status, 413);
+  assert.ok(pulled < 30, `stopped reading early (read ${pulled} chunks)`);
+  assert.equal(seen.length, 0);
 });

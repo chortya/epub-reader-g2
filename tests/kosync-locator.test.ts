@@ -157,3 +157,27 @@ test('bookPercentage / positionForPercentage are inverse at character precision'
   assert.deepEqual(positionForPercentage(lengths, 1), { chapterIndex: 2, offset: 599 });
   assert.deepEqual(positionForPercentage([], 0.5), { chapterIndex: 0, offset: 0 });
 });
+
+test('paragraphs that open with the same words anchor to their own text', () => {
+  const same = 'It was a dark and stormy night, said the narrator';
+  const html = `<html><body><p>${same} once.</p><p>${same} twice.</p><p>${same} thrice.</p></body></html>`;
+  const text = [`${same} once.`, `  ${same} twice.`, `  ${same} thrice.`].join('\n');
+  const body = new DOMParser().parseFromString(html, 'text/html').querySelector('body') as unknown as Element;
+  const loc = new ChapterLocator(body, text);
+  const second = text.indexOf(`${same} twice.`);
+  const third = text.indexOf(`${same} thrice.`);
+  assert.equal(loc.pathForOffset(5), '/p[1]');
+  assert.equal(loc.pathForOffset(second + 3), '/p[2]');
+  assert.equal(loc.pathForOffset(third), '/p[3]');
+  const p2 = parseXPointer('/body/DocFragment[1]/body/p[2]')!;
+  assert.equal(loc.offsetForSteps(p2.steps, p2.point), second);
+});
+
+test('an inline node outside any block maps to the block before it, not the chapter start', () => {
+  const html = '<html><body><div><p>First block here.</p><p>Second block here.</p><span>loose inline text</span></div></body></html>';
+  const text = 'First block here.\n  Second block here.\n  loose inline text';
+  const body = new DOMParser().parseFromString(html, 'text/html').querySelector('body') as unknown as Element;
+  const loc = new ChapterLocator(body, text);
+  const p = parseXPointer('/body/DocFragment[1]/body/div/span/text().3')!;
+  assert.equal(loc.offsetForSteps(p.steps, p.point), text.indexOf('Second block'));
+});

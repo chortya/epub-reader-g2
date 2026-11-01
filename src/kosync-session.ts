@@ -68,6 +68,8 @@ export class KosyncSession {
   private firstPendingAt: number | null = null;
   private pending: ReaderLocation | null = null;
   private lastPushed: string | null = null;
+  private uploads: Promise<unknown> = Promise.resolve();
+  private pushSeq = 0;
   private parseBody: (xhtml: string) => Element | null;
 
   constructor(opts: {
@@ -163,23 +165,37 @@ export class KosyncSession {
       this.settings.deviceId,
       interactive,
     );
-    const target = decision === 'apply' && remote ? await this.locationFor(remote) : null;
+    let target = decision === 'apply' && remote ? await this.locationFor(remote) : null;
+    // Percentages differ between KOReader (pages) and us (characters), so
+    // also compare where the two positions land: same paragraph = in sync.
+    if (target && local && await this.xpointerAt(target) === await this.xpointerAt(local.location)) {
+      return { decision: 'same', remote, target: null };
+    }
     return { decision: target || decision !== 'apply' ? decision : 'none', remote, target };
   }
 
   /** Push now. Skips unchanged positions unless forced. */
   async push(loc: ReaderLocation, opts: { force?: boolean; keepalive?: boolean } = {}): Promise<boolean> {
     this.cancelScheduledPush();
-    const document = this.document;
-    if (!document) return false;
-    const progress = await this.xpointerAt(loc);
-    if (!progress) return false;
-    const percentage = this.percentageAt(loc);
-    const key = `${progress}|${percentage}`;
-    if (!opts.force && key === this.lastPushed) return false;
-    await this.client.updateProgress({ document, progress, percentage }, this.settings.deviceId, opts.keepalive);
-    this.lastPushed = key;
-    return true;
+    // Uploads run one at a time in request order, and a push superseded by a
+    // newer one while it waited is dropped: a slow older PUT must never land
+    // after (and overwrite) a newer position.
+    const seq = ++this.pushSeq;
+    const run = this.uploads.then(async () => {
+      if (seq !== this.pushSeq) return false;
+      const document = this.document;
+      if (!document) return false;
+      const progress = await this.xpointerAt(loc);
+      if (!progress) return false;
+      const percentage = this.percentageAt(loc);
+      const key = `${progress}|${percentage}`;
+      if (!opts.force && key === this.lastPushed) return false;
+      await this.client.updateProgress({ document, progress, percentage }, this.settings.deviceId, opts.keepalive);
+      this.lastPushed = key;
+      return true;
+    });
+    this.uploads = run.catch(() => false);
+    return run;
   }
 
   /**
@@ -188,6 +204,7 @@ export class KosyncSession {
    */
   async markSynced(loc: ReaderLocation): Promise<void> {
     this.cancelScheduledPush();
+    this.pushSeq++; // drop any upload still queued from before the jump
     const progress = await this.xpointerAt(loc);
     if (progress) this.lastPushed = `${progress}|${this.percentageAt(loc)}`;
   }
@@ -195,6 +212,9 @@ export class KosyncSession {
   /** Trailing-debounced push with a max wait, for page turns and Flow ticks. */
   schedulePush(loc: ReaderLocation, onError?: (e: unknown) => void): void {
     this.pending = loc;
+    // Warm the chapter's locator now, so a flush at app exit can send the
+    // keepalive request without first unzipping and parsing XHTML.
+    void this.locator(loc.chapterIndex);
     const now = this.timers.now();
     if (this.firstPendingAt === null) this.firstPendingAt = now;
     if (this.pushTimer !== null) this.timers.clearTimeout(this.pushTimer);

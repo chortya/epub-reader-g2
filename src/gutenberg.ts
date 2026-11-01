@@ -8,7 +8,9 @@ export interface GutenbergBook {
 // Dev-only fallback when no relay is configured. Packaged builds must set
 // VITE_RELAY_ORIGIN: public CORS proxies are unreliable and not traceable to
 // the developer (Even Hub submission rules).
-const DEV_CORS_PROXY = 'https://api.codetabs.com/v1/proxy?quest=';
+// Written against import.meta.env directly so Vite inlines the value and the
+// bundler drops the proxy URL from relay builds.
+const DEV_CORS_PROXY = import.meta.env.VITE_RELAY_ORIGIN ? '' : 'https://api.codetabs.com/v1/proxy?quest=';
 
 function devProxied(url: string): string {
     return DEV_CORS_PROXY + encodeURIComponent(url);

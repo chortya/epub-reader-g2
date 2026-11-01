@@ -181,6 +181,8 @@ export class KosyncClient {
   async getProgress(document: string): Promise<RemoteProgress | null> {
     const res = await this.request('GET', `/syncs/progress/${encodeURIComponent(document)}`);
     if (res.status === 401) throw new KosyncError('Not authorized', 401);
+    // Some kosync-compatible servers answer 404/204 for a never-synced book.
+    if (res.status === 404 || res.status === 204) return null;
     if (!res.ok) throw await this.errorFrom(res, 'Fetching progress failed');
     const body = await res.json().catch(() => null);
     if (!body || typeof body !== 'object' || typeof body.percentage !== 'number') return null;
@@ -272,10 +274,13 @@ export function decidePull(
   if (!remote || typeof remote.percentage !== 'number') return 'none';
   if (remote.device_id === deviceId) return 'ownDevice';
   if (local && Math.abs(remote.percentage - local.percentage) < 0.0001) return 'same';
-  if (interactive || !local) return 'apply';
+  if (!local) return 'apply';
+  // Both sides know when they moved: the newer position wins, also for an
+  // explicit sync (whose caller then pushes ours instead).
   if (typeof remote.timestamp === 'number' && local.savedAtMs !== null) {
     return remote.timestamp * 1000 > local.savedAtMs ? 'apply' : 'older';
   }
+  if (interactive) return 'apply';
   // Old servers send no timestamp: only move forward.
   return remote.percentage > local.percentage ? 'apply' : 'older';
 }

@@ -57,11 +57,39 @@ export function parseKosyncTarget(raw) {
   return url.origin + url.pathname.replace(/\/+$/, '');
 }
 
+/** Request body as text, or null as soon as it exceeds `max` bytes. */
+async function readLimited(request, max) {
+  const declared = Number(request.headers.get('content-length') ?? '0');
+  if (declared > max) return null;
+  if (!request.body) return '';
+  const reader = request.body.getReader();
+  const chunks = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
 const KOSYNC_ROUTES = [
   { method: 'POST', re: /^\/users\/create$/ },
   { method: 'GET', re: /^\/users\/auth$/ },
   { method: 'PUT', re: /^\/syncs\/progress$/ },
-  { method: 'GET', re: /^\/syncs\/progress\/[A-Za-z0-9_.%-]{1,128}$/ },
+  // Document ids are MD5 hex digests: nothing that could encode a path.
+  { method: 'GET', re: /^\/syncs\/progress\/[A-Fa-f0-9]{32}$/ },
 ];
 
 async function handleKosync(request, path, fetchImpl) {
@@ -78,8 +106,11 @@ async function handleKosync(request, path, fetchImpl) {
   }
   let body;
   if (request.method === 'POST' || request.method === 'PUT') {
-    body = await request.text();
-    if (body.length > MAX_KOSYNC_BODY) return json(413, { message: 'Request too large' });
+    if (!(request.headers.get('content-type') ?? '').toLowerCase().startsWith('application/json')) {
+      return json(415, { message: 'JSON body required' });
+    }
+    body = await readLimited(request, MAX_KOSYNC_BODY);
+    if (body === null) return json(413, { message: 'Request too large' });
   }
   let upstream;
   try {
@@ -94,10 +125,14 @@ async function handleKosync(request, path, fetchImpl) {
 }
 
 async function fetchGutenberg(path, fetchImpl, cacheTtl) {
-  return fetchImpl(`${GUTENBERG}${path}`, {
-    headers: { 'User-Agent': USER_AGENT },
-    cf: { cacheTtl, cacheEverything: true },
-  });
+  try {
+    return await fetchImpl(`${GUTENBERG}${path}`, {
+      headers: { 'User-Agent': USER_AGENT },
+      cf: { cacheTtl, cacheEverything: true },
+    });
+  } catch {
+    return new Response(null, { status: 502 });
+  }
 }
 
 async function handleGutenberg(request, path, fetchImpl) {
