@@ -144,6 +144,26 @@ function wordWrapWithOffsets(text: string, measure: LineMeasure): WrappedLine[] 
   return lines;
 }
 
+/** Approximate widths within this many px of the limit are measured exactly. */
+const FAST_SLACK_PX = 16;
+/**
+ * Token widths are pure functions of (measure, token): cached per measure
+ * object across paragraphs and chapters, bounded so a huge vocabulary can't
+ * grow it without limit.
+ */
+const tokenWidthCaches = new WeakMap<LineMeasure, Map<string, number>>();
+const MAX_CACHED_TOKENS = 50_000;
+
+function widthCacheFor(measure: LineMeasure): Map<string, number> {
+  let cache = tokenWidthCaches.get(measure);
+  if (!cache) {
+    cache = new Map();
+    tokenWidthCaches.set(measure, cache);
+  }
+  if (cache.size > MAX_CACHED_TOKENS) cache.clear();
+  return cache;
+}
+
 function wrapParagraphWithOffsets(
   text: string,
   measure: LineMeasure,
@@ -151,8 +171,27 @@ function wrapParagraphWithOffsets(
   paraStart: number,
 ): void {
   const fits = (line: string) => measure.width(line) <= measure.limit;
+  // Fast path: a line's width is tracked as the sum of cached token widths
+  // (pixel measuring every growing line made a 2 MB book take seconds). Only
+  // candidates within FAST_SLACK_PX of the limit get an exact measurement, so
+  // kerning/rounding drift can never push an accepted line past the limit.
+  const tokenWidths = widthCacheFor(measure);
+  const tokenWidth = (token: string) => {
+    let w = tokenWidths.get(token);
+    if (w === undefined) {
+      w = measure.width(token);
+      tokenWidths.set(token, w);
+    }
+    return w;
+  };
+  const fitsApprox = (approx: number, line: string) => {
+    if (approx <= measure.limit - FAST_SLACK_PX) return true;
+    if (approx > measure.limit + FAST_SLACK_PX) return false;
+    return fits(line);
+  };
   const words = text.split(/( +)/);
   let currentLine = '';
+  let currentWidth = 0;
   let currentLineStart = paraStart;
   let cursor = paraStart;
 
@@ -163,16 +202,19 @@ function wrapParagraphWithOffsets(
     if (/^ +$/.test(word)) {
       if (currentLine.length > 0) {
         currentLine += word;
+        currentWidth += tokenWidth(word);
       }
       cursor += word.length;
       continue;
     }
 
     const testLine = currentLine.length > 0 ? currentLine + word : word;
+    const testWidth = (currentLine.length > 0 ? currentWidth : 0) + tokenWidth(word);
 
-    if (fits(testLine)) {
+    if (fitsApprox(testWidth, testLine)) {
       if (currentLine.length === 0) currentLineStart = cursor;
       currentLine = testLine;
+      currentWidth = testWidth;
       cursor += word.length;
       continue;
     }
@@ -186,6 +228,7 @@ function wrapParagraphWithOffsets(
         currentLine += hyphenated.head + '-';
         lines.push({ text: currentLine, start: currentLineStart });
         currentLine = hyphenated.tail;
+        currentWidth = tokenWidth(currentLine);
         currentLineStart = cursor + hyphenated.head.length;
         cursor += word.length;
         continue;
@@ -196,6 +239,7 @@ function wrapParagraphWithOffsets(
     if (currentLine.trimEnd().length > 0) {
       lines.push({ text: currentLine.trimEnd(), start: currentLineStart });
       currentLine = '';
+      currentWidth = 0;
     }
 
     // If word is longer than a full line, hyphenate across lines
@@ -214,9 +258,17 @@ function wrapParagraphWithOffsets(
             continue;
           }
         }
-        // Hard break: the longest prefix that fits with a trailing '-'.
-        let cut = Math.max(1, rest.length - 1);
-        while (cut > 1 && !fits(rest.slice(0, cut) + '-')) cut--;
+        // Hard break: the longest prefix that fits with a trailing '-'. Width
+        // grows with length, so binary search (a backwards scan from the whole
+        // token made a 2,000-char URL take seconds).
+        let lo = 1;
+        let hi = Math.max(1, rest.length - 1);
+        while (lo < hi) {
+          const mid = (lo + hi + 1) >> 1;
+          if (fits(rest.slice(0, mid) + '-')) lo = mid;
+          else hi = mid - 1;
+        }
+        const cut = lo;
         const slice = rest.slice(0, cut);
         lines.push({ text: slice + '-', start: restStart });
         rest = rest.slice(cut);
@@ -224,8 +276,10 @@ function wrapParagraphWithOffsets(
         currentLineStart = restStart;
       }
       currentLine = rest;
+      currentWidth = tokenWidth(rest);
     } else {
       currentLine = word;
+      currentWidth = tokenWidth(word);
       currentLineStart = cursor;
     }
     cursor += word.length;

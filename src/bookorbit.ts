@@ -279,6 +279,8 @@ const BATCH_SIZE = 20;
 /** ...or this long after the first queued event (and always on background/exit). */
 export const STATS_FLUSH_DELAY_MS = 60_000;
 const MAX_PENDING_PER_BOOK = 300;
+/** Bridge-storage key of the persisted reading-time outbox. */
+export const BOOKORBIT_STATS_KEY = 'epub-bookorbit-stats-outbox';
 
 type Clock = () => number;
 
@@ -312,6 +314,63 @@ export class BookOrbitTracker {
    * switch, reopen) and goes out with the next flush of any book.
    */
   private static outboxes = new Map<string, Map<string, PageStatEvent[]>>();
+
+  // Persistence of the outbox (bridge storage in the app), so reading time
+  // read offline survives the WebView being killed or the app restarting.
+  private static storage: { load(): Promise<string | null | undefined>; save(raw: string): Promise<unknown> } | null = null;
+  private static persistTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Install storage and merge in what an earlier run left unsent. */
+  static async useStorage(storage: { load(): Promise<string | null | undefined>; save(raw: string): Promise<unknown> }): Promise<void> {
+    BookOrbitTracker.storage = storage;
+    let raw: string | null | undefined = null;
+    try {
+      raw = await storage.load();
+    } catch { /* nothing restored */ }
+    if (!raw) return;
+    try {
+      const data = JSON.parse(raw) as Record<string, Record<string, PageStatEvent[]>>;
+      for (const [account, books] of Object.entries(data ?? {})) {
+        let box = BookOrbitTracker.outboxes.get(account);
+        if (!box) {
+          box = new Map();
+          BookOrbitTracker.outboxes.set(account, box);
+        }
+        for (const [hash, events] of Object.entries(books ?? {})) {
+          if (!Array.isArray(events)) continue;
+          const valid = events.filter((e) => e && [e.page, e.startTime, e.durationSeconds, e.totalPages].every(Number.isInteger));
+          box.set(hash, [...valid, ...(box.get(hash) ?? [])].slice(-MAX_PENDING_PER_BOOK));
+        }
+      }
+    } catch { /* corrupt: start empty */ }
+  }
+
+  /** Write the outbox soon (debounced), or right away before the app may die. */
+  static persist(immediate = false): Promise<void> {
+    const storage = BookOrbitTracker.storage;
+    if (!storage) return Promise.resolve();
+    const write = () => {
+      const data: Record<string, Record<string, PageStatEvent[]>> = {};
+      for (const [account, box] of BookOrbitTracker.outboxes) {
+        for (const [hash, events] of box) {
+          if (events.length === 0) continue;
+          (data[account] ??= {})[hash] = events;
+        }
+      }
+      return storage.save(JSON.stringify(data)).then(() => undefined, () => undefined);
+    };
+    if (BookOrbitTracker.persistTimer !== null) {
+      clearTimeout(BookOrbitTracker.persistTimer);
+      BookOrbitTracker.persistTimer = null;
+    }
+    if (immediate) return write();
+    BookOrbitTracker.persistTimer = setTimeout(() => {
+      BookOrbitTracker.persistTimer = null;
+      void write();
+    }, 2_000);
+    (BookOrbitTracker.persistTimer as { unref?: () => void }).unref?.();
+    return Promise.resolve();
+  }
 
   private get outbox(): Map<string, PageStatEvent[]> {
     const key = this.client.accountKey;
@@ -357,6 +416,8 @@ export class BookOrbitTracker {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
     }
+    // Backgrounding/exit: write the outbox first, the upload may not finish.
+    if (keepalive) void BookOrbitTracker.persist(true);
     this.uploading = this.uploading.then(async () => {
       // Drain in batches within BookOrbit's 500-events-per-request limit,
       // covering every book with pending events in this account.
@@ -379,9 +440,11 @@ export class BookOrbitTracker {
             this.outbox.set(b.hash, [...b.events, ...q].slice(-MAX_PENDING_PER_BOOK));
           }
           this.onError(e);
+          void BookOrbitTracker.persist();
           this.scheduleFlush(); // try again later
           return;
         }
+        void BookOrbitTracker.persist(); // drop what was acknowledged
       }
       this.scheduleFlush(); // still more after 10 rounds: continue later
     });
@@ -415,6 +478,7 @@ export class BookOrbitTracker {
       durationSeconds: Math.min(seconds, MAX_PAGE_SECONDS),
       totalPages: c.totalPages,
     });
+    BookOrbitTracker.persist();
     this.scheduleFlush();
   }
 

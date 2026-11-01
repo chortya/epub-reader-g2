@@ -351,3 +351,61 @@ test('markSynced drops a push that was still preparing (locator await)', async (
   await marking;
   assert.equal(calls.length, 0);
 });
+
+test('decidePull: clock skew window and measured offset', () => {
+  const remote = { document: 'd', progress: 'p', percentage: 0.6, device_id: 'KOBO', timestamp: 43_260 }; // 12:01 server
+  const local = { percentage: 0.4, savedAtMs: 43_380_000 }; // phone says 12:03, 3 min fast
+  // Unknown offset: 2 min apart is within the 5 min window -> explicit sync adopts remote.
+  assert.equal(decidePull(remote, local, 'ME', true), 'apply');
+  // Automatic: inside the window, only forward.
+  assert.equal(decidePull(remote, local, 'ME', false), 'apply');
+  assert.equal(decidePull({ ...remote, percentage: 0.2 }, local, 'ME', false), 'older');
+  // Offset measured (phone 3 min fast): local is really 12:00 -> remote newer.
+  assert.equal(decidePull({ ...remote, percentage: 0.2 }, local, 'ME', false, -180_000), 'apply');
+  // Far apart: plain ordering.
+  assert.equal(decidePull({ ...remote, timestamp: 40_000 }, local, 'ME', true), 'older');
+});
+
+test('updateProgress learns the server clock offset; stalled JSON bodies time out', async () => {
+  const serverNow = Math.floor(Date.now() / 1000) + 600; // server 10 min ahead
+  const { impl } = fakeFetch(() => ({ status: 200, body: { document: 'd', timestamp: serverNow } }));
+  const c = new KosyncClient({ server: SETTINGS.server, fetchImpl: impl });
+  await c.updateProgress({ document: 'd', progress: 'p', percentage: 0.1 }, 'X');
+  assert.ok(Math.abs(c.clockOffsetMs! - 600_000) < 2_000, String(c.clockOffsetMs));
+  const stalled = (async () => new Response(new ReadableStream({ start(ctrl) { ctrl.enqueue(new TextEncoder().encode('{"perc')); } }), { status: 200 })) as unknown as typeof fetch;
+  const slow = new KosyncClient({ server: SETTINGS.server, fetchImpl: stalled, timeoutMs: 50 });
+  const t0 = Date.now();
+  assert.equal(await slow.getProgress('d'), null);
+  assert.ok(Date.now() - t0 < 2_000);
+});
+
+test('pull: an exact remote position pages away in the same paragraph is not "same"', async () => {
+  const long = 'word '.repeat(900).trim(); // one ~4,500-char paragraph
+  const xhtml = `<html><body><p>${long}</p></body></html>`;
+  const b: Book = {
+    title: 'L', partialMd5: 'e'.repeat(32),
+    chapters: [{ title: 'L', text: long, spineIndex: 0 }],
+    loadChapterXhtml: async () => xhtml,
+  };
+  const { impl } = fakeFetch(() => ({ status: 200, body: { document: 'x', progress: '/body/DocFragment[1]/body/p/text().3000', percentage: 0.66, device_id: 'KOBO', timestamp: 2_000_000_000 } }));
+  const session = new KosyncSession({ book: b, filename: null, settings: SETTINGS, client: new KosyncClient({ server: SETTINGS.server, fetchImpl: impl }), parseBody });
+  const r = await session.pull({ location: { chapterIndex: 0, offset: 0 }, savedAtMs: 1 }, false);
+  assert.equal(r.decision, 'apply');
+  assert.equal(r.target?.offset, 3000);
+  const near = await session.pull({ location: { chapterIndex: 0, offset: 2950 }, savedAtMs: 1 }, false);
+  assert.equal(near.decision, 'same');
+});
+
+test('a failed push is kept and retried by the next flush', async () => {
+  let fail = true;
+  const { impl, calls } = fakeFetch(() => (fail ? { status: 503, body: {} } : { status: 200, body: {} }));
+  const clock = fakeTimers();
+  const session = new KosyncSession({ book: book(), filename: null, settings: SETTINGS, client: new KosyncClient({ server: SETTINGS.server, fetchImpl: impl }), parseBody, timers: clock.timers });
+  session.schedulePush({ chapterIndex: 0, offset: 5 });
+  await session.flush().catch(() => {});
+  assert.equal(session.hasUnsentPosition, true);
+  fail = false;
+  await session.flush();
+  assert.equal(session.hasUnsentPosition, false);
+  assert.equal(calls.filter((c) => c.method === 'PUT').length, 2);
+});

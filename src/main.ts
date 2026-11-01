@@ -34,7 +34,7 @@ import {
   type KosyncSettings,
   type SyncProvider,
 } from './kosync';
-import { BookOrbitClient, BookOrbitTracker, type BookOrbitBook, type BookOrbitSort } from './bookorbit';
+import { BookOrbitClient, BookOrbitTracker, BOOKORBIT_STATS_KEY, type BookOrbitBook, type BookOrbitSort } from './bookorbit';
 import {
   cacheStatus,
   loadCacheIndex,
@@ -108,6 +108,14 @@ async function main() {
       if (!isKosyncLoggedIn(s)) return null;
       return new KosyncSession({ book, filename, settings: s, client: makeKosyncClient(s) });
     };
+    // Unsent BookOrbit reading time from earlier runs (survives app restarts).
+    await BookOrbitTracker.useStorage({
+      load: async () => (await (bridge as any).getLocalStorage(BOOKORBIT_STATS_KEY)) || window.localStorage.getItem(BOOKORBIT_STATS_KEY),
+      save: async (raw: string) => {
+        window.localStorage.setItem(BOOKORBIT_STATS_KEY, raw);
+        await (bridge as any).setLocalStorage(BOOKORBIT_STATS_KEY, raw);
+      },
+    });
     // BookOrbit only: reading time (page stats) and "finished" status.
     client.createReadingTracker = (book) => {
       const s = kosyncSettings;
@@ -706,7 +714,11 @@ async function main() {
     let query = '';
     let searchTimer: number | null = null;
     const rows = new Map<number, { book: BookOrbitBook; render: () => void }>();
-    const inFlight = new Map<number, Promise<StoredBook | null>>();
+    // Keyed by account + book id: the same numeric id on two servers or logins
+    // is a different book.
+    const inFlight = new Map<string, Promise<StoredBook | null>>();
+    const jobKey = (account: string, bookId: number) => `${account}#${bookId}`;
+    const currentAccount = () => makeBookOrbitClient()?.accountKey ?? null;
 
     // Local library ids + the BookOrbit download index, refreshed per list load.
     let localIds = new Set<string>();
@@ -741,11 +753,14 @@ async function main() {
 
     /** Download (or re-download) a book into the local library. */
     const download = (b: BookOrbitBook, onProgress: (text: string) => void): Promise<StoredBook | null> => {
-      const running = inFlight.get(b.id);
+      const account = currentAccount();
+      if (!account) return Promise.resolve(null);
+      const key = jobKey(account, b.id);
+      const running = inFlight.get(key);
       if (running) return running;
       const job = (async () => {
         const bo = makeBookOrbitClient();
-        if (!bo) return null;
+        if (!bo || bo.accountKey !== account) return null;
         const file = await bo.epubFile(b.id);
         if (!file) throw new Error(`No EPUB file for "${b.title}" in BookOrbit`);
         const data = await bo.download(file.id, {
@@ -792,9 +807,9 @@ async function main() {
         if (client) await renderLibrary(client, storageBridge); // also refreshes the glasses' book list
         return stored;
       })();
-      inFlight.set(b.id, job);
+      inFlight.set(key, job);
       job.finally(() => {
-        inFlight.delete(b.id);
+        inFlight.delete(key);
         rows.get(b.id)?.render(); // the row on screen now (the list may have been rebuilt)
       }).catch(() => {});
       return job;
@@ -804,6 +819,7 @@ async function main() {
     const read = async (b: BookOrbitBook, onProgress: (text: string) => void) => {
       const bo = makeBookOrbitClient();
       if (!bo || !client) return;
+      const account = bo.accountKey;
       const status = cacheStatus(index, bo.accountKey, b, localIds);
       let stored: StoredBook | null = null;
       if (status.kind !== 'none') {
@@ -815,6 +831,12 @@ async function main() {
         stored = await download(b, onProgress);
       }
       if (!stored) return;
+      // Logged out / switched account while downloading: don't open the book
+      // (its sync would run under the new login).
+      if (currentAccount() !== account) {
+        setStatus(`Not opening "${b.title}": the BookOrbit login changed.`);
+        return;
+      }
       const book = await parseEpub(stored.buffer, stored.filename);
       // resume=true: the sync pull places the reader at BookOrbit's position.
       await client.loadBook(book, true, stored.bookId, stored.filename);
@@ -840,7 +862,8 @@ async function main() {
         const bo = makeBookOrbitClient();
         const status = bo ? cacheStatus(index, bo.accountKey, b, localIds) : { kind: 'none' as const };
         meta.textContent = formatMeta(b, status);
-        const busy = inFlight.has(b.id);
+        const account = currentAccount();
+        const busy = account !== null && inFlight.has(jobKey(account, b.id));
         dl.disabled = busy || status.kind === 'onDevice';
         dl.textContent = busy ? 'Downloading...'
           : status.kind === 'onDevice' ? 'Downloaded' : status.kind === 'updateAvailable' ? 'Update' : 'Download';

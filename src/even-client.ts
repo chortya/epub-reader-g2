@@ -237,7 +237,7 @@ export class EvenEpubClient {
   // Pushes wait until the session's first pull has reconciled with the server,
   // so an old local position can't overwrite newer remote progress.
   private kosyncReconciled = false;
-  private kosyncReconciling = false;
+  private reconcilingSession: KosyncSession | null = null;
   private lastReconcileAttempt = 0;
   // A move happened while pushes were held (before reconciliation).
   private kosyncDirty = false;
@@ -398,21 +398,31 @@ export class EvenEpubClient {
   private async reconcileKosync(hadLocal: boolean): Promise<void> {
     const session = this.kosync;
     const book = this.book;
-    if (!session || this.kosyncReconciling) return;
-    this.kosyncReconciling = true;
+    // Scoped to the session: an old session's slow pull must not block the
+    // pull of the session that replaced it.
+    if (!session || this.reconcilingSession === session) return;
+    this.reconcilingSession = session;
     this.lastReconcileAttempt = Date.now();
-    let ok = false;
+    let outcome: { ok: boolean; localNewer?: boolean } = { ok: false };
     try {
-      ok = (await this.pullKosync(false, hadLocal ? this.locationChangedAt : undefined)).ok;
+      outcome = await this.pullKosync(false, hadLocal ? this.locationChangedAt : undefined);
     } finally {
-      this.kosyncReconciling = false;
+      if (this.reconcilingSession === session) this.reconcilingSession = null;
       const current = this.kosync === session && this.book === book;
-      if (current) {
+      if (!current) {
+        // The session changed meanwhile; make sure the new one gets its pull.
+        if (this.kosync && !this.kosyncReconciled && this.reconcilingSession === null) {
+          void this.reconcileKosync(true);
+        }
+      } else {
         // Only a successful pull unlocks pushes; a failed one is retried on
         // the next move (noteLocation), so unread remote progress is safe.
-        if (ok) {
+        if (outcome.ok) {
           this.kosyncReconciled = true;
-          if (this.kosyncDirty && (this.view === 'reading' || this.view === 'flowReading')) {
+          const reading = this.view === 'reading' || this.view === 'flowReading';
+          // Moves made while the pull ran, a push that failed earlier, or a
+          // local position newer than the server's: upload it now.
+          if (reading && (this.kosyncDirty || outcome.localNewer || session.hasUnsentPosition)) {
             this.kosyncDirty = false;
             session.schedulePush(this.currentLocation(), (e) => this.reportKosyncError(e, false));
           }
@@ -521,7 +531,7 @@ export class EvenEpubClient {
    *
    * @param localSavedAt undefined = no local position (always adopt remote).
    */
-  private async pullKosync(interactive: boolean, localSavedAt?: number | null): Promise<{ ok: boolean; message: string }> {
+  private async pullKosync(interactive: boolean, localSavedAt?: number | null): Promise<{ ok: boolean; message: string; localNewer?: boolean }> {
     const session = this.kosync;
     const book = this.book;
     if (!session || !book) return { ok: false, message: 'Open a book to sync its progress.' };
@@ -574,7 +584,9 @@ export class EvenEpubClient {
         setStatus(`Sync: progress sent (${pct}%)`);
         return { ok: true, message: `Progress sent (${pct}%).` };
       }
-      return { ok: true, message: 'Up to date.' };
+      // Automatic pull: ours is the newer position (e.g. read offline, or a
+      // push failed earlier) -> the caller uploads it.
+      return { ok: true, message: 'Up to date.', localNewer: result.decision === 'older' || result.decision === 'none' };
     } catch (e) {
       this.reportKosyncError(e, interactive);
       return { ok: false, message: `Sync failed: ${e instanceof KosyncError ? e.message : String(e)}` };
@@ -2013,6 +2025,12 @@ export class EvenEpubClient {
       const r = reduceLifecycle(this.lifecycleState, this.pendingMenuAction, { kind: 'foregroundEnter' });
       this.lifecycleState = r.state;
       if (r.effects.restoreView) {
+        // Other devices may have moved on while we were away: pull again
+        // before any push (forward-only, never under a user who moved).
+        if (this.kosync) {
+          this.kosyncReconciled = false;
+          void this.reconcileKosync(true);
+        }
         await this.refreshCurrentView();
         if (this.view === 'reading' || this.view === 'flowReading') {
           this.startClockTicker();
@@ -2542,7 +2560,7 @@ export class EvenEpubClient {
       } else {
         // Held until the first pull succeeds; retry a failed one now and then.
         this.kosyncDirty = true;
-        if (!this.kosyncReconciling && Date.now() - this.lastReconcileAttempt > 30_000) {
+        if (this.reconcilingSession === null && Date.now() - this.lastReconcileAttempt > 30_000) {
           void this.reconcileKosync(true);
         }
       }

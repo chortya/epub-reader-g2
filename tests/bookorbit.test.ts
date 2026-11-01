@@ -219,3 +219,22 @@ test('flush drains a large backlog in several requests', async () => {
   assert.equal(t2.pendingEvents + t.pendingEvents, 0);
   assert.ok(calls.length - mark >= 1);
 });
+
+test('the reading-time outbox persists and is restored by a new run', async () => {
+  let saved = '';
+  const storage = { load: async () => saved, save: async (raw: string) => { saved = raw; } };
+  await BookOrbitTracker.useStorage(storage);
+  let now = 0;
+  const { impl } = fake(() => ({ status: 503, body: {} }));
+  const c = new BookOrbitClient({ server: BASE, username: 'persist-user', userkey: 'k'.repeat(32), fetchImpl: impl });
+  const t = new BookOrbitTracker({ client: c, hash: 'p1', device: DEVICE, now: () => now });
+  t.pageShown(1, 5); now += 30_000; t.pause();
+  await t.flush(true); // offline; keepalive flush writes the outbox first
+  await BookOrbitTracker.persist(true);
+  assert.match(saved, /persist-user/);
+  // "New run": restore from storage into a fresh outbox map.
+  (BookOrbitTracker as any).outboxes = new Map();
+  await BookOrbitTracker.useStorage(storage);
+  const t2 = new BookOrbitTracker({ client: c, hash: 'p1', device: DEVICE, now: () => now });
+  assert.equal(t2.pendingEvents, 1);
+});

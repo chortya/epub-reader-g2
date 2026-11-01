@@ -292,3 +292,23 @@ test('pixel wrapping: an unbreakable token longer than a line is split to fit', 
   for (const line of lines) assert.ok(getTextWidth(line) <= READING_LINE_LIMIT_PX, line);
   assert.equal(lines.join('').replace(/-(?=.)/g, '').includes('abcdefghij'), true);
 });
+
+test('pixel and character wrapping never share cached widths', async () => {
+  const { paginateText } = await import('../src/paginator.ts');
+  const text = 'the quick brown fox jumps over the lazy dog and keeps running far away '.repeat(40);
+  const pixelFirst = paginateText(text, undefined, 9).join('\n');
+  paginateText(text, 59, 9);
+  assert.equal(paginateText(text, undefined, 9).join('\n'), pixelFirst, 'pixel result unchanged after a char run');
+});
+
+test('pixel wrapping: a 4,000-character unbroken token paginates quickly and fits', async () => {
+  const { paginateText, READING_LINE_LIMIT_PX } = await import('../src/paginator.ts');
+  const { getTextWidth } = await import('../src/text-metrics.ts');
+  const token = '1234567890'.repeat(400);
+  const t0 = performance.now();
+  const lines = paginateText(`id ${token} end`, undefined, 9).flatMap((p) => p.split('\n'));
+  const ms = performance.now() - t0;
+  assert.ok(ms < 1000, `took ${ms.toFixed(0)} ms`);
+  for (const line of lines) assert.ok(getTextWidth(line) <= READING_LINE_LIMIT_PX, line);
+  assert.equal(lines.join('').replace(/-/g, '').replace(/\s/g, ''), `id${token}end`);
+});

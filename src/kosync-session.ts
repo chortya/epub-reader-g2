@@ -30,6 +30,12 @@ export type PullResult = {
   target: ReaderLocation | null;
 };
 
+/** Two exact positions closer than this (characters) are the same place. */
+const SAME_PLACE_CHARS = 200;
+
+/** Parsed chapter DOMs kept per session (LRU). */
+const MAX_CACHED_LOCATORS = 4;
+
 /** Trailing delay after the last position change before pushing. */
 export const PUSH_DEBOUNCE_MS = 15_000;
 /** Upper bound between pushes while positions keep changing (Flow mode). */
@@ -68,6 +74,8 @@ export class KosyncSession {
   private firstPendingAt: number | null = null;
   private pending: ReaderLocation | null = null;
   private lastPushed: string | null = null;
+  /** Latest position whose upload failed (cleared on success or supersession). */
+  private unacknowledged: ReaderLocation | null = null;
   // Upload ordering is shared by every session (a book reopened gets a new
   // session, and its PUTs must still queue behind the old session's). The
   // sequence is per document: a newer push or an adopted remote position
@@ -117,6 +125,11 @@ export class KosyncSession {
 
   private locator(chapterIndex: number): Promise<ChapterLocator | null> {
     let entry = this.locators.get(chapterIndex);
+    if (entry) {
+      // LRU: refresh recency.
+      this.locators.delete(chapterIndex);
+      this.locators.set(chapterIndex, entry);
+    }
     if (!entry) {
       const load = this.book.loadChapterXhtml;
       const text = this.book.chapters[chapterIndex]?.text;
@@ -131,6 +144,13 @@ export class KosyncSession {
         }
       })();
       this.locators.set(chapterIndex, entry);
+      // Each locator keeps a parsed chapter DOM: hold only the few chapters
+      // around the reader, not every chapter of a 300-chapter book.
+      while (this.locators.size > MAX_CACHED_LOCATORS) {
+        const oldest = this.locators.keys().next().value;
+        if (oldest === undefined) break;
+        this.locators.delete(oldest);
+      }
     }
     return entry;
   }
@@ -178,14 +198,28 @@ export class KosyncSession {
       local ? { percentage: this.percentageAt(local.location), savedAtMs: local.savedAtMs } : null,
       this.settings.deviceId,
       interactive,
+      this.client.clockOffsetMs,
     );
     let target = decision === 'apply' && remote ? await this.locationFor(remote) : null;
     // Percentages differ between KOReader (pages) and us (characters), so
-    // also compare where the two positions land: same paragraph = in sync.
-    if (target && local && await this.xpointerAt(target) === await this.xpointerAt(local.location)) {
+    // also compare where the two positions land.
+    if (target && local && remote && await this.landsOnSamePlace(remote, target, local.location)) {
       return { decision: 'same', remote, target: null };
     }
     return { decision: target || decision !== 'apply' ? decision : 'none', remote, target };
+  }
+
+  /**
+   * Same place for sync purposes. A remote XPointer with a text offset is
+   * exact, so it must land within SAME_PLACE_CHARS of us (a long paragraph
+   * spans pages). A paragraph-only XPointer (e.g. our own pushes) can't say
+   * where in the paragraph the reader is, so the same paragraph counts.
+   */
+  private async landsOnSamePlace(remote: RemoteProgress, target: ReaderLocation, local: ReaderLocation): Promise<boolean> {
+    if (target.chapterIndex !== local.chapterIndex) return false;
+    const precise = parseXPointer(remote.progress)?.point != null;
+    if (precise) return Math.abs(target.offset - local.offset) <= SAME_PLACE_CHARS;
+    return await this.xpointerAt(target) === await this.xpointerAt(local);
   }
 
   /** Push now. Skips unchanged positions unless forced. */
@@ -221,6 +255,7 @@ export class KosyncSession {
     this.cancelScheduledPush();
     const document = this.document;
     if (document) KosyncSession.bumpSeq(document); // drop uploads queued before the jump
+    this.unacknowledged = null; // the remote position wins; nothing of ours to resend
     const progress = await this.xpointerAt(loc);
     if (progress) this.lastPushed = `${progress}|${this.percentageAt(loc)}`;
   }
@@ -228,6 +263,7 @@ export class KosyncSession {
   /** Trailing-debounced push with a max wait, for page turns and Flow ticks. */
   schedulePush(loc: ReaderLocation, onError?: (e: unknown) => void): void {
     this.pending = loc;
+    this.unacknowledged = null; // superseded by a newer position
     // Warm the chapter's locator now, so a flush at app exit can send the
     // keepalive request without first unzipping and parsing XHTML.
     void this.locator(loc.chapterIndex);
@@ -241,16 +277,37 @@ export class KosyncSession {
       this.pushTimer = null;
       this.firstPendingAt = null;
       this.pending = null;
-      if (target) this.push(target).catch((e) => onError?.(e));
+      if (target) this.pushOrKeep(target).catch((e) => onError?.(e));
     }, delay);
   }
 
-  /** Push whatever is pending right away (app backgrounding, book switch). */
+  /** Push whatever is pending (or a push that failed) right away: backgrounding, book switch, retry. */
   async flush(opts: { keepalive?: boolean } = {}): Promise<void> {
-    const target = this.pending;
+    const target = this.pending ?? this.unacknowledged;
     this.cancelScheduledPush();
-    if (target) await this.push(target, { keepalive: opts.keepalive });
+    if (target) await this.pushOrKeep(target, opts.keepalive);
     else await KosyncSession.uploads; // an upload already under way
+  }
+
+  /** True while a position failed to upload and is waiting for a retry. */
+  get hasUnsentPosition(): boolean {
+    return this.unacknowledged !== null || this.pending !== null;
+  }
+
+  /**
+   * push(), remembering the position if the upload fails so a later flush
+   * (next move, foreground, reconnect) retries it instead of dropping it.
+   */
+  private async pushOrKeep(loc: ReaderLocation, keepalive = false): Promise<boolean> {
+    try {
+      const sent = await this.push(loc, { keepalive });
+      if (this.unacknowledged === loc) this.unacknowledged = null;
+      return sent;
+    } catch (e) {
+      // Keep only the newest failed position; a newer schedulePush replaces it.
+      if (this.pending === null) this.unacknowledged = loc;
+      throw e;
+    }
   }
 
   cancelScheduledPush(): void {

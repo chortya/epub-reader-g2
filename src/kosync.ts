@@ -228,7 +228,7 @@ export class KosyncClient {
     // Some kosync-compatible servers answer 404/204 for a never-synced book.
     if (res.status === 404 || res.status === 204) return null;
     if (!res.ok) throw await this.errorFrom(res, 'Fetching progress failed');
-    const body = await res.json().catch(() => null);
+    const body = await this.readJson(res);
     if (!body || typeof body !== 'object' || typeof body.percentage !== 'number') return null;
     return {
       document: String(body.document ?? document),
@@ -240,7 +240,16 @@ export class KosyncClient {
     };
   }
 
+  /**
+   * Server clock minus this device's clock (ms), learned from the timestamp
+   * kosync servers return for a PUT; null until the first push. Lets pulls
+   * compare the server's timestamps with local save times fairly when the
+   * phone's clock is off.
+   */
+  clockOffsetMs: number | null = null;
+
   async updateProgress(update: ProgressUpdate, deviceId: string, keepalive = false): Promise<void> {
+    const sentAt = Date.now();
     const res = await this.request('PUT', '/syncs/progress', {
       body: {
         document: update.document,
@@ -253,6 +262,31 @@ export class KosyncClient {
     });
     if (res.status === 401) throw new KosyncError('Not authorized', 401);
     if (!res.ok) throw await this.errorFrom(res, 'Pushing progress failed');
+    const body = await this.readJson(res);
+    if (body && typeof body.timestamp === 'number' && Number.isFinite(body.timestamp)) {
+      const local = (sentAt + Date.now()) / 2; // midpoint of the round trip
+      this.clockOffsetMs = body.timestamp * 1000 - local;
+    }
+  }
+
+  /**
+   * JSON body with its own timeout: request()'s timer stops once headers
+   * arrive, and a body that stalls afterwards must not hang the caller.
+   * Resolves null on a bad body or timeout.
+   */
+  protected async readJson(res: Response, timeoutMs = this.opts.timeoutMs ?? 10_000): Promise<any> {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const timeout = new Promise<null>((resolve) => {
+      timer = setTimeout(() => {
+        res.body?.cancel().catch(() => {});
+        resolve(null);
+      }, timeoutMs);
+    });
+    try {
+      return await Promise.race([res.json().catch(() => null), timeout]);
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
   }
 
   protected async request(method: string, path: string, opts: KosyncRequestOptions = {}): Promise<Response> {
@@ -291,15 +325,18 @@ export class KosyncClient {
 
   protected async errorFrom(res: Response, fallback: string): Promise<KosyncError> {
     let message = `${fallback} (HTTP ${res.status})`;
-    try {
-      const body = await res.json();
-      if (body && typeof body.message === 'string') message = `${fallback}: ${body.message}`;
-    } catch { /* non-JSON error body */ }
+    const body = await this.readJson(res, 3000);
+    if (body && typeof body.message === 'string') message = `${fallback}: ${body.message}`;
     return new KosyncError(message, res.status);
   }
 }
 
 export type PullDecision = 'apply' | 'none' | 'same' | 'ownDevice' | 'older';
+
+/** Order of two save times this close is uncertain (device clocks drift). */
+export const CLOCK_SKEW_WINDOW_MS = 5 * 60_000;
+/** ...once the server-vs-phone offset is measured, only latency/rounding remains. */
+export const CLOCK_SKEW_WINDOW_KNOWN_MS = 15_000;
 
 /**
  * Whether a remote position should replace the local one. Mirrors KOReader's
@@ -312,15 +349,26 @@ export function decidePull(
   local: { percentage: number; savedAtMs: number | null } | null,
   deviceId: string,
   interactive: boolean,
+  clockOffsetMs: number | null = null,
 ): PullDecision {
   if (!remote || typeof remote.percentage !== 'number') return 'none';
   if (remote.device_id === deviceId) return 'ownDevice';
   if (local && Math.abs(remote.percentage - local.percentage) < 0.0001) return 'same';
   if (!local) return 'apply';
   // Both sides know when they moved: the newer position wins, also for an
-  // explicit sync (whose caller then pushes ours instead).
+  // explicit sync (whose caller then pushes ours instead). Local save times
+  // are moved onto the server's clock when the offset is known; within the
+  // remaining uncertainty the order is unknown, so an explicit sync adopts the
+  // remote position (as KOReader's manual pull does) and an automatic one only
+  // moves forward.
   if (typeof remote.timestamp === 'number' && local.savedAtMs !== null) {
-    return remote.timestamp * 1000 > local.savedAtMs ? 'apply' : 'older';
+    const localOnServerClock = local.savedAtMs + (clockOffsetMs ?? 0);
+    const window = clockOffsetMs === null ? CLOCK_SKEW_WINDOW_MS : CLOCK_SKEW_WINDOW_KNOWN_MS;
+    const delta = remote.timestamp * 1000 - localOnServerClock;
+    if (delta > window) return 'apply';
+    if (delta < -window) return 'older';
+    if (interactive) return 'apply';
+    return remote.percentage > local.percentage ? 'apply' : 'older';
   }
   if (interactive) return 'apply';
   // Old servers send no timestamp: only move forward.
