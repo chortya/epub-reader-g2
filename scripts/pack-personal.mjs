@@ -4,6 +4,12 @@
 //
 //   PERSONAL_ORIGINS=https://bookorbit.example.org npm run pack:personal
 //
+// Optional PROVISION_FROM=<BookOrbit's provisioned KOReader plugin zip, or
+// its bookorbit_provision.lua>: the build then carries that login (server,
+// username, MD5 key) and applies it once on first start - no typing on the
+// phone. The key is passed to Vite through the environment only; it ends up
+// in the private package, never in git. Its server is whitelisted too.
+//
 // Writes build/app.personal.json (app.json + your origins) and packs
 // epub-reader-personal.ehpk. The committed app.json is left untouched, and
 // the public release check (npm run pack) does not apply. If VITE_RELAY_ORIGIN
@@ -12,12 +18,42 @@
 // want it.
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import JSZip from 'jszip';
 
 const root = new URL('..', import.meta.url);
 const app = JSON.parse(readFileSync(new URL('app.json', root), 'utf8'));
 const sdk = JSON.parse(readFileSync(new URL('node_modules/@evenrealities/even_hub_sdk/package.json', root), 'utf8')).version;
 
 const origins = (process.env.PERSONAL_ORIGINS ?? '').split(',').map((o) => o.trim().replace(/\/+$/, '')).filter(Boolean);
+
+/** server_url/username/userkey/generated_at from a bookorbit_provision.lua. */
+function parseProvisionLua(lua) {
+  const field = (name) => new RegExp(`${name}\\s*=\\s*"([^"]*)"`).exec(lua)?.[1];
+  const serverUrl = field('server_url');
+  const username = field('username');
+  const userkey = field('userkey');
+  if (!serverUrl || !username || !/^[a-f0-9]{32}$/.test(userkey ?? '')) {
+    throw new Error('PROVISION_FROM has no usable server_url/username/userkey');
+  }
+  return { serverUrl: serverUrl.replace(/\/+$/, ''), username, userkey, id: field('generated_at') ?? serverUrl };
+}
+
+let provision = null;
+if (process.env.PROVISION_FROM) {
+  const path = process.env.PROVISION_FROM;
+  let lua;
+  if (/\.zip$/i.test(path)) {
+    const zip = await JSZip.loadAsync(readFileSync(path));
+    const entry = Object.values(zip.files).find((f) => !f.dir && f.name.endsWith('bookorbit_provision.lua'));
+    if (!entry) throw new Error(`${path} has no bookorbit_provision.lua (download a provisioned plugin from BookOrbit)`);
+    lua = await entry.async('string');
+  } else {
+    lua = readFileSync(path, 'utf8');
+  }
+  provision = parseProvisionLua(lua);
+  origins.push(new URL(provision.serverUrl).origin);
+  console.log(`Provisioning login "${provision.username}" for ${provision.serverUrl} (key not shown).`);
+}
 const relay = (process.env.VITE_RELAY_ORIGIN ?? '').replace(/\/+$/, '');
 if (relay) origins.push(relay);
 if (origins.length === 0) {
@@ -50,7 +86,10 @@ writeFileSync(manifest, JSON.stringify({ ...app, entrypoint: app.entrypoint }, n
 
 const run = (cmd, args, env = {}) => execFileSync(cmd, args, { stdio: 'inherit', cwd: root, env: { ...process.env, ...env } });
 // Personal builds may reach the user's own servers directly (BookOrbit).
-run('npm', ['run', 'build'], { VITE_PERSONAL_BUILD: '1' });
+run('npm', ['run', 'build'], {
+  VITE_PERSONAL_BUILD: '1',
+  ...(provision ? { VITE_SYNC_PROVISION: JSON.stringify(provision) } : {}),
+});
 // evenhub resolves the entrypoint against the project folder, not the manifest's.
 run('npx', ['evenhub', 'pack', 'build/app.personal.json', './dist', '--sdk-ver', sdk, '--output', 'epub-reader-personal.ehpk']);
 console.log(`Personal build whitelists: ${network.whitelist.join(', ')}`);

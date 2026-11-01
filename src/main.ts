@@ -55,6 +55,7 @@ import {
 import { KosyncSession } from './kosync-session';
 import { md5Hex } from './md5';
 import { BOOKORBIT_AVAILABLE, RELAY_ORIGIN } from './relay';
+import { PROVISION_APPLIED_KEY, parseProvision, provisionedSettings } from './provision';
 
 import { MockBridge } from './mock-bridge';
 import { version as APP_VERSION } from '../package.json';
@@ -111,6 +112,24 @@ async function main() {
 
     // KOSync: settings load before any book opens so the first open can pull.
     kosyncSettings = await loadKosyncSettings(bridge as any, window.localStorage);
+    // Personal builds may carry a provisioned login (like BookOrbit's KOReader
+    // plugin): applied once on first start, then left to the user.
+    {
+      const provision = parseProvision(import.meta.env.VITE_SYNC_PROVISION);
+      if (provision) {
+        const applied = await (bridge as any).getLocalStorage(PROVISION_APPLIED_KEY).catch(() => null);
+        const next = provisionedSettings(kosyncSettings, provision, applied || null);
+        try {
+          if (next) {
+            await saveKosyncSettings(next, bridge as any, window.localStorage);
+            kosyncSettings = next;
+          }
+          await (bridge as any).setLocalStorage(PROVISION_APPLIED_KEY, provision.id);
+        } catch (e) {
+          console.warn('Provisioned login not applied:', e);
+        }
+      }
+    }
     client.createKosyncSession = (book, filename) => {
       const s = kosyncSettings;
       if (!isKosyncLoggedIn(s)) return null;
