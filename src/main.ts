@@ -18,6 +18,8 @@ import {
 } from './constants';
 import type { CachedBookMeta } from './types';
 import { matchesBookQuery } from './book-selection';
+import { createSerialExecutor } from './operation-queue';
+import { migrateLegacyPositionKeys } from './position-store';
 import {
   DEFAULT_KOSYNC_SERVER,
   KOSYNC_DEVICE_NAME,
@@ -716,13 +718,16 @@ async function main() {
       const onDevice = index.filter((e) => e.account === bo.accountKey && localIds.has(e.localBookId)).length;
       state.textContent = `${list.childElementCount} of ${listTotal} EPUBs · ${onDevice} on this device`;
     };
-    const refreshLocalState = async () => {
+    // Every read-modify-write of the library snapshot + download index runs
+    // through one queue, so a refresh can't prune an entry a download just added.
+    const indexOps = createSerialExecutor();
+    const refreshLocalState = () => indexOps(async () => {
       const local = await getRecentBooksFromDB(storageBridge).catch(() => [] as StoredBook[]);
       localIds = new Set(local.map((b) => b.bookId));
       const loaded = await loadCacheIndex(storageBridge, window.localStorage);
       index = pruneCacheIndex(loaded, localIds);
       if (index.length !== loaded.length) await saveCacheIndex(index, storageBridge, window.localStorage).catch(() => {});
-    };
+    });
 
     const formatMeta = (b: BookOrbitBook, status: CacheStatus): string => {
       const parts: string[] = [];
@@ -750,28 +755,48 @@ async function main() {
         onProgress('Saving...');
         const filename = `${b.title}.epub`;
         const parsed = await parseEpub(data, filename); // validate before storing
-        const stored = await saveEpubBufferToDB(data, filename, parsed.title, storageBridge);
-        index = upsertCacheEntry(index, {
-          account: bo.accountKey,
-          bookOrbitId: b.id,
-          fileId: file.id,
-          localBookId: stored.bookId,
-          title: b.title,
-          remoteUpdatedAt: b.updatedAt,
-          sizeBytes: data.byteLength,
-          downloadedAt: Date.now(),
+        const stored = await indexOps(async () => {
+          const saved = await saveEpubBufferToDB(data, filename, parsed.title, storageBridge);
+          localIds.add(saved.bookId);
+          if (saved.durable === false) {
+            // Only IndexedDB has it: don't call it "on device" (it may not
+            // survive an app restart); the row keeps offering Download.
+            return saved;
+          }
+          const previous = index.find((e) => e.account === bo.accountKey && e.bookOrbitId === b.id);
+          if (previous && previous.localBookId !== saved.bookId) {
+            // Updated file = new content id. Carry the local reading position
+            // over (offsets are best effort if the text changed; BookOrbit sync
+            // refines it), then retire the superseded copy unless still linked.
+            await migrateLegacyPositionKeys(storageBridge, previous.localBookId, saved.bookId, window.localStorage)
+              .catch((e) => console.warn('Position not carried over:', e));
+            if (!index.some((e) => e !== previous && e.localBookId === previous.localBookId)) {
+              await deleteFromDB(previous.localBookId, storageBridge).catch((e) => console.warn('Old copy not removed:', e));
+              localIds.delete(previous.localBookId);
+            }
+          }
+          index = upsertCacheEntry(index, {
+            account: bo.accountKey,
+            bookOrbitId: b.id,
+            fileId: file.id,
+            localBookId: saved.bookId,
+            title: b.title,
+            remoteUpdatedAt: b.updatedAt,
+            sizeBytes: data.byteLength,
+            downloadedAt: Date.now(),
+          });
+          await saveCacheIndex(index, storageBridge, window.localStorage);
+          return saved;
         });
-        localIds.add(stored.bookId);
-        await saveCacheIndex(index, storageBridge, window.localStorage);
         updateSummary();
         if (client) await renderLibrary(client, storageBridge); // also refreshes the glasses' book list
-        if (stored.durable === false) {
-          setStatus(`"${b.title}" is saved for this session only: device storage is full. Delete some books to keep it offline.`);
-        }
         return stored;
       })();
       inFlight.set(b.id, job);
-      job.finally(() => inFlight.delete(b.id)).catch(() => {});
+      job.finally(() => {
+        inFlight.delete(b.id);
+        rows.get(b.id)?.render(); // the row on screen now (the list may have been rebuilt)
+      }).catch(() => {});
       return job;
     };
 
@@ -794,7 +819,9 @@ async function main() {
       // resume=true: the sync pull places the reader at BookOrbit's position.
       await client.loadBook(book, true, stored.bookId, stored.filename);
       await renderLibrary(client, storageBridge);
-      setStatus(`Loaded: ${book.title}`);
+      setStatus(stored.durable === false
+        ? `Loaded: ${book.title} (only kept for this session: device storage is full)`
+        : `Loaded: ${book.title}`);
     };
 
     const addRow = (b: BookOrbitBook) => {
@@ -815,7 +842,8 @@ async function main() {
         meta.textContent = formatMeta(b, status);
         const busy = inFlight.has(b.id);
         dl.disabled = busy || status.kind === 'onDevice';
-        if (!busy) dl.textContent = status.kind === 'onDevice' ? 'Downloaded' : status.kind === 'updateAvailable' ? 'Update' : 'Download';
+        dl.textContent = busy ? 'Downloading...'
+          : status.kind === 'onDevice' ? 'Downloaded' : status.kind === 'updateAvailable' ? 'Update' : 'Download';
         readBtn.disabled = busy;
       };
       const progress = (text: string) => { dl.textContent = text; };
@@ -831,8 +859,11 @@ async function main() {
         }
       };
       dl.addEventListener('click', () => run(async () => {
-        await download(b, progress);
-        setStatus(`Downloaded for offline reading: ${b.title}`);
+        const stored = await download(b, progress);
+        if (!stored) return;
+        setStatus(stored.durable === false
+          ? `"${b.title}" is only kept for this session: device storage is full. Delete some books, then Download again.`
+          : `Downloaded for offline reading: ${b.title}`);
       }));
       readBtn.addEventListener('click', () => run(() => read(b, progress)));
       rows.set(b.id, { book: b, render });
@@ -912,7 +943,7 @@ async function main() {
       },
       /** The local library changed (e.g. a book was deleted): update badges. */
       async localLibraryChanged() {
-        await refreshLocalState();
+        await refreshLocalState(); // queued behind any download commit
         for (const r of rows.values()) r.render();
         updateSummary();
       },

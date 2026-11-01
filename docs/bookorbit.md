@@ -66,6 +66,36 @@ The phone must be able to reach BookOrbit. With a private ingress such as `*.hom
 that means home Wi-Fi or Tailscale. Away from both, the reader works offline and syncs the next
 time it can reach the server.
 
+## Downloads and offline reading
+
+Books from BookOrbit are downloaded into the reader's own library and read from there, so
+reading never needs the server.
+
+- **Storage.** The library keeps each book twice:
+  - in IndexedDB, for fast loading;
+  - in the Even app's bridge storage, which survives device app restarts.
+  If the durable copy can't be written (storage full), the phone says that the book is only kept
+  for this session.
+- **Download index.** `bookorbit-cache.ts`, stored in bridge storage, links each BookOrbit book
+  (per server and login) to its local copy. The BookOrbit list shows:
+  - **On device** when the local copy exists. **Read** opens it without the network.
+  - **Update available** when BookOrbit's `updatedAt` is newer than at download time.
+    **Update** re-downloads the book and removes the superseded copy. Your place comes back
+    through sync, because BookOrbit links the new file to the same book.
+  - **Download** fetches a book for later without opening it. It then shows up in the glasses'
+    book picker.
+- **Robust downloads:**
+  - the download is streamed with a 30 s stall timeout, so big books on a slow link are fine as
+    long as data keeps arriving;
+  - the result is checked against the expected size and the EPUB (ZIP) signature;
+  - a network failure gets one retry;
+  - the book is parsed before it's stored, so a broken file never enters the library.
+- **Offline.** If BookOrbit can't be reached, the list says so and points to the downloaded books
+  in the Library. Progress and reading time are pushed when the server is reachable again.
+  Unsent reading time is kept in memory per account; it survives book switches but not an app
+  restart.
+- **Deleting** a book from the Library updates its BookOrbit badge. **Download** gets it back.
+
 ## Public Hub builds
 
 The public app can't whitelist each user's server. Plain kosync goes through the developer relay

@@ -127,17 +127,29 @@ export class BookOrbitClient extends KosyncClient {
       accept: 'application/epub+zip, application/octet-stream',
       timeoutMs: opts.stallMs ?? DOWNLOAD_STALL_MS,
     });
-    if (!res.ok) throw await this.errorFrom(res, 'Download failed');
+    if (!res.ok) {
+      // Don't wait on an error body (it isn't covered by the stall timer).
+      res.body?.cancel().catch(() => {});
+      const reason = res.status === 401 || res.status === 403 ? 'BookOrbit rejected the login'
+        : res.status === 404 ? 'File not found in BookOrbit' : `Download failed (HTTP ${res.status})`;
+      throw new KosyncError(reason, res.status);
+    }
     const header = Number(res.headers.get('content-length') ?? '');
     const total = Number.isFinite(header) && header > 0 ? header : (opts.expectedBytes ?? null);
-    const bytes = await readWithStallTimeout(res, opts.stallMs ?? DOWNLOAD_STALL_MS, (n) => opts.onProgress?.(n, total));
+    if (total !== null && total > MAX_DOWNLOAD_BYTES) {
+      res.body?.cancel().catch(() => {});
+      throw new KosyncError(`Book is too large (${Math.round(total / 1048576)} MB)`, res.status);
+    }
+    const bytes = await readWithStallTimeout(res, opts.stallMs ?? DOWNLOAD_STALL_MS, total, (n) => opts.onProgress?.(n, total));
     if (total !== null && bytes.byteLength !== total) {
       throw new KosyncError(`Download incomplete (${bytes.byteLength} of ${total} bytes)`, null);
     }
     if (bytes.byteLength < 4 || bytes[0] !== 0x50 || bytes[1] !== 0x4b || bytes[2] !== 0x03 || bytes[3] !== 0x04) {
       throw new KosyncError('Downloaded file is not an EPUB', null);
     }
-    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+    return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+      ? (bytes.buffer as ArrayBuffer)
+      : (bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
   }
 
   /** BookOrbit book ids for KOReader document hashes it recognises. */
@@ -185,13 +197,26 @@ export class BookOrbitClient extends KosyncClient {
 /** No bytes for this long = stalled download. */
 export const DOWNLOAD_STALL_MS = 30_000;
 
-async function readWithStallTimeout(res: Response, stallMs: number, onProgress: (received: number) => void): Promise<Uint8Array> {
+/** Hard cap on a single download (EPUBs are rarely above a few tens of MB). */
+export const MAX_DOWNLOAD_BYTES = 300 * 1024 * 1024;
+
+/**
+ * Read a body with a per-chunk stall timeout. With a known size the bytes go
+ * straight into one preallocated buffer (no chunk list + copy).
+ */
+async function readWithStallTimeout(
+  res: Response,
+  stallMs: number,
+  expected: number | null,
+  onProgress: (received: number) => void,
+): Promise<Uint8Array> {
   if (!res.body) {
     const whole = new Uint8Array(await res.arrayBuffer());
     onProgress(whole.byteLength);
     return whole;
   }
   const reader = res.body.getReader();
+  const target = expected !== null ? new Uint8Array(expected) : null;
   const chunks: Uint8Array[] = [];
   let received = 0;
   for (;;) {
@@ -209,10 +234,17 @@ async function readWithStallTimeout(res: Response, stallMs: number, onProgress: 
       if (timer !== null) clearTimeout(timer);
     }
     if (step.done) break;
-    chunks.push(step.value);
-    received += step.value.byteLength;
+    const chunk = step.value;
+    if (received + chunk.byteLength > (target ? target.byteLength : MAX_DOWNLOAD_BYTES)) {
+      reader.cancel().catch(() => {});
+      throw new KosyncError(target ? 'Download larger than announced' : 'Book is too large', null);
+    }
+    if (target) target.set(chunk, received);
+    else chunks.push(chunk);
+    received += chunk.byteLength;
     onProgress(received);
   }
+  if (target) return received === target.byteLength ? target : target.subarray(0, received);
   const out = new Uint8Array(received);
   let offset = 0;
   for (const c of chunks) {
@@ -326,27 +358,32 @@ export class BookOrbitTracker {
       this.flushTimer = null;
     }
     this.uploading = this.uploading.then(async () => {
-      // Every book with pending events in this account, within BookOrbit's
-      // 500-events-per-request limit.
-      const books: { hash: string; events: PageStatEvent[] }[] = [];
-      let budget = 400;
-      for (const [hash, events] of this.outbox) {
-        if (events.length === 0 || budget === 0) continue;
-        const take = events.splice(0, budget);
-        budget -= take.length;
-        books.push({ hash, events: take });
-      }
-      if (books.length === 0) return;
-      try {
-        await this.client.uploadPageStats(this.device, books, keepalive);
-      } catch (e) {
-        for (const b of books) {
-          const q = this.outbox.get(b.hash) ?? [];
-          // Bounded retry buffer per book; BookOrbit dedupes resent events.
-          this.outbox.set(b.hash, [...b.events, ...q].slice(-MAX_PENDING_PER_BOOK));
+      // Drain in batches within BookOrbit's 500-events-per-request limit,
+      // covering every book with pending events in this account.
+      for (let round = 0; round < 10; round++) {
+        const books: { hash: string; events: PageStatEvent[] }[] = [];
+        let budget = 400;
+        for (const [hash, events] of this.outbox) {
+          if (events.length === 0 || budget === 0) continue;
+          const take = events.splice(0, budget);
+          budget -= take.length;
+          books.push({ hash, events: take });
         }
-        this.onError(e);
+        if (books.length === 0) return;
+        try {
+          await this.client.uploadPageStats(this.device, books, keepalive);
+        } catch (e) {
+          for (const b of books) {
+            const q = this.outbox.get(b.hash) ?? [];
+            // Bounded retry buffer per book; BookOrbit dedupes resent events.
+            this.outbox.set(b.hash, [...b.events, ...q].slice(-MAX_PENDING_PER_BOOK));
+          }
+          this.onError(e);
+          this.scheduleFlush(); // try again later
+          return;
+        }
       }
+      this.scheduleFlush(); // still more after 10 rounds: continue later
     });
     return this.uploading;
   }
@@ -378,13 +415,16 @@ export class BookOrbitTracker {
       durationSeconds: Math.min(seconds, MAX_PAGE_SECONDS),
       totalPages: c.totalPages,
     });
-    if (this.flushTimer === null) {
-      this.flushTimer = setTimeout(() => {
-        this.flushTimer = null;
-        void this.flush();
-      }, STATS_FLUSH_DELAY_MS);
-      // Never keep a Node test process alive for it.
-      (this.flushTimer as { unref?: () => void }).unref?.();
-    }
+    this.scheduleFlush();
+  }
+
+  private scheduleFlush(): void {
+    if (this.flushTimer !== null) return;
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      void this.flush();
+    }, STATS_FLUSH_DELAY_MS);
+    // Never keep a Node test process alive for it.
+    (this.flushTimer as { unref?: () => void }).unref?.();
   }
 }

@@ -178,3 +178,44 @@ test('failed reading-time uploads survive the tracker being replaced', async () 
   assert.deepEqual(last, ['book-a', 'book-b']);
   assert.equal(a.pendingEvents + b.pendingEvents, 0);
 });
+
+test('a download HTTP error does not wait for its body', async () => {
+  const impl = (async () => new Response(new ReadableStream({ start() { /* body never arrives */ } }), { status: 503 })) as unknown as typeof fetch;
+  await assert.rejects(client(impl).download(3, { stallMs: 50 }), /HTTP 503/);
+});
+
+test('a download larger than announced is rejected', async () => {
+  const impl = (async () => new Response(new Uint8Array([0x50, 0x4b, 3, 4, 9, 9]), {
+    status: 200, headers: { 'content-length': '4' },
+  })) as unknown as typeof fetch;
+  // Node's Response normalises content-length to the real body, so pass the expectation directly.
+  await assert.rejects(client(impl).download(3, { expectedBytes: 4 }), /larger than announced|incomplete/);
+});
+
+test('flush drains a large backlog in several requests', async () => {
+  let now = 0;
+  let fail = true;
+  const { impl, calls } = fake(() => (fail ? { status: 503, body: {} } : { status: 200, body: {} }));
+  const c = new BookOrbitClient({ server: BASE, username: 'drain-user', userkey: 'k'.repeat(32), fetchImpl: impl });
+  const t = new BookOrbitTracker({ client: c, hash: 'big', device: DEVICE, now: () => now });
+  for (let p = 1; p <= 300; p++) { t.pageShown(p, 1000); now += 10_000; }
+  t.pause();
+  await t.flush(); // fails, backlog kept (bounded)
+  assert.equal(t.pendingEvents, 300);
+  fail = false;
+  const before = calls.length;
+  await t.flush();
+  assert.equal(t.pendingEvents, 0);
+  assert.equal(calls.length - before, 1);
+  const t2 = new BookOrbitTracker({ client: c, hash: 'big2', device: DEVICE, now: () => now });
+  fail = true;
+  for (let p = 1; p <= 300; p++) { t2.pageShown(p, 1000); now += 10_000; }
+  t2.pause();
+  t.pageShown(1, 9); now += 10_000; t.pause(); // a second book's events too
+  await t2.flush();
+  fail = false;
+  const mark = calls.length;
+  await t2.flush();
+  assert.equal(t2.pendingEvents + t.pendingEvents, 0);
+  assert.ok(calls.length - mark >= 1);
+});

@@ -15,6 +15,13 @@ All notable changes to this project will be documented in this file.
   - **Reading time** appears in BookOrbit's statistics. Page events follow KOReader's defaults
     (pages under 5 s are skipped, idle time is capped at 120 s).
   - **Finished books:** reaching the last page marks the book read in BookOrbit.
+  - **Offline-first downloads:**
+    - Each BookOrbit book shows **On device**, **Update available** or **Download**.
+    - **Read** opens the local copy without the network.
+    - Downloads stream with a stall timeout and progress display, are checked for size and EPUB
+      signature, and get one retry.
+    - An update replaces the old copy.
+    - The phone warns if device storage is too full to keep a book across restarts.
 - `npm run pack:personal` builds a package for your own Private/Beta testing that whitelists your
   servers (`PERSONAL_ORIGINS=…`). The committed app.json stays unchanged.
 
