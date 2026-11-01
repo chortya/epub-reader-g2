@@ -325,3 +325,18 @@ test('pixel wrapping: a 4,000-letter token with hyphenation on stays fast', asyn
   assert.ok(performance.now() - t0 < 1500, `took ${(performance.now() - t0).toFixed(0)} ms`);
   for (const line of lines) assert.ok(getTextWidth(line) <= READING_LINE_LIMIT_PX);
 });
+
+test('pixel wrapping: many short narrow tokens never exceed the width, pages stay under 1000 chars', async () => {
+  const { paginateText, READING_LINE_LIMIT_PX, MAX_PAGE_CHARS } = await import('../src/paginator.ts');
+  const { measureTextWrap } = await import('../src/text-metrics.ts');
+  for (const text of ['ill '.repeat(3000), 'i '.repeat(3000), 'It is. '.repeat(1500), 'll ii .. '.repeat(1000)]) {
+    const pages = paginateText(text, undefined, 9);
+    for (const page of pages) {
+      assert.ok(page.length <= MAX_PAGE_CHARS, `page has ${page.length} chars`);
+      for (const line of page.split('\n')) {
+        assert.equal(measureTextWrap(line, 564).lineCount, 1, `re-wraps: ${line.slice(0, 40)}...`);
+      }
+    }
+  }
+  assert.ok(READING_LINE_LIMIT_PX <= 564);
+});

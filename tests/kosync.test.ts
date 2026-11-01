@@ -143,7 +143,9 @@ test('documentDigest: binary uses the partial MD5, filename hashes the basename'
 test('decidePull: newer position wins; without times, forward only (explicit sync applies)', () => {
   const remote = { document: 'd', progress: 'p', percentage: 0.5, device_id: 'OTHER', timestamp: 2_000 };
   assert.equal(decidePull(null, null, 'ME', false), 'none');
-  assert.equal(decidePull({ ...remote, device_id: 'ME' }, null, 'ME', true), 'ownDevice');
+  assert.equal(decidePull({ ...remote, device_id: 'ME' }, { percentage: 0.1, savedAtMs: 1 }, 'ME', true), 'ownDevice');
+  // No local position (fresh download): adopt it even though this device pushed it.
+  assert.equal(decidePull({ ...remote, device_id: 'ME' }, null, 'ME', false), 'apply');
   assert.equal(decidePull(remote, { percentage: 0.5, savedAtMs: 0 }, 'ME', false), 'same');
   assert.equal(decidePull(remote, null, 'ME', false), 'apply');
   assert.equal(decidePull(remote, { percentage: 0.2, savedAtMs: 1_000_000 }, 'ME', false), 'apply');
@@ -465,4 +467,19 @@ test('hostile progress values are rejected or ignored', async () => {
   assert.equal(far?.timestamp, undefined, 'a timestamp in year 287,000 is ignored');
   assert.equal(far?.device?.length, 40);
   assert.equal(parseXPointer('/body/DocFragment[1]/body' + '/p'.repeat(300)), null);
+});
+
+test('round 3: exact reset marker, KOReader identity and rounding rules', () => {
+  const web = { document: 'd', progress: '/body/DocFragment[1]/body/p[4]', percentage: 0.005, device: 'web', device_id: 'bookorbit-web', timestamp: Math.floor(Date.now() / 1000) - 3600 };
+  assert.equal(isBookOrbitReset(web), false, 'ordinary early web progress is not a reset');
+  assert.equal(decidePull(web, { percentage: 0.7, savedAtMs: Date.now() }, 'ME', false), 'older');
+  // Own device needs the same name too.
+  const mine = { document: 'd', progress: 'p', percentage: 0.3, device: 'Kobo', device_id: 'ME' };
+  const local = { percentage: 0.1, savedAtMs: null };
+  assert.notEqual(decidePull(mine, local, 'ME', false), 'ownDevice', 'same id, other device name');
+  assert.equal(decidePull({ ...mine, device: 'Even G2' }, local, 'ME', false), 'ownDevice');
+  // Truncated 4-decimal equality, exactly.
+  const r = { document: 'd', progress: 'p', percentage: 0.5001, device_id: 'K' };
+  assert.notEqual(decidePull(r, { percentage: 0.5, savedAtMs: null }, 'ME', false), 'same');
+  assert.equal(decidePull({ ...r, percentage: 0.50009 }, { percentage: 0.5, savedAtMs: null }, 'ME', false), 'same');
 });

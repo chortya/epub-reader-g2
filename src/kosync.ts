@@ -230,7 +230,7 @@ export class KosyncClient {
 
   async getProgress(document: string): Promise<RemoteProgress | null> {
     const res = await this.request('GET', `/syncs/progress/${encodeURIComponent(document)}`);
-    if (res.status === 401) throw new KosyncError('Not authorized', 401);
+    if (res.status === 401 || res.status === 403) throw await this.errorFrom(res, 'Not authorized');
     // Some kosync-compatible servers answer 404/204 for a never-synced book.
     if (res.status === 404 || res.status === 204) return null;
     if (!res.ok) throw await this.errorFrom(res, 'Fetching progress failed');
@@ -293,8 +293,7 @@ export class KosyncClient {
       },
       keepalive,
     });
-    if (res.status === 401) throw new KosyncError('Not authorized', 401);
-    if (!res.ok) throw await this.errorFrom(res, 'Pushing progress failed');
+    if (!res.ok) throw await this.errorFrom(res, res.status === 401 || res.status === 403 ? 'Not authorized' : 'Pushing progress failed');
     const body = await this.readJson(res).catch(() => null); // the PUT itself succeeded
     if (body && saneTimestamp(body.timestamp) !== undefined) {
       const local = (sentAt + Date.now()) / 2; // midpoint of the round trip
@@ -442,9 +441,12 @@ const RESET_PERCENTAGE = 0.01;
  * (DocFragment[1], <= 1 %) - see KosyncSession.acknowledgeReset.
  */
 export function isBookOrbitReset(remote: RemoteProgress): boolean {
+  // Exactly BookOrbit's marker (koreader.service.ts RESET_REFLOWABLE_POSITION,
+  // percentage 0). Ordinary web-reader progress shares the device id and can
+  // also sit near the start, so nothing looser may count as a reset.
   return remote.device_id === 'bookorbit-web'
-    && remote.percentage <= RESET_PERCENTAGE
-    && /^\/body\/DocFragment\[1\](\/|$)/.test(remote.progress.trim());
+    && remote.percentage === 0
+    && remote.progress.trim() === RESET_PROGRESS;
 }
 
 /**
@@ -463,8 +465,13 @@ export function decidePull(
   if (!remote || typeof remote.percentage !== 'number') return 'none';
   // A reset made in BookOrbit is a deliberate "start over"; it always wins.
   if (isBookOrbitReset(remote)) return local && local.percentage <= RESET_PERCENTAGE ? 'same' : 'apply';
-  if (remote.device_id === deviceId) return 'ownDevice';
-  if (local && Math.abs(remote.percentage - local.percentage) < 0.0001) return 'same';
+  // Nothing local (new download, cleared storage): take the server's position,
+  // even if this device pushed it - never treat "ours" as a reason to stay at 0.
+  if (!local) return 'apply';
+  // KOReader: own device = same model name AND same id.
+  if (remote.device_id === deviceId && (remote.device === undefined || remote.device === KOSYNC_DEVICE_NAME)) return 'ownDevice';
+  // KOReader compares percentages truncated to 4 decimals, exactly.
+  if (local && roundPercentage(remote.percentage) === roundPercentage(local.percentage)) return 'same';
   if (!local) return 'apply';
   // Both sides know when they moved: the newer position wins, also for an
   // explicit sync (whose caller then pushes ours instead). Local save times

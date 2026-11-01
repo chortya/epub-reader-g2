@@ -25,6 +25,31 @@ All notable changes to this project will be documented in this file.
 - `npm run pack:personal` builds a package for your own Private/Beta testing that whitelists your
   servers (`PERSONAL_ORIGINS=…`). The committed app.json stays unchanged.
 
+### Security and robustness (three review rounds)
+- **Credentials:** they never follow redirects, sync servers must be https (http only on
+  loopback), and logout stops all uploads made with the old login.
+- **Hostile EPUBs:**
+  - every part is inflated with byte limits (zip bombs);
+  - the spine and TOC are capped;
+  - deep nesting is walked without recursion;
+  - XML encodings are honoured;
+  - long unbroken tokens no longer freeze pagination.
+- **Hostile or broken servers:**
+  - JSON is size- and time-bounded and validated;
+  - catalog pages and strings are clipped;
+  - downloads have sane allocation, a stall timeout and an overall deadline.
+- **Relay:** stricter SSRF filter (trailing dots, LAN suffixes, ports), upstream timeouts, and a
+  response size cap.
+- **Content-Security-Policy** in the companion page.
+- **Sync correctness:**
+  - clock calibration and a forward-only rule when the order of saves is uncertain;
+  - BookOrbit resets are honoured;
+  - no push over a newer remote position;
+  - a re-sync after backgrounding or a network outage;
+  - failed pushes are retried;
+  - the newer of the Paged and Flow positions is used on open.
+- **Pixel wrapping is 5× faster** (cached token widths).
+
 ### Changed
 - Sync status messages now say "Sync:" instead of "KOReader sync:".
 - The sync settings no longer reset the username you typed after a failed login.

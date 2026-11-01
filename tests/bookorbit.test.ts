@@ -105,18 +105,27 @@ test('tracker records page time like KOReader (skip glances, cap idle) and marks
   now += 600_000;                               // idle 10 min on page 2
   tracker.pause();
   assert.equal(tracker.pendingEvents, 1);
-  tracker.pageShown(3, 3);                      // last page -> read status
+  tracker.pageShown(3, 3);                      // last page: a glimpse is not "finished"
+  assert.ok(!calls.some((c) => c.url.endsWith('/read-status')));
+  now += 30_000;                                // ...staying on it is
+  tracker.pause();
   await new Promise((r) => setTimeout(r, 0));
   await tracker.flush();
   const stats = calls.find((c) => c.url.endsWith('/plugin/page-stats'))!;
   assert.deepEqual(stats.body.books[0].events, [
     { page: 2, startTime: 1_002, durationSeconds: MAX_PAGE_SECONDS, totalPages: 3 },
+    { page: 3, startTime: 1_642, durationSeconds: 30, totalPages: 3 },
   ]);
   assert.ok(calls.some((c) => c.url.endsWith('/books/7/read-status') && c.body.status === 'read'));
   tracker.pageShown(2, 3);
-  tracker.pageShown(3, 3);
+  tracker.pageShown(3, 3); now += 30_000; tracker.pause();
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(calls.filter((c) => c.url.endsWith('/read-status')).length, 1, 'only once');
+  // Not before the opening sync settled.
+  const early = new BookOrbitTracker({ client: client(impl), hash: 'h9', device: DEVICE, now: () => now });
+  early.pageShown(3, 3, false, false); now += 30_000; early.pause();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(calls.filter((c) => c.url.endsWith('/read-status')).length, 1);
 });
 
 test('tracker keeps a failed batch for the next flush', async () => {
@@ -270,4 +279,41 @@ test('a disposed tracker stops uploading with its login', async () => {
   t.pageShown(2, 5);
   assert.equal(calls.length, 0);
   assert.equal(t.pendingEvents, 1, 'events stay queued for that account');
+});
+
+test('round 3: stats batches hold <= 50 books; unmatched books are dropped and untracked', async () => {
+  let now = 0;
+  const bodies: any[] = [];
+  const impl = (async (_url: string, init: RequestInit) => {
+    const body = JSON.parse(init.body as string);
+    bodies.push(body);
+    const unmatched = body.books.filter((b: any) => b.hash.startsWith('x')).map((b: any) => b.hash);
+    return new Response(JSON.stringify({ results: [], unmatched }), { status: 200 });
+  }) as unknown as typeof fetch;
+  const c = new BookOrbitClient({ server: BASE, username: 'batch-user', userkey: 'k'.repeat(32), fetchImpl: impl });
+  for (let i = 0; i < 51; i++) {
+    const t = new BookOrbitTracker({ client: c, hash: `${i === 0 ? 'x' : 'h'}${i}`, device: DEVICE, now: () => now });
+    t.pageShown(1, 9); now += 10_000; t.pause();
+  }
+  await BookOrbitTracker.drain(c, DEVICE);
+  assert.ok(bodies.every((b) => b.books.length <= 50));
+  assert.equal(BookOrbitTracker.hasPending(c.accountKey), false);
+  // The unmatched book is no longer tracked.
+  const again = new BookOrbitTracker({ client: c, hash: 'x0', device: DEVICE, now: () => now });
+  again.pageShown(2, 9); now += 10_000; again.pause();
+  assert.equal(again.pendingEvents, 0);
+});
+
+test('round 3: fast Flow pages (< 5 s) still count while Flow plays', () => {
+  let now = 0;
+  const { impl } = fake(() => ({ status: 200, body: {} }));
+  const c = new BookOrbitClient({ server: BASE, username: 'flow-user', userkey: 'k'.repeat(32), fetchImpl: impl });
+  const t = new BookOrbitTracker({ client: c, hash: 'f1', device: DEVICE, now: () => now });
+  for (let p = 1; p <= 5; p++) { t.pageShown(p, 50, true); now += 4_000; }
+  t.pause();
+  assert.equal(t.pendingEvents, 5);
+  const paged = new BookOrbitTracker({ client: c, hash: 'f2', device: DEVICE, now: () => now });
+  for (let p = 1; p <= 5; p++) { paged.pageShown(p, 50, false); now += 4_000; }
+  paged.pause();
+  assert.equal(paged.pendingEvents, 0, 'paged skimming still ignored');
 });

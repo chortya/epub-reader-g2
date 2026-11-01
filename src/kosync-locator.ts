@@ -39,7 +39,8 @@ export type ParsedXPointer = {
 };
 
 const XP_PREFIX_RE = /^\/body\/DocFragment\[(\d+)\](?:\/body(?=\/|\.|$))?/;
-const XP_STEP_RE = /^\/(?:(text\(\))|([A-Za-z_][\w.-]*))(?:\[(\d+)\])?/;
+// Element names stop before '.', which starts a point (e.g. /div.1).
+const XP_STEP_RE = /^\/(?:(text\(\))|([A-Za-z_][\w-]*))(?:\[(\d+)\])?/;
 
 export function parseXPointer(xpointer: string): ParsedXPointer | null {
   if (typeof xpointer !== 'string' || xpointer.length > 2048) return null;
@@ -241,7 +242,8 @@ export class ChapterLocator {
    * deep as the path exists; a text step + point refines within the block.
    * Returns null when nothing in the path can be anchored.
    */
-  offsetForSteps(steps: XPointerStep[], point: number | null): number | null {
+  offsetForSteps(steps: XPointerStep[], pointIn: number | null): number | null {
+    let point = pointIn;
     let node: Node = this.body;
     let resolvedAll = true;
     for (const step of steps) {
@@ -261,6 +263,16 @@ export class ChapterLocator {
         break;
       }
       node = next;
+    }
+    // Element point (/p[3].2): crengine means "at child node 2". Count the
+    // children crengine keeps (it drops whitespace-only text between nodes).
+    if (resolvedAll && point !== null && node.nodeType === 1) {
+      const kept: Node[] = [];
+      for (let n = node.firstChild; n; n = n.nextSibling) {
+        if (n.nodeType === 1 || (n.nodeType === 3 && /\S/.test(n.textContent ?? ''))) kept.push(n);
+      }
+      if (kept.length > 0) node = kept[Math.min(point, kept.length - 1)];
+      point = null;
     }
 
     // Nearest anchored ancestor-or-self.
@@ -290,7 +302,10 @@ export class ChapterLocator {
     if (node !== anchor.element) {
       compactIndex += compactLengthBefore(anchor.element, node);
       if (resolvedAll && node.nodeType === 3 && point !== null) {
-        compactIndex += compact((node.textContent ?? '').slice(0, point)).length;
+        // crengine counts code points of the text with whitespace runs
+        // collapsed, not raw XHTML characters.
+        const collapsed = Array.from((node.textContent ?? '').replace(/\s+/g, ' '));
+        compactIndex += compact(collapsed.slice(0, point).join('')).length;
       }
     }
     compactIndex = Math.min(compactIndex, this.compactToOffset.length - 1);

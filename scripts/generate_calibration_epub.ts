@@ -113,7 +113,7 @@ async function createCalibrationEpub() {
     zip.file('OEBPS/content.opf', `<?xml version="1.0"?>
 <package xmlns="http://www.idpf.org/2007/opf" unique-identifier="bookid" version="2.0">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
-    <dc:title>Calibration & Hyphenation Test</dc:title>
+    <dc:title>Calibration &amp; Hyphenation Test</dc:title>
     <dc:language>en</dc:language>
   </metadata>
   <manifest>

@@ -62,6 +62,12 @@ export interface PaginatedChapter {
 }
 
 /**
+ * Character budget of one page: 1000 per text container on a rebuild, minus
+ * the leading blank lines the text-height crop prepends (at most ~9).
+ */
+export const MAX_PAGE_CHARS = 980;
+
+/**
  * Bump when the pagination algorithm/geometry changes meaningfully (plan §5).
  * Saved offsets index the chapter text, not pages, so they stay exact across
  * re-wrapping (v1.6.0 pixel wrapping kept 1); bump only if offsets change
@@ -85,10 +91,23 @@ export function paginateTextWithOffsets(
 
   const wrapped = wordWrapWithOffsets(text, resolveMeasure(measure));
 
+  // A page is at most maxLines lines AND at most MAX_PAGE_CHARS characters:
+  // the glasses reject more than 1000 characters per text container on a
+  // rebuild, and pixel wrapping fits far more narrow characters on a line
+  // than the old 59-character limit did.
   const pages: string[] = [];
   const pageStarts: number[] = [];
-  for (let i = 0; i < wrapped.length; i += maxLines) {
-    const pageLines = wrapped.slice(i, i + maxLines);
+  let i = 0;
+  while (i < wrapped.length) {
+    const pageLines: WrappedLine[] = [];
+    let chars = 0;
+    while (i < wrapped.length && pageLines.length < maxLines) {
+      const add = wrapped[i].text.length + (pageLines.length > 0 ? 1 : 0);
+      if (pageLines.length > 0 && chars + add > MAX_PAGE_CHARS) break;
+      pageLines.push(wrapped[i]);
+      chars += add;
+      i++;
+    }
     const page = pageLines.map((l) => l.text).join('\n').trimEnd();
     if (page.length > 0) {
       pages.push(page);
@@ -192,14 +211,19 @@ function wrapParagraphWithOffsets(
     }
     return w;
   };
-  const fitsApprox = (approx: number, line: string) => {
-    if (approx <= measure.limit - FAST_SLACK_PX) return true;
-    if (approx > measure.limit + FAST_SLACK_PX) return false;
+  // Summed token widths drift from the real width by rounding (~1 px per
+  // token) and kerning (a few px per boundary), so the safe margin grows with
+  // the number of tokens on the line.
+  const fitsApprox = (approx: number, tokens: number, line: string) => {
+    const slack = FAST_SLACK_PX + 2 * tokens;
+    if (approx + slack <= measure.limit) return true;
+    if (approx - slack > measure.limit) return false;
     return fits(line);
   };
   const words = text.split(/( +)/);
   let currentLine = '';
   let currentWidth = 0;
+  let currentTokens = 0;
   let currentLineStart = paraStart;
   let cursor = paraStart;
 
@@ -211,6 +235,7 @@ function wrapParagraphWithOffsets(
       if (currentLine.length > 0) {
         currentLine += word;
         currentWidth += tokenWidth(word);
+        currentTokens++;
       }
       cursor += word.length;
       continue;
@@ -218,11 +243,13 @@ function wrapParagraphWithOffsets(
 
     const testLine = currentLine.length > 0 ? currentLine + word : word;
     const testWidth = (currentLine.length > 0 ? currentWidth : 0) + tokenWidth(word);
+    const testTokens = (currentLine.length > 0 ? currentTokens : 0) + 1;
 
-    if (fitsApprox(testWidth, testLine)) {
+    if (fitsApprox(testWidth, testTokens, testLine)) {
       if (currentLine.length === 0) currentLineStart = cursor;
       currentLine = testLine;
       currentWidth = testWidth;
+      currentTokens = testTokens;
       cursor += word.length;
       continue;
     }
@@ -237,6 +264,7 @@ function wrapParagraphWithOffsets(
         lines.push({ text: currentLine, start: currentLineStart });
         currentLine = hyphenated.tail;
         currentWidth = tokenWidth(currentLine);
+        currentTokens = 1;
         currentLineStart = cursor + hyphenated.head.length;
         cursor += word.length;
         continue;
@@ -248,6 +276,7 @@ function wrapParagraphWithOffsets(
       lines.push({ text: currentLine.trimEnd(), start: currentLineStart });
       currentLine = '';
       currentWidth = 0;
+      currentTokens = 0;
     }
 
     // If word is longer than a full line, hyphenate across lines
@@ -286,9 +315,11 @@ function wrapParagraphWithOffsets(
       }
       currentLine = rest;
       currentWidth = tokenWidth(rest);
+      currentTokens = 1;
     } else {
       currentLine = word;
       currentWidth = tokenWidth(word);
+      currentTokens = 1;
       currentLineStart = cursor;
     }
     cursor += word.length;

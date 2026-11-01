@@ -21,10 +21,11 @@ import { drawBookMark, GREY_BRIGHT, GREY_DIM, GREY_MID } from './brand';
 import { version as APP_VERSION } from '../package.json';
 import type { Book, ReadingPosition, ViewState, CachedBookMeta } from './types';
 import type { LaunchIntent } from './launch';
+import { activateBookLanguage } from './epub-parser';
 import { pickInitialView } from './launch';
 import { resolveLastBook } from './book-id';
 import { formatBookPickerLabel } from './book-selection';
-import { paginateText, paginateTextWithOffsets, pageForOffset, flowOffsetForWord, flowWordForOffset, PAGINATION_VERSION } from './paginator';
+import { defaultMaxChars, paginateText, paginateTextWithOffsets, pageForOffset, flowOffsetForWord, flowWordForOffset, PAGINATION_VERSION } from './paginator';
 import {
   config,
   DISPLAY_HEIGHT,
@@ -67,7 +68,7 @@ import type { KosyncSession, ReaderLocation } from './kosync-session';
 
 /** Reading-time / finished tracking for a sync server that supports it (BookOrbit). */
 export interface ReadingTracker {
-  pageShown(page: number, totalPages: number): void;
+  pageShown(page: number, totalPages: number, flowing?: boolean, mayFinish?: boolean): void;
   pause(): void;
   flush(keepalive?: boolean): Promise<void>;
   dispose(): void;
@@ -325,6 +326,7 @@ export class EvenEpubClient {
     this.chapterPages = [];
     this.chapterPageStarts = [];
     this.layoutCache.clear();
+    await activateBookLanguage(book);
     this.repaginateForLayout();
 
 
@@ -344,7 +346,11 @@ export class EvenEpubClient {
 
     // Paged and Flow keep separate positions; use whichever was saved last
     // (reading in one mode, or a sync jump, only updates that mode's key).
-    const flowNewer = !!restoredFlow && (!restoredPaged || (restoredFlow.savedAt ?? 0) > (restoredPaged.savedAt ?? 0));
+    // Saves from before 1.6 carry no savedAt: then the selected mode decides,
+    // as it always did.
+    const bothTimed = typeof restoredFlow?.savedAt === 'number' && typeof restoredPaged?.savedAt === 'number';
+    const flowNewer = !!restoredFlow && (!restoredPaged
+      || (bothTimed ? restoredFlow.savedAt! > restoredPaged.savedAt! : config.readingMode === 'flow'));
     const restoredActive = restoredFlow && (config.readingMode === 'flow' ? (flowNewer || !restoredPaged) : flowNewer)
       ? restoredFlow
       : restoredPaged ?? restoredFlow;
@@ -552,7 +558,12 @@ export class EvenEpubClient {
       if (i < this.chapterIndex) before += n;
       total += n;
     }
-    this.tracker.pageShown(before + this.pageIndex + 1, total);
+    this.tracker.pageShown(
+      before + this.pageIndex + 1,
+      total,
+      this.view === 'flowReading',
+      !this.kosync || this.kosyncReconciled,
+    );
   }
 
   private currentLocation(): ReaderLocation {
@@ -644,7 +655,7 @@ export class EvenEpubClient {
       // Automatic pull: ours is the newer position (read offline, a push that
       // failed, a book never synced, or the server only has an older position
       // from this very device) -> the caller uploads it.
-      const ownOlder = result.decision === 'ownDevice' && result.remote !== null
+      const ownOlder = local !== null && result.decision === 'ownDevice' && result.remote !== null
         && Math.abs(result.remote.percentage - session.percentageAt(this.currentLocation())) >= 0.0001;
       return {
         ok: true,
@@ -661,7 +672,10 @@ export class EvenEpubClient {
     const message = e instanceof KosyncError ? e.message : 'Sync failed';
     console.warn('KOSync:', e);
     setStatus(`Sync: ${message}`);
-    if (visibleOnGlasses) this.showFooterNotice(e instanceof KosyncError && e.status === 401 ? 'Sync: log in again' : 'Sync failed');
+    if (visibleOnGlasses) {
+      const status = e instanceof KosyncError ? e.status : null;
+      this.showFooterNotice(status === 401 ? 'Sync: log in again' : status === 403 ? 'Sync is disabled' : 'Sync failed');
+    }
   }
 
   /** Move to a chapter/offset in the current view (bookmark jump, sync). */
@@ -680,8 +694,10 @@ export class EvenEpubClient {
     this.librarySelectedIndex = this.chapterIndex;
     if (this.view === 'flowReading') {
       await this.showFlowFrame();
+      await this.savePagedPosition(true); // keep the other mode in step
     } else if (this.view === 'reading') {
       await this.showPage();
+      await this.saveFlowPosition(true, true);
     } else if (this.view === 'chapterList') {
       // A freshly opened book waiting on its chapter list: open the reading
       // view at the location (choosing a chapter would restart it at page 1).
@@ -2698,12 +2714,31 @@ export class EvenEpubClient {
       }
     }
 
-    // Fallback: page-index hints (v1 positions or pagination version drift).
+    // Fallback: page-index hints (v1 positions from before 1.5). They count
+    // pages of the old 59-character pagination: translate through it to a
+    // text offset, then find that text's page now.
+    const starts = this.chapterPageStarts[pos.chapterIndex];
+    const offset = this.legacyHintOffset(pos.chapterIndex, pos.pageIndex);
+    if (starts && starts.length > 0 && offset !== null) {
+      return { chapterIndex: pos.chapterIndex, pageIndex: pageForOffset(starts, offset), savedAt: pos.savedAt };
+    }
     pos.pageIndex = Math.min(
       pos.pageIndex,
       Math.max(0, (this.chapterPages[pos.chapterIndex]?.length ?? 1) - 1),
     );
     return pos;
+  }
+
+  /**
+   * Text offset of a pre-1.5 position hint (page [+ word] of the legacy
+   * character-count pagination), or null if the chapter is unknown.
+   */
+  private legacyHintOffset(chapterIndex: number, pageIndex: number, wordIndex = 0): number | null {
+    const text = this.book?.chapters[chapterIndex]?.text;
+    if (text === undefined || !Number.isInteger(pageIndex) || pageIndex < 0) return null;
+    const legacy = paginateTextWithOffsets(text, defaultMaxChars());
+    const page = Math.min(pageIndex, legacy.pages.length - 1);
+    return (legacy.pageStarts[page] ?? 0) + flowOffsetForWord(legacy.pages[page] ?? '', Math.max(0, wordIndex));
   }
 
   private async saveFlowPosition(persistToBridge = true, immediate = false): Promise<void> {
@@ -2755,7 +2790,28 @@ export class EvenEpubClient {
       }
     }
 
-    // Fallback: hints.
+    // Fallback: hints from the legacy pagination (see legacyHintOffset).
+    {
+      const starts = this.chapterPageStarts[pos.chapterIndex];
+      const offset = this.legacyHintOffset(
+        pos.chapterIndex,
+        Number.isInteger(pos.pageIndex) ? pos.pageIndex : 0,
+        Number.isInteger(pos.wordIndex) ? pos.wordIndex! : 0,
+      );
+      if (starts && starts.length > 0 && offset !== null) {
+        const page = pageForOffset(starts, offset);
+        const pageText = this.chapterPages[pos.chapterIndex]?.[page] ?? '';
+        return {
+          chapterIndex: pos.chapterIndex,
+          pageIndex: page,
+          wordIndex: Math.min(
+            flowWordForOffset(pageText, Math.max(0, offset - starts[page])),
+            Math.max(0, (chapterPages?.[page]?.wordCount ?? 1) - 1),
+          ),
+          savedAt: pos.savedAt,
+        };
+      }
+    }
     const pageIndex = Number.isInteger(pos.pageIndex) ? pos.pageIndex : 0;
     const wordIndex = Number.isInteger(pos.wordIndex) ? pos.wordIndex! : 0;
     if (pageIndex >= 0 && pageIndex < (chapterPages?.length ?? 0)) {

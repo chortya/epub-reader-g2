@@ -191,3 +191,19 @@ test('a block split by <br> is consumed whole, so the next paragraph anchors to 
   const p2 = parseXPointer('/body/DocFragment[1]/body/p[2]')!;
   assert.equal(loc.offsetForSteps(p2.steps, p2.point), text.indexOf(`${pre} in paragraph two.`));
 });
+
+test('round 3: element points and crengine text-point counting', () => {
+  const html = '<html><body><div><p>First para here.</p>\n  <p>Second para.</p></div><p>Alpha    Bravo Charlie</p></body></html>';
+  const text = 'First para here.\n  Second para.\n  Alpha Bravo Charlie';
+  const body = new DOMParser().parseFromString(html, 'text/html').querySelector('body') as unknown as Element;
+  const loc = new ChapterLocator(body, text);
+  for (const xp of ['/body/DocFragment[1]/body/div.1', '/body/DocFragment[1]/body/div[1].1']) {
+    const p = parseXPointer(xp)!;
+    assert.deepEqual(p.steps, [{ kind: 'element', name: 'div', index: 1 }]);
+    assert.equal(p.point, 1);
+    assert.equal(loc.offsetForSteps(p.steps, p.point), text.indexOf('Second para'), xp);
+  }
+  // crengine collapses "Alpha    Bravo": collapsed index 12 is the C of Charlie.
+  const t = parseXPointer('/body/DocFragment[1]/body/p/text().12')!;
+  assert.equal(loc.offsetForSteps(t.steps, t.point), text.indexOf('Charlie'));
+});

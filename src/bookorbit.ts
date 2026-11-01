@@ -165,13 +165,20 @@ export class BookOrbitClient extends KosyncClient {
     return out;
   }
 
-  async uploadPageStats(device: DeviceInfo, books: { hash: string; events: PageStatEvent[] }[], keepalive = false): Promise<void> {
+  /**
+   * Upload page events. Resolves to the hashes BookOrbit reported as not in
+   * the library ('unmatched'); everything else was accepted (or deduped).
+   */
+  async uploadPageStats(device: DeviceInfo, books: { hash: string; events: PageStatEvent[] }[], keepalive = false): Promise<Set<string>> {
     const res = await this.request('POST', '/plugin/page-stats', {
       body: { ...device, books },
       accept: JSON_ACCEPT,
       keepalive,
     });
     if (!res.ok) throw await this.errorFrom(res, 'Uploading reading time failed');
+    const body = await this.readJson(res).catch(() => null);
+    const unmatched = Array.isArray(body?.unmatched) ? body.unmatched.filter((h: unknown) => typeof h === 'string') : [];
+    return new Set<string>(unmatched);
   }
 
   async setReadStatus(bookId: number, status: 'reading' | 'read'): Promise<void> {
@@ -184,7 +191,8 @@ export class BookOrbitClient extends KosyncClient {
 
   private async getJson(path: string, fallback: string): Promise<any> {
     const res = await this.request('GET', path, { accept: JSON_ACCEPT });
-    if (res.status === 401 || res.status === 403) throw new KosyncError('BookOrbit rejected the login', res.status);
+    // Keep BookOrbit's own reason ("Sync is disabled", "permission revoked").
+    if (res.status === 401 || res.status === 403) throw await this.errorFrom(res, 'BookOrbit rejected the login');
     if (!res.ok) throw await this.errorFrom(res, fallback);
     return this.readJson(res);
   }
@@ -315,6 +323,9 @@ export class BookOrbitTracker {
   private onError: (e: unknown) => void;
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
+  private flowing = false;
+  // False until the opening sync settled (a reset or rewind may be coming).
+  private mayFinish = true;
 
   /**
    * Stop this tracker (logout, account switch): no more timers or uploads
@@ -375,6 +386,9 @@ export class BookOrbitTracker {
     } catch { /* corrupt: start empty */ }
   }
 
+  /** account|hash of books BookOrbit said it doesn't have (this run). */
+  private static untracked = new Set<string>();
+
   static hasPending(account: string): boolean {
     for (const events of BookOrbitTracker.outboxes.get(account)?.values() ?? []) {
       if (events.length > 0) return true;
@@ -395,14 +409,17 @@ export class BookOrbitTracker {
       const books: { hash: string; events: PageStatEvent[] }[] = [];
       let budget = 400;
       for (const [hash, events] of box) {
+        // BookOrbit: <= 500 events and <= 50 books per request.
+        if (books.length >= 50) break;
         if (events.length === 0 || budget === 0) continue;
         const take = events.slice(0, budget);
         budget -= take.length;
         books.push({ hash, events: take });
       }
       if (books.length === 0) return;
+      let unmatched: Set<string>;
       try {
-        await client.uploadPageStats(device, books, keepalive);
+        unmatched = await client.uploadPageStats(device, books, keepalive);
       } catch (e) {
         onError(e);
         return;
@@ -410,6 +427,14 @@ export class BookOrbitTracker {
       for (const b of books) {
         const q = box.get(b.hash);
         if (!q) continue;
+        if (unmatched.has(b.hash)) {
+          // Not a book in this BookOrbit library: its reading time can't be
+          // recorded, now or later. Drop it and stop tracking that book.
+          box.delete(b.hash);
+          BookOrbitTracker.untracked.add(`${client.accountKey}|${b.hash}`);
+          console.info(`BookOrbit: book ${b.hash.slice(0, 8)} is not in the library; its reading time is not recorded.`);
+          continue;
+        }
         // Remove exactly what was sent (new events were appended at the end).
         const sent = new Set(b.events);
         box.set(b.hash, q.filter((e) => !sent.has(e)));
@@ -471,13 +496,18 @@ export class BookOrbitTracker {
   }
 
   /** A reading page is on screen (paged turn or Flow page change). */
-  pageShown(page: number, totalPages: number): void {
-    if (this.disposed) return;
+  /**
+   * @param flowing Flow is playing: pages can legitimately pass in under 5 s
+   *   (fast speeds), so only sub-second ones are dropped.
+   */
+  pageShown(page: number, totalPages: number, flowing = false, mayFinish = true): void {
+    if (this.disposed || BookOrbitTracker.untracked.has(`${this.client.accountKey}|${this.hash}`)) return;
+    this.flowing = flowing;
+    this.mayFinish = mayFinish;
     if (this.current && this.current.page === page && this.current.totalPages === totalPages) return;
     this.closeCurrent();
     this.current = { page, totalPages, shownAt: this.now() };
     if (this.queue.length >= BATCH_SIZE) void this.flush();
-    if (page >= totalPages && totalPages > 0) void this.markFinished();
   }
 
   /** Reading stopped (background, menus, exit): end the current page's time. */
@@ -524,7 +554,12 @@ export class BookOrbitTracker {
     const c = this.current;
     if (!c) return;
     const seconds = Math.floor((this.now() - c.shownAt) / 1000);
-    if (seconds < MIN_PAGE_SECONDS) return;
+    if (seconds < (this.flowing ? 1 : MIN_PAGE_SECONDS)) return;
+    // Finished = the last page was actually read (stayed on it), not glimpsed,
+    // and not while the opening sync may still move us elsewhere.
+    if (c.page >= c.totalPages && c.totalPages > 0 && this.mayFinish && seconds >= MIN_PAGE_SECONDS) {
+      void this.markFinished();
+    }
     this.queue.push({
       page: c.page,
       startTime: Math.floor(c.shownAt / 1000),

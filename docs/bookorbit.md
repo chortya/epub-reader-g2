@@ -66,6 +66,15 @@ The phone must be able to reach BookOrbit. With a private ingress such as `*.hom
 that means home Wi-Fi or Tailscale. Away from both, the reader works offline and syncs the next
 time it can reach the server.
 
+## Availability
+
+BookOrbit is offered in two kinds of build:
+- dev builds, which have no relay;
+- personal builds (`npm run pack:personal`, which sets `VITE_PERSONAL_BUILD`).
+
+In those builds the user's BookOrbit origin can be whitelisted. Public relay builds offer only
+plain KOReader sync servers.
+
 ## Downloads and offline reading
 
 Books from BookOrbit are downloaded into the reader's own library and read from there, so
@@ -90,10 +99,20 @@ reading never needs the server.
   - the result is checked against the expected size and the EPUB (ZIP) signature;
   - a network failure gets one retry;
   - the book is parsed before it's stored, so a broken file never enters the library.
-- **Offline.** If BookOrbit can't be reached, the list says so and points to the downloaded books
-  in the Library. Progress and reading time are pushed when the server is reachable again.
-  Unsent reading time is kept in memory per account; it survives book switches but not an app
-  restart.
+- **Local first, always.**
+  - Opening the section lists the downloaded books straight away from the local index; the
+    server list replaces them once it arrives.
+  - If BookOrbit can't be reached, the downloaded books stay listed and searchable, and **Read**
+    opens them from the device.
+  - Read never needs the network for a downloaded book, even when an update is available.
+  - If the index lost track of a book, Read falls back offline to the single local copy saved
+    under that book's download name.
+  - The glasses' library, Continue Reading and position saving never depend on BookOrbit.
+- **Catching up.**
+  - Progress is pulled, and pushed when newer, whenever the app returns to the foreground, the
+    page becomes visible, or the network comes back.
+  - Reading time is kept in an outbox in bridge storage until BookOrbit acknowledges it. It
+    survives app restarts and is uploaded at startup.
 - **Deleting** a book from the Library updates its BookOrbit badge. **Download** gets it back.
 
 ## Public Hub builds
@@ -116,5 +135,18 @@ routes aren't available in public builds yet. A public build would need either:
 - **Finished.** Reaching the last page marks the BookOrbit book "read", once per open book.
 - **First sync of a book.** BookOrbit attributes the position to its web reader (`bookorbit-web`)
   when the timestamps tie. It is the same position, so the reader treats it as in sync.
-- **Reset.** BookOrbit's "reset progress" serves a fresh start-of-book position. The reader
-  follows it on the next pull, as KOReader does.
+- **Reset.** After "reset progress" in BookOrbit:
+  - the reader goes back to the start on the next pull;
+  - it reports `DocFragment[1]` at 0 %, the exact position BookOrbit waits for before it accepts
+    the device's pushes again, even for books whose first chapter is a later fragment (a skipped
+    cover page);
+  - the reset always wins over the clock comparison.
+- **Clocks.**
+  - Each push's response calibrates the phone clock against the server's.
+  - When two save times are too close to order safely, sync only moves forward, so it never
+    throws away pages read on either device.
+- **Hostile input.**
+  - Server values are validated: positions must be in 0..1, absurd timestamps are ignored, JSON
+    bodies are capped at 2 MB, catalog pages at the requested size.
+  - Credentials never follow redirects and only travel over https (plain http is allowed only
+    on loopback).

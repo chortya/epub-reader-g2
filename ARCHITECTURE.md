@@ -395,8 +395,20 @@ Examples (bottom status bar on):
   position inside the chapter's cleaned text (paged: page start; flow: word
   start), valid while `paginationVersion` matches — so text-height changes
   (and any future pagination change) resume at the *same text*, not the same
-  page fraction. Rollback safety: 1.4.6 reads the hints and ignores v2
-  fields, so no mirror keys are needed.
+  page fraction. Rollback: 1.4.6 reads the page hints and ignores v2
+  fields. Since 1.6 the hints count pixel-wrapped pages, so a rollback lands
+  near (not exactly at) the saved text. Going forward, hints without an
+  offset (positions written before 1.5) are translated through the legacy
+  59-character pagination into a text offset before use.
+- **Text extraction changes vs offsets.** 1.6 decodes EPUB parts with their
+  declared XML encoding (e.g. windows-1252). For those books the old decode
+  garbled the text, so positions saved earlier move by the characters that
+  were lost. `PAGINATION_VERSION` stays 1 on purpose: bumping it would
+  degrade every user's positions to page hints to fix a rare case.
+- **Sync semantics vs KOReader.** KOReader has separate push and pull
+  actions; the glasses have one "Sync progress", where the newer position
+  wins. When the order of two saves is uncertain (clock skew window) sync
+  only moves forward, where KOReader would pull unconditionally on request.
 - **Debounced persister** (`createPositionPersister`): page turns schedule a
   save (trailing 800 ms, latest-wins); lifecycle exits and menu actions save
   immediately; `flush()` lands pending writes (under the ref captured at save

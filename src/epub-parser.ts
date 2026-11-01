@@ -44,11 +44,11 @@ export async function parseEpub(data: ArrayBuffer, filenameHint?: string): Promi
     throw new Error('No readable chapters found in EPUB');
   }
 
-  // Detect language and set up hyphenator
+  // Detect the language; the hyphenator is switched when the book is opened
+  // (activateBookLanguage), not here - parsing a book only to download it must
+  // not change the open book's hyphenation.
   const sampleText = rawChapters.slice(0, 3).map((c) => c.text).join(' ');
   const lang = detectLang(sampleText);
-  setHyphenator(new Hypher(await loadHyphenationPatterns(lang)));
-  setWideGlyphs(lang === 'ru' || lang === 'uk');
 
   // Apply paragraph formatting
   const chapters: Chapter[] = rawChapters.map((ch) => ({
@@ -74,12 +74,20 @@ export async function parseEpub(data: ArrayBuffer, filenameHint?: string): Promi
     title: bookTitle || 'Untitled',
     chapters,
     partialMd5: partialMd5.digestHex(),
+    language: lang,
     // Lazy source access for the KOSync locator; keeps the zip, not the XHTML.
     loadChapterXhtml: (chapterIndex: number) => {
       const href = rawChapters[chapterIndex]?.href;
       return href ? readZipFile(zip, href) : Promise.reject(new Error('No such chapter'));
     },
   };
+}
+
+/** Make `book`'s language the active hyphenation (call before paginating it). */
+export async function activateBookLanguage(book: Book): Promise<void> {
+  const lang = book.language ?? 'en';
+  setHyphenator(new Hypher(await loadHyphenationPatterns(lang)));
+  setWideGlyphs(lang === 'ru' || lang === 'uk');
 }
 
 async function loadHyphenationPatterns(lang: string): Promise<ConstructorParameters<typeof Hypher>[0]> {
