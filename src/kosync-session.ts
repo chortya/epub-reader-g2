@@ -68,8 +68,22 @@ export class KosyncSession {
   private firstPendingAt: number | null = null;
   private pending: ReaderLocation | null = null;
   private lastPushed: string | null = null;
-  private uploads: Promise<unknown> = Promise.resolve();
-  private pushSeq = 0;
+  // Upload ordering is shared by every session (a book reopened gets a new
+  // session, and its PUTs must still queue behind the old session's). The
+  // sequence is per document: a newer push or an adopted remote position
+  // invalidates older queued or in-preparation pushes for that document.
+  private static uploads: Promise<unknown> = Promise.resolve();
+  private static pushSeq = new Map<string, number>();
+
+  private static bumpSeq(document: string): number {
+    const next = (KosyncSession.pushSeq.get(document) ?? 0) + 1;
+    KosyncSession.pushSeq.set(document, next);
+    return next;
+  }
+
+  private static isCurrent(document: string, seq: number): boolean {
+    return KosyncSession.pushSeq.get(document) === seq;
+  }
   private parseBody: (xhtml: string) => Element | null;
 
   constructor(opts: {
@@ -180,21 +194,22 @@ export class KosyncSession {
     // Uploads run one at a time in request order, and a push superseded by a
     // newer one while it waited is dropped: a slow older PUT must never land
     // after (and overwrite) a newer position.
-    const seq = ++this.pushSeq;
-    const run = this.uploads.then(async () => {
-      if (seq !== this.pushSeq) return false;
-      const document = this.document;
-      if (!document) return false;
+    const document = this.document;
+    if (!document) return false;
+    const seq = KosyncSession.bumpSeq(document);
+    const run = KosyncSession.uploads.then(async () => {
+      if (!KosyncSession.isCurrent(document, seq)) return false;
       const progress = await this.xpointerAt(loc);
-      if (!progress) return false;
+      // Re-check after the await: markSynced or a newer push may have landed.
+      if (!progress || !KosyncSession.isCurrent(document, seq)) return false;
       const percentage = this.percentageAt(loc);
       const key = `${progress}|${percentage}`;
       if (!opts.force && key === this.lastPushed) return false;
       await this.client.updateProgress({ document, progress, percentage }, this.settings.deviceId, opts.keepalive);
-      this.lastPushed = key;
+      if (KosyncSession.isCurrent(document, seq)) this.lastPushed = key;
       return true;
     });
-    this.uploads = run.catch(() => false);
+    KosyncSession.uploads = run.catch(() => false);
     return run;
   }
 
@@ -204,7 +219,8 @@ export class KosyncSession {
    */
   async markSynced(loc: ReaderLocation): Promise<void> {
     this.cancelScheduledPush();
-    this.pushSeq++; // drop any upload still queued from before the jump
+    const document = this.document;
+    if (document) KosyncSession.bumpSeq(document); // drop uploads queued before the jump
     const progress = await this.xpointerAt(loc);
     if (progress) this.lastPushed = `${progress}|${this.percentageAt(loc)}`;
   }
@@ -234,6 +250,7 @@ export class KosyncSession {
     const target = this.pending;
     this.cancelScheduledPush();
     if (target) await this.push(target, { keepalive: opts.keepalive });
+    else await KosyncSession.uploads; // an upload already under way
   }
 
   cancelScheduledPush(): void {

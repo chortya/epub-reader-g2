@@ -181,3 +181,13 @@ test('an inline node outside any block maps to the block before it, not the chap
   const p = parseXPointer('/body/DocFragment[1]/body/div/span/text().3')!;
   assert.equal(loc.offsetForSteps(p.steps, p.point), text.indexOf('Second block'));
 });
+
+test('a block split by <br> is consumed whole, so the next paragraph anchors to itself', () => {
+  const pre = 'Repeated opening words here';
+  const html = `<html><body><p>${pre} first line<br/>${pre} second line</p><p>${pre} in paragraph two.</p></body></html>`;
+  const text = [`${pre} first line`, `${pre} second line`, `  ${pre} in paragraph two.`].join('\n');
+  const body = new DOMParser().parseFromString(html, 'text/html').querySelector('body') as unknown as Element;
+  const loc = new ChapterLocator(body, text);
+  const p2 = parseXPointer('/body/DocFragment[1]/body/p[2]')!;
+  assert.equal(loc.offsetForSteps(p2.steps, p2.point), text.indexOf(`${pre} in paragraph two.`));
+});

@@ -228,6 +228,12 @@ export class EvenEpubClient {
   // Pushes wait until the session's first pull has reconciled with the server,
   // so an old local position can't overwrite newer remote progress.
   private kosyncReconciled = false;
+  private kosyncReconciling = false;
+  private lastReconcileAttempt = 0;
+  // A move happened while pushes were held (before reconciliation).
+  private kosyncDirty = false;
+  // Set while jumping to a position adopted from the server: its time.
+  private adoptingRemoteAt: number | null = null;
   // When the reading position last actually moved (not merely re-rendered or
   // re-saved): KOSync compares it with the server's timestamp.
   private locationKey: string | null = null;
@@ -298,6 +304,7 @@ export class EvenEpubClient {
     this.currentBookFilename = filename ?? null;
     this.kosync = this.createKosyncSession?.(book, this.currentBookFilename) ?? null;
     this.kosyncReconciled = false;
+    this.kosyncDirty = false;
     this.pendingFlowAutoStart = false;
     this.persister.setRef({
       title: book.title,
@@ -343,7 +350,7 @@ export class EvenEpubClient {
     this.librarySelectedIndex = this.chapterIndex;
     // Baseline for "did the position move": the restored location keeps its
     // stored save time; opening and re-rendering it is not a move.
-    this.locationKey = null;
+    this.locationKey = this.locationKeyForMode();
     this.locationChangedAt = restoredActive?.savedAt ?? null;
 
     // Ensure this book is in the glasses-side cache (main.ts refreshes the full list right after;
@@ -381,14 +388,31 @@ export class EvenEpubClient {
   private async reconcileKosync(hadLocal: boolean): Promise<void> {
     const session = this.kosync;
     const book = this.book;
+    if (!session || this.kosyncReconciling) return;
+    this.kosyncReconciling = true;
+    this.lastReconcileAttempt = Date.now();
+    let ok = false;
     try {
-      await this.pullKosync(false, hadLocal ? this.locationChangedAt : undefined);
+      ok = (await this.pullKosync(false, hadLocal ? this.locationChangedAt : undefined)).ok;
     } finally {
-      if (this.kosync === session) this.kosyncReconciled = true;
-      if (this.book === book && this.pendingFlowAutoStart && this.view === 'flowReading' && !this.isFlowRunning) {
-        this.startFlow();
+      this.kosyncReconciling = false;
+      const current = this.kosync === session && this.book === book;
+      if (current) {
+        // Only a successful pull unlocks pushes; a failed one is retried on
+        // the next move (noteLocation), so unread remote progress is safe.
+        if (ok) {
+          this.kosyncReconciled = true;
+          if (this.kosyncDirty && (this.view === 'reading' || this.view === 'flowReading')) {
+            this.kosyncDirty = false;
+            session.schedulePush(this.currentLocation(), (e) => this.reportKosyncError(e, false));
+          }
+        }
+        if (this.pendingFlowAutoStart && this.lifecycleState === 'active'
+          && this.view === 'flowReading' && !this.isFlowRunning) {
+          this.startFlow();
+        }
+        this.pendingFlowAutoStart = false;
       }
-      this.pendingFlowAutoStart = false;
     }
   }
 
@@ -400,7 +424,7 @@ export class EvenEpubClient {
 
   /** Companion-UI "Sync now": same as the glasses menu item. Returns the outcome. */
   public async syncKosyncNow(): Promise<string> {
-    return this.pullKosync(true, this.locationChangedAt);
+    return (await this.pullKosync(true, this.locationChangedAt)).message;
   }
 
   /** Re-create the open book's session after login/logout in the companion UI. */
@@ -408,6 +432,7 @@ export class EvenEpubClient {
     this.flushKosync();
     this.kosync = this.book ? this.createKosyncSession?.(this.book, this.currentBookFilename) ?? null : null;
     this.kosyncReconciled = false;
+    this.kosyncDirty = false;
     // The reading menu lists "Sync progress" only with a session: re-declare it.
     this.readingRenderSig = null;
     if (this.view === 'reading' || this.view === 'flowReading') {
@@ -451,10 +476,10 @@ export class EvenEpubClient {
    *
    * @param localSavedAt undefined = no local position (always adopt remote).
    */
-  private async pullKosync(interactive: boolean, localSavedAt?: number | null): Promise<string> {
+  private async pullKosync(interactive: boolean, localSavedAt?: number | null): Promise<{ ok: boolean; message: string }> {
     const session = this.kosync;
     const book = this.book;
-    if (!session || !book) return 'Open a book to sync its progress.';
+    if (!session || !book) return { ok: false, message: 'Open a book to sync its progress.' };
     const before = this.currentLocation();
     const beforeView = this.view;
     const beforeListIndex = this.librarySelectedIndex;
@@ -463,7 +488,7 @@ export class EvenEpubClient {
       : { location: before, savedAtMs: localSavedAt ?? null };
     try {
       const result = await session.pull(local, interactive);
-      if (this.kosync !== session || this.book !== book) return 'Book changed; sync skipped.';
+      if (this.kosync !== session || this.book !== book) return { ok: false, message: 'Book changed; sync skipped.' };
       if (result.decision === 'apply' && result.target) {
         const target = result.target;
         // Re-check inside the queue: a gesture or book switch queued ahead of
@@ -474,29 +499,40 @@ export class EvenEpubClient {
           const moved = now.chapterIndex !== before.chapterIndex || now.offset !== before.offset
             || this.view !== beforeView || this.librarySelectedIndex !== beforeListIndex;
           if (!interactive && moved) return false; // the user is busy; don't jump under them
-          await this.jumpToLocation(target);
+          // The adopted position is as old as the remote one, not "now".
+          const remoteTs = result.remote?.timestamp;
+          this.adoptingRemoteAt = typeof remoteTs === 'number' ? remoteTs * 1000 : Date.now();
+          try {
+            await this.jumpToLocation(target);
+          } finally {
+            this.adoptingRemoteAt = null;
+          }
           await session.markSynced(this.currentLocation());
+          this.kosyncDirty = false;
           return true;
         });
-        if (!applied) return 'Skipped: you were already reading.';
+        if (!applied) return { ok: true, message: 'Skipped: you were already reading.' };
         const pct = Math.round((result.remote?.percentage ?? 0) * 100);
         const from = result.remote?.device ? ` from ${result.remote.device}` : '';
         this.showFooterNotice(`Synced ${pct}%${from}`);
         setStatus(`KOReader sync: moved to ${pct}%${from}`);
-        return `Moved to ${pct}%${from}.`;
+        return { ok: true, message: `Moved to ${pct}%${from}.` };
       }
       if (interactive) {
-        if (this.kosync === session) this.kosyncReconciled = true;
+        if (this.kosync === session) {
+          this.kosyncReconciled = true;
+          this.kosyncDirty = false;
+        }
         await session.push(this.currentLocation(), { force: true });
         const pct = Math.round(session.percentageAt(this.currentLocation()) * 100);
         this.showFooterNotice(`Sync sent ${pct}%`);
         setStatus(`KOReader sync: progress sent (${pct}%)`);
-        return `Progress sent (${pct}%).`;
+        return { ok: true, message: `Progress sent (${pct}%).` };
       }
-      return 'Up to date.';
+      return { ok: true, message: 'Up to date.' };
     } catch (e) {
       this.reportKosyncError(e, interactive);
-      return `Sync failed: ${e instanceof KosyncError ? e.message : String(e)}`;
+      return { ok: false, message: `Sync failed: ${e instanceof KosyncError ? e.message : String(e)}` };
     }
   }
 
@@ -1909,6 +1945,7 @@ export class EvenEpubClient {
       const wasPending = this.pendingMenuAction;
       this.pendingMenuAction = r.pendingMenuAction;
       if (r.effects.pauseAndFlush) {
+        this.pendingFlowAutoStart = false;
         if (this.isFlowRunning) this.stopFlow();
         this.stopClockTicker();
         if (this.view === 'flowReading') await this.saveFlowPosition(true, true);
@@ -2327,6 +2364,7 @@ export class EvenEpubClient {
   }
 
   private async handleShutdown(): Promise<void> {
+    this.pendingFlowAutoStart = false;
     this.stopFlow();
     this.stopClockTicker();
     if (this.view === 'flowReading') await this.saveFlowPosition(true, true);
@@ -2436,16 +2474,40 @@ export class EvenEpubClient {
    */
   private noteLocation(chapterIndex: number, offset: number): number | undefined {
     const key = `${chapterIndex}:${offset}`;
-    if (this.locationKey === null) {
-      this.locationKey = key;
-    } else if (key !== this.locationKey) {
-      this.locationKey = key;
-      this.locationChangedAt = Date.now();
-      if (this.kosync && this.kosyncReconciled && (this.view === 'reading' || this.view === 'flowReading')) {
-        this.kosync.schedulePush({ chapterIndex, offset }, (e) => this.reportKosyncError(e, false));
+    if (key === this.locationKey) return this.locationChangedAt ?? undefined;
+    this.locationKey = key;
+    if (this.adoptingRemoteAt !== null) {
+      // Jump to a server position: take its time; nothing to push back.
+      this.locationChangedAt = this.adoptingRemoteAt;
+      return this.locationChangedAt;
+    }
+    this.locationChangedAt = Date.now();
+    const session = this.kosync;
+    if (session && (this.view === 'reading' || this.view === 'flowReading')) {
+      if (this.kosyncReconciled) {
+        session.schedulePush({ chapterIndex, offset }, (e) => this.reportKosyncError(e, false));
+      } else {
+        // Held until the first pull succeeds; retry a failed one now and then.
+        this.kosyncDirty = true;
+        if (!this.kosyncReconciling && Date.now() - this.lastReconcileAttempt > 30_000) {
+          void this.reconcileKosync(true);
+        }
       }
     }
-    return this.locationChangedAt ?? undefined;
+    return this.locationChangedAt;
+  }
+
+  /**
+   * Location key for the restored position, computed the way the save of the
+   * active reading mode will compute it (paged: page start; flow: word).
+   */
+  private locationKeyForMode(): string {
+    const pageStart = this.chapterPageStarts[this.chapterIndex]?.[this.pageIndex] ?? 0;
+    if (config.readingMode === 'flow') {
+      const pageText = this.chapterPages[this.chapterIndex]?.[this.pageIndex] ?? '';
+      return `${this.chapterIndex}:${pageStart + flowOffsetForWord(pageText, this.flowWordIndex)}`;
+    }
+    return `${this.chapterIndex}:${pageStart}`;
   }
 
   private async savePagedPosition(immediate = false): Promise<void> {

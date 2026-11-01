@@ -293,3 +293,49 @@ test('pull reports "same" when remote and local land on the same paragraph', asy
   const result = await session.pull({ location: { chapterIndex: 0, offset: second + 2 }, savedAtMs: 1 }, false);
   assert.equal(result.decision, 'same');
 });
+
+test('upload order holds across sessions of the same book, and flush waits for an upload in flight', async () => {
+  const releases: Array<() => void> = [];
+  const landed: number[] = [];
+  const impl = (async (_url: string, init: RequestInit) => {
+    const body = JSON.parse(init.body as string);
+    await new Promise<void>((r) => releases.push(r));
+    landed.push(body.percentage);
+    return new Response('{}', { status: 200 });
+  }) as unknown as typeof fetch;
+  const client = new KosyncClient({ server: SETTINGS.server, fetchImpl: impl });
+  const mk = () => new KosyncSession({ book: book(), filename: null, settings: SETTINGS, client, parseBody });
+  const oldSession = mk();
+  const first = oldSession.push({ chapterIndex: 0, offset: 0 });
+  while (releases.length < 1) await new Promise((r) => setImmediate(r));
+  // Book reopened: a new session pushes a newer position while the old PUT hangs.
+  const newSession = mk();
+  const second = newSession.push({ chapterIndex: 1, offset: 5 });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(releases.length, 1, 'the new PUT waits for the old one');
+  let flushed = false;
+  const flushing = newSession.flush().then(() => { flushed = true; });
+  releases.shift()!();
+  while (releases.length < 1) await new Promise((r) => setImmediate(r));
+  assert.equal(flushed, false, 'flush waits for the upload in flight');
+  releases.shift()!();
+  await Promise.all([first, second, flushing]);
+  assert.equal(landed.length, 2);
+  assert.ok(landed[0] < landed[1], 'newer position lands last');
+});
+
+test('markSynced drops a push that was still preparing (locator await)', async () => {
+  const { impl, calls } = fakeFetch(() => ({ status: 200, body: {} }));
+  const client = new KosyncClient({ server: SETTINGS.server, fetchImpl: impl });
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const slowBook: Book = { ...book(), loadChapterXhtml: async (i) => { await gate; return book().loadChapterXhtml!(i); } };
+  const session = new KosyncSession({ book: slowBook, filename: null, settings: SETTINGS, client, parseBody });
+  const pushing = session.push({ chapterIndex: 0, offset: 0 });
+  await new Promise((r) => setImmediate(r));
+  const marking = session.markSynced({ chapterIndex: 1, offset: 0 });
+  release();
+  assert.equal(await pushing, false);
+  await marking;
+  assert.equal(calls.length, 0);
+});
