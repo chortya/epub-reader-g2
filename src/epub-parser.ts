@@ -360,13 +360,30 @@ const BLOCK_TAGS = new Set([
   'TR', 'TH', 'TD',
 ]);
 
+/**
+ * Parse a chapter as what EPUB says it is - XHTML - and fall back to HTML
+ * only if it isn't well-formed XML. Parsing XHTML as HTML breaks on XML-isms:
+ * `<title/>` is not self-closing in HTML, so the "title" swallowed the whole
+ * chapter (e.g. Sigil-made EPUBs) and the book had "no readable chapters".
+ */
+function parseChapterDocument(xhtml: string): Document {
+  const parser = new DOMParser();
+  const xml = parser.parseFromString(xhtml, 'application/xhtml+xml');
+  if (xml.getElementsByTagName('parsererror').length === 0 && xml.getElementsByTagName('body').length > 0) {
+    return xml;
+  }
+  // Not well-formed (e.g. HTML entities without a DTD): repair the
+  // self-closing elements HTML can't express, then parse leniently.
+  const repaired = xhtml.replace(/<(title|script|style|textarea|iframe|a|div|span|p)(\s[^<>]*?)?\/>/gi, '<$1$2></$1>');
+  return parser.parseFromString(repaired, 'text/html');
+}
+
 function extractChapterMetadata(html: string): {
   text: string;
   heading: string;
   documentTitle: string;
 } {
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(html, 'text/html');
+  const doc = parseChapterDocument(html);
 
   const heading = normalizeChapterTitle(
     doc.querySelector('h1, h2, h3, h4, h5, h6')?.textContent ?? '',
@@ -376,7 +393,7 @@ function extractChapterMetadata(html: string): {
   doc.querySelectorAll('script, style').forEach((el) => el.remove());
 
   const parts: string[] = [];
-  walkNode(doc.body, parts);
+  walkNode(doc.body ?? doc.getElementsByTagName("body")[0] ?? null, parts);
 
   let text = parts.join('');
   text = text.replace(/[ \t]+/g, ' ');
@@ -403,7 +420,8 @@ function walkNode(node: Node | null, parts: string[]): void {
       }
     } else if (child.nodeType === Node.ELEMENT_NODE) {
       const el = child as Element;
-      const tag = el.tagName;
+      // localName: XHTML (XML) documents report lower-case tag names.
+      const tag = (el.localName || el.tagName).toUpperCase();
 
       if (tag === 'BR') {
         parts.push('\n');
