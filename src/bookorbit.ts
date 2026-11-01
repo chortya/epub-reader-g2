@@ -27,6 +27,8 @@ export type BookOrbitBook = {
   readStatus: string | null;
   formats: string[];
   lastReadAt: string | null;
+  /** Changes when the book (file or metadata) changes in BookOrbit. */
+  updatedAt: string | null;
 };
 
 export type BookOrbitBookPage = {
@@ -94,14 +96,48 @@ export class BookOrbitClient extends KosyncClient {
     return files.sort((a, b) => rank(a) - rank(b))[0] ?? null;
   }
 
-  /** Download a file unchanged, so KOReader's partial MD5 matches the library copy. */
-  async download(fileId: number): Promise<ArrayBuffer> {
+  /**
+   * Download a file unchanged, so KOReader's partial MD5 matches the library
+   * copy. Streams with a stall timeout (not a total one: big books on a slow
+   * link are fine as long as bytes keep coming), checks the result is a
+   * complete ZIP/EPUB, and retries once on a network failure or stall.
+   */
+  async download(
+    fileId: number,
+    opts: { expectedBytes?: number | null; onProgress?: (received: number, total: number | null) => void; stallMs?: number } = {},
+  ): Promise<ArrayBuffer> {
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        return await this.downloadOnce(fileId, opts);
+      } catch (e) {
+        lastError = e;
+        // HTTP errors (auth, missing file) won't get better on retry.
+        if (e instanceof KosyncError && e.status !== null) throw e;
+      }
+    }
+    throw lastError;
+  }
+
+  private async downloadOnce(
+    fileId: number,
+    opts: { expectedBytes?: number | null; onProgress?: (received: number, total: number | null) => void; stallMs?: number },
+  ): Promise<ArrayBuffer> {
     const res = await this.request('GET', `/plugin/catalog/files/${fileId}/download`, {
       accept: 'application/epub+zip, application/octet-stream',
-      timeoutMs: 120_000,
+      timeoutMs: opts.stallMs ?? DOWNLOAD_STALL_MS,
     });
     if (!res.ok) throw await this.errorFrom(res, 'Download failed');
-    return res.arrayBuffer();
+    const header = Number(res.headers.get('content-length') ?? '');
+    const total = Number.isFinite(header) && header > 0 ? header : (opts.expectedBytes ?? null);
+    const bytes = await readWithStallTimeout(res, opts.stallMs ?? DOWNLOAD_STALL_MS, (n) => opts.onProgress?.(n, total));
+    if (total !== null && bytes.byteLength !== total) {
+      throw new KosyncError(`Download incomplete (${bytes.byteLength} of ${total} bytes)`, null);
+    }
+    if (bytes.byteLength < 4 || bytes[0] !== 0x50 || bytes[1] !== 0x4b || bytes[2] !== 0x03 || bytes[3] !== 0x04) {
+      throw new KosyncError('Downloaded file is not an EPUB', null);
+    }
+    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
   }
 
   /** BookOrbit book ids for KOReader document hashes it recognises. */
@@ -116,9 +152,14 @@ export class BookOrbitClient extends KosyncClient {
     return out;
   }
 
-  async uploadPageStats(device: DeviceInfo, hash: string, events: PageStatEvent[], keepalive = false): Promise<void> {
+  /** Identifies server + login, so cached state never crosses accounts. */
+  get accountKey(): string {
+    return `${this.opts.server}|${this.opts.username ?? ''}`;
+  }
+
+  async uploadPageStats(device: DeviceInfo, books: { hash: string; events: PageStatEvent[] }[], keepalive = false): Promise<void> {
     const res = await this.request('POST', '/plugin/page-stats', {
-      body: { ...device, books: [{ hash, events }] },
+      body: { ...device, books },
       accept: JSON_ACCEPT,
       keepalive,
     });
@@ -141,6 +182,46 @@ export class BookOrbitClient extends KosyncClient {
   }
 }
 
+/** No bytes for this long = stalled download. */
+export const DOWNLOAD_STALL_MS = 30_000;
+
+async function readWithStallTimeout(res: Response, stallMs: number, onProgress: (received: number) => void): Promise<Uint8Array> {
+  if (!res.body) {
+    const whole = new Uint8Array(await res.arrayBuffer());
+    onProgress(whole.byteLength);
+    return whole;
+  }
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  for (;;) {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const stalled = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new KosyncError('Download stalled', null)), stallMs);
+    });
+    let step: ReadableStreamReadResult<Uint8Array>;
+    try {
+      step = await Promise.race([reader.read(), stalled]);
+    } catch (e) {
+      reader.cancel().catch(() => {});
+      throw e;
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+    if (step.done) break;
+    chunks.push(step.value);
+    received += step.value.byteLength;
+    onProgress(received);
+  }
+  const out = new Uint8Array(received);
+  let offset = 0;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.byteLength;
+  }
+  return out;
+}
+
 function toBook(raw: any): BookOrbitBook | null {
   if (!raw || typeof raw.id !== 'number' || typeof raw.title !== 'string') return null;
   return {
@@ -152,6 +233,7 @@ function toBook(raw: any): BookOrbitBook | null {
     readStatus: typeof raw.readStatus === 'string' ? raw.readStatus : null,
     formats: Array.isArray(raw.formats) ? raw.formats.map(String) : [],
     lastReadAt: typeof raw.lastReadAt === 'string' ? raw.lastReadAt : null,
+    updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : null,
   };
 }
 
@@ -164,6 +246,7 @@ export const MAX_PAGE_SECONDS = 120;
 const BATCH_SIZE = 20;
 /** ...or this long after the first queued event (and always on background/exit). */
 export const STATS_FLUSH_DELAY_MS = 60_000;
+const MAX_PENDING_PER_BOOK = 300;
 
 type Clock = () => number;
 
@@ -178,7 +261,6 @@ export class BookOrbitTracker {
   private device: DeviceInfo;
   private now: Clock;
   private current: { page: number; totalPages: number; shownAt: number } | null = null;
-  private queue: PageStatEvent[] = [];
   private uploading: Promise<void> = Promise.resolve();
   private finishedSent = false;
   private onError: (e: unknown) => void;
@@ -190,6 +272,32 @@ export class BookOrbitTracker {
     this.device = opts.device;
     this.now = opts.now ?? (() => Date.now());
     this.onError = opts.onError ?? (() => {});
+  }
+
+  /**
+   * Unsent events live in an outbox per account and book, shared by all
+   * trackers: a failed upload survives the tracker being replaced (book
+   * switch, reopen) and goes out with the next flush of any book.
+   */
+  private static outboxes = new Map<string, Map<string, PageStatEvent[]>>();
+
+  private get outbox(): Map<string, PageStatEvent[]> {
+    const key = this.client.accountKey;
+    let box = BookOrbitTracker.outboxes.get(key);
+    if (!box) {
+      box = new Map();
+      BookOrbitTracker.outboxes.set(key, box);
+    }
+    return box;
+  }
+
+  private get queue(): PageStatEvent[] {
+    let q = this.outbox.get(this.hash);
+    if (!q) {
+      q = [];
+      this.outbox.set(this.hash, q);
+    }
+    return q;
   }
 
   get pendingEvents(): number {
@@ -218,12 +326,25 @@ export class BookOrbitTracker {
       this.flushTimer = null;
     }
     this.uploading = this.uploading.then(async () => {
-      if (this.queue.length === 0) return;
-      const batch = this.queue.splice(0, this.queue.length);
+      // Every book with pending events in this account, within BookOrbit's
+      // 500-events-per-request limit.
+      const books: { hash: string; events: PageStatEvent[] }[] = [];
+      let budget = 400;
+      for (const [hash, events] of this.outbox) {
+        if (events.length === 0 || budget === 0) continue;
+        const take = events.splice(0, budget);
+        budget -= take.length;
+        books.push({ hash, events: take });
+      }
+      if (books.length === 0) return;
       try {
-        await this.client.uploadPageStats(this.device, this.hash, batch, keepalive);
+        await this.client.uploadPageStats(this.device, books, keepalive);
       } catch (e) {
-        this.queue.unshift(...batch.slice(-200)); // bounded retry buffer
+        for (const b of books) {
+          const q = this.outbox.get(b.hash) ?? [];
+          // Bounded retry buffer per book; BookOrbit dedupes resent events.
+          this.outbox.set(b.hash, [...b.events, ...q].slice(-MAX_PENDING_PER_BOOK));
+        }
         this.onError(e);
       }
     });

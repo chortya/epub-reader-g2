@@ -33,6 +33,15 @@ import {
   type SyncProvider,
 } from './kosync';
 import { BookOrbitClient, BookOrbitTracker, type BookOrbitBook, type BookOrbitSort } from './bookorbit';
+import {
+  cacheStatus,
+  loadCacheIndex,
+  pruneCacheIndex,
+  saveCacheIndex,
+  upsertCacheEntry,
+  type BookOrbitCacheEntry,
+  type CacheStatus,
+} from './bookorbit-cache';
 import { KosyncSession } from './kosync-session';
 import { md5Hex } from './md5';
 import { RELAY_ORIGIN } from './relay';
@@ -463,6 +472,7 @@ async function main() {
           try {
             await deleteFromDB(meta.bookId, bridgeRef);
             await renderLibrary(clientToUse, bridgeRef);
+            await bookOrbitUi.localLibraryChanged();
             setStatus('Book deleted.');
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
@@ -669,7 +679,11 @@ async function main() {
     render(undefined, true);
   }
 
-  /** "BookOrbit library": browse, search and download books to the reader. */
+  /**
+   * "BookOrbit library": browse/search the catalog, download EPUBs into the
+   * local library (offline reading), open local copies without the network,
+   * and offer updates when a book changed in BookOrbit.
+   */
   function setupBookOrbitLibrary(storageBridge: any) {
     const toggle = document.getElementById('bo-toggle');
     const body = document.getElementById('bo-body');
@@ -678,85 +692,189 @@ async function main() {
     const list = document.getElementById('bo-list');
     const more = document.getElementById('bo-more') as HTMLButtonElement | null;
     const state = document.getElementById('bo-state');
-    if (!toggle || !body || !search || !sort || !list || !more || !state) return { refresh() {} };
+    if (!toggle || !body || !search || !sort || !list || !more || !state) {
+      return { refresh() {}, async localLibraryChanged() {} };
+    }
 
     let page = 1;
     let loading = false;
+    // Bumped by every new search/sort/refresh; responses for older ones are dropped.
+    let generation = 0;
     let loadedOnce = false;
     let query = '';
     let searchTimer: number | null = null;
+    const rows = new Map<number, { book: BookOrbitBook; render: () => void }>();
+    const inFlight = new Map<number, Promise<StoredBook | null>>();
 
-    const formatMeta = (b: BookOrbitBook): string => {
+    // Local library ids + the BookOrbit download index, refreshed per list load.
+    let localIds = new Set<string>();
+    let index: BookOrbitCacheEntry[] = [];
+    let listTotal = 0;
+    const updateSummary = () => {
+      const bo = makeBookOrbitClient();
+      if (!bo || listTotal === 0) return;
+      const onDevice = index.filter((e) => e.account === bo.accountKey && localIds.has(e.localBookId)).length;
+      state.textContent = `${list.childElementCount} of ${listTotal} EPUBs · ${onDevice} on this device`;
+    };
+    const refreshLocalState = async () => {
+      const local = await getRecentBooksFromDB(storageBridge).catch(() => [] as StoredBook[]);
+      localIds = new Set(local.map((b) => b.bookId));
+      const loaded = await loadCacheIndex(storageBridge, window.localStorage);
+      index = pruneCacheIndex(loaded, localIds);
+      if (index.length !== loaded.length) await saveCacheIndex(index, storageBridge, window.localStorage).catch(() => {});
+    };
+
+    const formatMeta = (b: BookOrbitBook, status: CacheStatus): string => {
       const parts: string[] = [];
       if (b.authors.length > 0) parts.push(b.authors.join(', '));
       if (b.readStatus === 'read') parts.push('Finished');
       else if (b.progressPercentage !== null && b.progressPercentage > 0) parts.push(`${Math.round(b.progressPercentage)}%`);
+      if (status.kind === 'onDevice') parts.push('On device');
+      if (status.kind === 'updateAvailable') parts.push('Update available');
       return parts.join(' · ');
     };
 
-    const download = async (b: BookOrbitBook, button: HTMLButtonElement) => {
-      const bo = makeBookOrbitClient();
-      if (!bo) return;
-      button.disabled = true;
-      try {
-        setStatus(`Downloading from BookOrbit: ${b.title}...`);
+    /** Download (or re-download) a book into the local library. */
+    const download = (b: BookOrbitBook, onProgress: (text: string) => void): Promise<StoredBook | null> => {
+      const running = inFlight.get(b.id);
+      if (running) return running;
+      const job = (async () => {
+        const bo = makeBookOrbitClient();
+        if (!bo) return null;
         const file = await bo.epubFile(b.id);
-        if (!file) {
-          setStatus(`No EPUB file for: ${b.title}`);
-          return;
-        }
-        const data = await bo.download(file.id);
-        setStatus(`Parsing: ${b.title}...`);
+        if (!file) throw new Error(`No EPUB file for "${b.title}" in BookOrbit`);
+        const data = await bo.download(file.id, {
+          expectedBytes: file.sizeBytes,
+          onProgress: (received, total) => onProgress(total ? `${Math.floor((received / total) * 100)}%` : `${Math.round(received / 1024)} KB`),
+        });
+        onProgress('Saving...');
         const filename = `${b.title}.epub`;
-        const book = await parseEpub(data, filename);
-        const stored = await saveEpubBufferToDB(data, filename, book.title, storageBridge);
-        if (client) {
-          // resume=true: the sync pull places the reader at BookOrbit's position.
-          await client.loadBook(book, true, stored.bookId, stored.filename);
-          await renderLibrary(client, storageBridge);
+        const parsed = await parseEpub(data, filename); // validate before storing
+        const stored = await saveEpubBufferToDB(data, filename, parsed.title, storageBridge);
+        index = upsertCacheEntry(index, {
+          account: bo.accountKey,
+          bookOrbitId: b.id,
+          fileId: file.id,
+          localBookId: stored.bookId,
+          title: b.title,
+          remoteUpdatedAt: b.updatedAt,
+          sizeBytes: data.byteLength,
+          downloadedAt: Date.now(),
+        });
+        localIds.add(stored.bookId);
+        await saveCacheIndex(index, storageBridge, window.localStorage);
+        updateSummary();
+        if (client) await renderLibrary(client, storageBridge); // also refreshes the glasses' book list
+        if (stored.durable === false) {
+          setStatus(`"${b.title}" is saved for this session only: device storage is full. Delete some books to keep it offline.`);
         }
-        setStatus(`Loaded: ${book.title}`);
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        setStatus(`BookOrbit download failed: ${msg}`);
-      } finally {
-        button.disabled = false;
+        return stored;
+      })();
+      inFlight.set(b.id, job);
+      job.finally(() => inFlight.delete(b.id)).catch(() => {});
+      return job;
+    };
+
+    /** Open the local copy (offline), downloading it first if needed. */
+    const read = async (b: BookOrbitBook, onProgress: (text: string) => void) => {
+      const bo = makeBookOrbitClient();
+      if (!bo || !client) return;
+      const status = cacheStatus(index, bo.accountKey, b, localIds);
+      let stored: StoredBook | null = null;
+      if (status.kind !== 'none') {
+        const local = await getRecentBooksFromDB(storageBridge);
+        stored = local.find((x) => x.bookId === status.entry.localBookId) ?? null;
       }
+      if (!stored) {
+        setStatus(`Downloading from BookOrbit: ${b.title}...`);
+        stored = await download(b, onProgress);
+      }
+      if (!stored) return;
+      const book = await parseEpub(stored.buffer, stored.filename);
+      // resume=true: the sync pull places the reader at BookOrbit's position.
+      await client.loadBook(book, true, stored.bookId, stored.filename);
+      await renderLibrary(client, storageBridge);
+      setStatus(`Loaded: ${book.title}`);
+    };
+
+    const addRow = (b: BookOrbitBook) => {
+      const row = document.createElement('div');
+      row.className = 'gut-item bo-item';
+      // textContent only: titles are remote content.
+      row.innerHTML = '<div><span class="bo-title"></span><div class="bo-meta"></div></div>'
+        + '<div class="bo-actions"><button class="btn btn-ghost btn-sm bo-dl"></button>'
+        + '<button class="btn btn-sm bo-read">Read</button></div>';
+      (row.querySelector('.bo-title') as HTMLElement).textContent = b.title;
+      const meta = row.querySelector('.bo-meta') as HTMLElement;
+      const dl = row.querySelector('.bo-dl') as HTMLButtonElement;
+      const readBtn = row.querySelector('.bo-read') as HTMLButtonElement;
+
+      const render = () => {
+        const bo = makeBookOrbitClient();
+        const status = bo ? cacheStatus(index, bo.accountKey, b, localIds) : { kind: 'none' as const };
+        meta.textContent = formatMeta(b, status);
+        const busy = inFlight.has(b.id);
+        dl.disabled = busy || status.kind === 'onDevice';
+        if (!busy) dl.textContent = status.kind === 'onDevice' ? 'Downloaded' : status.kind === 'updateAvailable' ? 'Update' : 'Download';
+        readBtn.disabled = busy;
+      };
+      const progress = (text: string) => { dl.textContent = text; };
+      const run = async (work: () => Promise<unknown>) => {
+        dl.disabled = true;
+        readBtn.disabled = true;
+        try {
+          await work();
+        } catch (e) {
+          setStatus(`BookOrbit: ${e instanceof Error ? e.message : String(e)}`);
+        } finally {
+          render();
+        }
+      };
+      dl.addEventListener('click', () => run(async () => {
+        await download(b, progress);
+        setStatus(`Downloaded for offline reading: ${b.title}`);
+      }));
+      readBtn.addEventListener('click', () => run(() => read(b, progress)));
+      rows.set(b.id, { book: b, render });
+      render();
+      list.appendChild(row);
     };
 
     const load = async (reset: boolean) => {
       const bo = makeBookOrbitClient();
-      if (!bo || loading) return;
+      if (!bo || (loading && !reset)) return; // "Load more" waits; a new search supersedes
+      const mine = reset ? ++generation : generation;
       loading = true;
       if (reset) {
         page = 1;
         list.innerHTML = '';
+        rows.clear();
+        more.style.display = 'none';
       }
       state.textContent = 'Loading...';
       try {
+        if (reset) await refreshLocalState();
         const result = await bo.listBooks({ q: query, page, size: 20, sort: sort.value as BookOrbitSort });
-        for (const b of result.items) {
-          const row = document.createElement('div');
-          row.className = 'gut-item bo-item';
-          // textContent only: titles are remote content.
-          row.innerHTML = '<div><span class="bo-title"></span><div class="bo-meta"></div></div>'
-            + '<button class="btn btn-ghost btn-sm">Read</button>';
-          (row.querySelector('.bo-title') as HTMLElement).textContent = b.title;
-          (row.querySelector('.bo-meta') as HTMLElement).textContent = formatMeta(b);
-          const button = row.querySelector('button') as HTMLButtonElement;
-          button.addEventListener('click', () => { void download(b, button); });
-          list.appendChild(row);
-        }
+        if (mine !== generation) return; // a newer search started meanwhile
+        for (const b of result.items) addRow(b);
         page = result.page + 1;
         more.style.display = result.hasNext ? '' : 'none';
-        state.textContent = result.total === 0
-          ? (query ? 'No EPUBs match your search.' : 'No EPUBs in your BookOrbit library.')
-          : `${list.childElementCount} of ${result.total} EPUBs`;
+        listTotal = result.total;
+        if (result.total === 0) state.textContent = query ? 'No EPUBs match your search.' : 'No EPUBs in your BookOrbit library.';
+        else updateSummary();
         loadedOnce = true;
       } catch (e) {
-        state.textContent = e instanceof Error ? e.message : String(e);
+        if (mine === generation) {
+          // Offline: say so, and point at the books that are already local.
+          const onDevice = index.filter((x) => x.account === bo.accountKey && localIds.has(x.localBookId)).length;
+          const offline = e instanceof KosyncError && e.status === null;
+          state.textContent = (offline ? 'BookOrbit is not reachable (offline or away from home/Tailscale).' : String(e instanceof Error ? e.message : e))
+            + (onDevice > 0
+              ? ` ${onDevice === 1 ? 'Your downloaded book is' : `Your ${onDevice} downloaded books are`} in the Library above and read offline.`
+              : '');
+        }
       } finally {
-        loading = false;
+        if (mine === generation) loading = false;
       }
     };
 
@@ -781,13 +899,22 @@ async function main() {
         const visible = makeBookOrbitClient() !== null;
         toggle.style.display = visible ? '' : 'none';
         if (!visible) {
+          generation++; // drop any response still in flight for the old login
+          loading = false;
           body.classList.remove('open');
           toggle.classList.remove('open');
           list.innerHTML = '';
+          rows.clear();
           loadedOnce = false;
         } else if (body.classList.contains('open')) {
           void load(true);
         }
+      },
+      /** The local library changed (e.g. a book was deleted): update badges. */
+      async localLibraryChanged() {
+        await refreshLocalState();
+        for (const r of rows.values()) r.render();
+        updateSummary();
       },
     };
   }

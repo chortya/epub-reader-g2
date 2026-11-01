@@ -19,6 +19,12 @@ export interface StoredBook {
   title: string;
   buffer: ArrayBuffer;
   timestamp: number;
+  /**
+   * Set by saveEpubBufferToDB: false when only IndexedDB holds the book (the
+   * bridge copy failed, e.g. storage full), so it may not survive a device
+   * app restart.
+   */
+  durable?: boolean;
 }
 
 interface BridgeLike {
@@ -206,10 +212,12 @@ export async function saveEpubBufferToDB(
     console.warn('IndexedDB save failed:', error);
   }
 
+  let bridgeSaved = false;
   if (bridge) {
     try {
       await runBridgeMutation(() => saveToBridgeStorage(bridge, book));
       saved = true;
+      bridgeSaved = true;
     } catch (error) {
       console.warn('Bridge storage save failed:', error);
     }
@@ -230,6 +238,7 @@ export async function saveEpubBufferToDB(
   }
 
   if (!saved) throw new Error('The EPUB could not be saved to local storage.');
+  book.durable = bridge ? bridgeSaved : true;
   return book;
 }
 

@@ -68,8 +68,10 @@ test('epubFile prefers the primary original EPUB', async () => {
 
 test('download returns the bytes; login errors are explicit', async () => {
   const { impl } = fake(() => ({ status: 200, raw: new Uint8Array([0x50, 0x4b, 3, 4]) }));
-  const bytes = new Uint8Array(await client(impl).download(3));
+  const seen: Array<[number, number | null]> = [];
+  const bytes = new Uint8Array(await client(impl).download(3, { expectedBytes: 4, onProgress: (r, t) => seen.push([r, t]) }));
   assert.deepEqual([...bytes], [0x50, 0x4b, 3, 4]);
+  assert.deepEqual(seen.at(-1), [4, 4]);
   const denied = fake(() => ({ status: 401, body: { message: 'Invalid credentials' } }));
   await assert.rejects(client(denied.impl).listBooks(), /rejected the login/);
 });
@@ -82,7 +84,7 @@ test('matchCheck, page stats and read status send the plugin payloads', async ()
   const c = client(impl);
   assert.equal((await c.matchCheck(['h1', 'h2'], DEVICE)).get('h1'), 42);
   assert.deepEqual(calls[0].body, { ...DEVICE, hashes: ['h1', 'h2'] });
-  await c.uploadPageStats(DEVICE, 'h1', [{ page: 3, startTime: 100, durationSeconds: 30, totalPages: 50 }]);
+  await c.uploadPageStats(DEVICE, [{ hash: 'h1', events: [{ page: 3, startTime: 100, durationSeconds: 30, totalPages: 50 }] }]);
   assert.deepEqual(calls[1].body.books, [{ hash: 'h1', events: [{ page: 3, startTime: 100, durationSeconds: 30, totalPages: 50 }] }]);
   await c.setReadStatus(42, 'read');
   assert.equal(calls[2].method, 'PUT');
@@ -131,4 +133,48 @@ test('tracker keeps a failed batch for the next flush', async () => {
   await tracker.flush();
   assert.equal(tracker.pendingEvents, 0);
   assert.equal(calls.length, 2);
+});
+
+test('download rejects truncated and non-EPUB files, retries a dropped connection once', async () => {
+  const short = fake(() => ({ status: 200, raw: new Uint8Array([0x50, 0x4b, 3, 4]) }));
+  await assert.rejects(client(short.impl).download(3, { expectedBytes: 10 }), /incomplete/);
+  assert.equal(short.calls.length, 2, 'incomplete download retried once');
+  const html = fake(() => ({ status: 200, raw: '<html>login</html>' }));
+  await assert.rejects(client(html.impl).download(3), /not an EPUB/);
+  let n = 0;
+  const flaky = (async () => {
+    n++;
+    if (n === 1) throw new TypeError('network down');
+    return new Response(new Uint8Array([0x50, 0x4b, 3, 4]), { status: 200 });
+  }) as unknown as typeof fetch;
+  assert.equal((await client(flaky).download(3)).byteLength, 4);
+  assert.equal(n, 2);
+  const missing = fake(() => ({ status: 404, body: { message: 'File not found' } }));
+  await assert.rejects(client(missing.impl).download(3), /File not found/);
+  assert.equal(missing.calls.length, 1, 'HTTP errors are not retried');
+});
+
+test('download aborts a stalled stream', async () => {
+  const impl = (async () => new Response(new ReadableStream({
+    start(controller) { controller.enqueue(new Uint8Array([0x50, 0x4b])); /* then nothing */ },
+  }), { status: 200 })) as unknown as typeof fetch;
+  await assert.rejects(client(impl).download(3, { stallMs: 50 }), /stalled/);
+});
+
+test('failed reading-time uploads survive the tracker being replaced', async () => {
+  let now = 0;
+  let fail = true;
+  const { impl, calls } = fake(() => (fail ? { status: 503, body: {} } : { status: 200, body: {} }));
+  const c = new BookOrbitClient({ server: BASE, username: 'outbox-user', userkey: 'k'.repeat(32), fetchImpl: impl });
+  const a = new BookOrbitTracker({ client: c, hash: 'book-a', device: DEVICE, now: () => now });
+  a.pageShown(1, 9); now += 30_000; a.pause();
+  await a.flush(); // fails
+  // Book switch: a new tracker for another book; its flush carries book A too.
+  fail = false;
+  const b = new BookOrbitTracker({ client: c, hash: 'book-b', device: DEVICE, now: () => now });
+  b.pageShown(4, 9); now += 20_000; b.pause();
+  await b.flush();
+  const last = calls.at(-1)!.body.books.map((x: any) => x.hash).sort();
+  assert.deepEqual(last, ['book-a', 'book-b']);
+  assert.equal(a.pendingEvents + b.pendingEvents, 0);
 });

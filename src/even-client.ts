@@ -491,6 +491,14 @@ export class EvenEpubClient {
   /** Report the reading page on screen (1-based across the book) to the tracker. */
   private notePageShown(): void {
     if (!this.tracker) return;
+    // Only time that is actually reading: the app in front, a reading view,
+    // and in Flow only while it plays (a paused frame is not reading). A
+    // render finishing after backgrounding must not restart the clock.
+    const reading = this.view === 'reading' || (this.view === 'flowReading' && this.isFlowRunning);
+    if (!reading || this.lifecycleState !== 'active') {
+      this.tracker.pause();
+      return;
+    }
     let before = 0;
     let total = 0;
     for (let i = 0; i < this.chapterPages.length; i++) {
@@ -1694,7 +1702,10 @@ export class EvenEpubClient {
     }
     const wasRunning = this.isFlowRunning;
     this.isFlowRunning = false;
-    if (wasRunning) this.onFlowStateChanged?.(false);
+    if (wasRunning) {
+      this.tracker?.pause();
+      this.onFlowStateChanged?.(false);
+    }
   }
 
   /** Measured session pace (wpm); null until ≥60 s of active reading. */
