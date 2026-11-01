@@ -7,6 +7,7 @@ import type { Book, Chapter } from './types';
 import { setHyphenator, setWideGlyphs } from './paginator';
 import { Md5 } from './md5';
 import { koreaderPartialMd5Samples } from './kosync-locator';
+import { tocEntriesFromNav, tocEntriesFromNcx, tocTitlesByPath } from './epub-toc';
 
 export async function parseEpub(data: ArrayBuffer, filenameHint?: string): Promise<Book> {
   const zip = await JSZip.loadAsync(data);
@@ -18,7 +19,8 @@ export async function parseEpub(data: ArrayBuffer, filenameHint?: string): Promi
   // 2. Parse the OPF to get spine order and manifest
   const opfXml = await readZipFile(zip, opfPath);
   const opfDir = dirnameZipPath(opfPath);
-  const { title, spineItems } = parseOpf(opfXml, opfDir);
+  const { title, spineItems, toc } = parseOpf(opfXml, opfDir);
+  await applyTocTitles(zip, toc, spineItems);
 
   // 3. Extract text from each spine item
   const rawChapters: { title: string; text: string; spineIndex: number; href: string }[] = [];
@@ -31,7 +33,7 @@ export async function parseEpub(data: ArrayBuffer, filenameHint?: string): Promi
     if (text.trim().length < 10) continue;
 
     rawChapters.push({
-      title: pickChapterTitle(item.title, chapterMeta.heading, chapterMeta.documentTitle, rawChapters.length + 1),
+      title: pickChapterTitle(item.title, chapterMeta.heading, chapterMeta.documentTitle, rawChapters.length + 1, title),
       text: text.trim(),
       spineIndex: item.spineIndex,
       href: item.href,
@@ -133,7 +135,9 @@ function parseContainerXml(xml: string): string {
 /** spineIndex: position among ALL <spine> itemrefs (= KOReader DocFragment index - 1). */
 type SpineItem = { href: string; title: string; spineIndex: number };
 
-function parseOpf(xml: string, opfDir: string): { title: string; spineItems: SpineItem[] } {
+type TocSources = { navHref: string | null; ncxHref: string | null };
+
+function parseOpf(xml: string, opfDir: string): { title: string; spineItems: SpineItem[]; toc: TocSources } {
   const parser = new DOMParser();
   const doc = parser.parseFromString(xml, 'application/xml');
 
@@ -141,11 +145,18 @@ function parseOpf(xml: string, opfDir: string): { title: string; spineItems: Spi
   const title = titleEl?.textContent?.trim() ?? '';
 
   const manifestMap = new Map<string, string>();
+  const toc: TocSources = { navHref: null, ncxHref: null };
+  const spineTocId = doc.querySelector('spine')?.getAttribute('toc') ?? null;
   const manifestItems = doc.querySelectorAll('manifest > item');
   manifestItems.forEach((item) => {
     const id = item.getAttribute('id');
     const href = item.getAttribute('href');
     const mediaType = item.getAttribute('media-type') ?? '';
+    const properties = (item.getAttribute('properties') ?? '').split(/\s+/);
+    if (href && properties.includes('nav')) toc.navHref = resolveZipPath(opfDir, href);
+    if (href && (id === spineTocId || (mediaType === 'application/x-dtbncx+xml' && !toc.ncxHref))) {
+      toc.ncxHref = resolveZipPath(opfDir, href);
+    }
     if (id && href && mediaType.includes('html')) {
       const resolvedHref = resolveZipPath(opfDir, href);
       if (resolvedHref) {
@@ -163,19 +174,37 @@ function parseOpf(xml: string, opfDir: string): { title: string; spineItems: Spi
     }
   });
 
-  tryExtractTitlesFromToc(doc, opfDir, manifestMap, spineItems);
-
-  return { title, spineItems };
+  return { title, spineItems, toc };
 }
 
-function tryExtractTitlesFromToc(
-  _doc: Document,
-  _opfDir: string,
-  _manifestMap: Map<string, string>,
-  _spineItems: SpineItem[],
-): void {
-  // Title extraction from NCX/nav is complex and often unreliable.
-  // We fall back to "Chapter N" naming, which is set in parseEpub().
+/**
+ * Fill spine-item titles from the EPUB3 nav document, else the EPUB2 NCX.
+ * Best effort: a missing or malformed TOC leaves titles to the heading /
+ * document-title fallbacks in pickChapterTitle.
+ */
+async function applyTocTitles(zip: JSZip, toc: TocSources, spineItems: SpineItem[]): Promise<void> {
+  const sources = [
+    toc.navHref ? { path: toc.navHref, kind: 'nav' as const } : null,
+    toc.ncxHref ? { path: toc.ncxHref, kind: 'ncx' as const } : null,
+  ].filter((s): s is { path: string; kind: 'nav' | 'ncx' } => s !== null);
+  for (const source of sources) {
+    try {
+      const xml = await readZipFile(zip, source.path);
+      const parser = new DOMParser();
+      let doc = parser.parseFromString(xml, 'application/xml');
+      if (doc.getElementsByTagName('parsererror').length > 0) doc = parser.parseFromString(xml, 'text/html');
+      const entries = source.kind === 'nav' ? tocEntriesFromNav(doc) : tocEntriesFromNcx(doc);
+      const baseDir = dirnameZipPath(source.path);
+      const titles = tocTitlesByPath(entries, (href) => resolveZipPath(baseDir, href));
+      if (titles.size === 0) continue;
+      for (const item of spineItems) {
+        if (!item.title) item.title = titles.get(item.href) ?? '';
+      }
+      return;
+    } catch (e) {
+      console.warn(`TOC ${source.path} unreadable:`, e);
+    }
+  }
 }
 
 function dirnameZipPath(path: string): string {

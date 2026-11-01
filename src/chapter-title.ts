@@ -3,8 +3,14 @@ export function pickChapterTitle(
   headingTitle: string,
   documentTitle: string,
   chapterNumber: number,
+  bookTitle = '',
 ): string {
-  const candidates = [spineTitle, headingTitle, documentTitle].map(normalizeChapterTitle);
+  // Many EPUBs (e.g. Gutenberg/calibre) give every file the book's title as
+  // <title>; repeating it for each chapter is worse than "Chapter N".
+  const book = normalizeChapterTitle(bookTitle).toLowerCase();
+  const doc = normalizeChapterTitle(documentTitle);
+  const docIsBookTitle = book.length >= 3 && doc.toLowerCase().includes(book);
+  const candidates = [spineTitle, headingTitle, docIsBookTitle ? '' : doc].map(normalizeChapterTitle);
   const selected = candidates.find((title) => !isGenericChapterTitle(title));
   return selected || `Chapter ${chapterNumber}`;
 }
