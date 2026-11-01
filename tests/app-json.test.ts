@@ -104,3 +104,11 @@ test('glasses and companion UI show the app.json name', () => {
   assert.ok(client.includes(`'${app.name}'`), 'glasses title must match app.json name');
   assert.ok(html.includes(`<h1>${app.name} `), 'companion header must match app.json name');
 });
+
+test('pack scripts pin --sdk-ver to the installed SDK', () => {
+  const pkg = readJson('package.json');
+  const sdk = readJson('node_modules/@evenrealities/even_hub_sdk/package.json').version;
+  for (const name of ['pack', 'pack:check', 'pack:dev']) {
+    assert.ok(pkg.scripts[name].includes(`--sdk-ver ${sdk}`), `${name} must pass --sdk-ver ${sdk}`);
+  }
+});

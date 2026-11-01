@@ -14,11 +14,11 @@
     "qr": "node qr.mjs /",
     "qr:sim": "node qr.mjs '/?simulator=true'",
     "init:evenhub": "evenhub init --output app.json",
-    "pack": "node scripts/check-release.mjs && npm run build && evenhub pack app.json ./dist --output epub-reader.ehpk",
-    "pack:check": "node scripts/check-release.mjs && npm run build && evenhub pack app.json ./dist --check",
+    "pack": "node scripts/check-release.mjs && npm run build && evenhub pack app.json ./dist --sdk-ver 0.0.16 --output epub-reader.ehpk",
+    "pack:check": "node scripts/check-release.mjs && npm run build && evenhub pack app.json ./dist --sdk-ver 0.0.16 --check",
     "postinstall": "patch-package",
     "typecheck": "tsc --noEmit -p .",
-    "pack:dev": "npm run build && evenhub pack app.json ./dist --output epub-reader-dev.ehpk"
+    "pack:dev": "npm run build && evenhub pack app.json ./dist --sdk-ver 0.0.16 --output epub-reader-dev.ehpk"
   },
   "dependencies": {
     "@evenrealities/even_hub_sdk": "0.0.16",
