@@ -1,21 +1,20 @@
 diff --git a/node_modules/even-toolkit/dist/glasses/gestures.d.ts b/node_modules/even-toolkit/dist/glasses/gestures.d.ts
-index ea913dd..80f211b 100644
+index ea913dd..bcbddec 100644
 --- a/node_modules/even-toolkit/dist/glasses/gestures.d.ts
 +++ b/node_modules/even-toolkit/dist/glasses/gestures.d.ts
-@@ -7,4 +7,9 @@ export declare function isScrollDebounced(direction: 'prev' | 'next'): boolean;
+@@ -7,4 +7,10 @@ export declare function isScrollDebounced(direction: 'prev' | 'next'): boolean;
  export declare function shouldIgnoreScroll(direction: 'prev' | 'next'): boolean;
  /** Allow the next scroll event through immediately after a tap-driven mode change. */
  export declare function armImmediateScroll(): void;
--//# sourceMappingURL=gestures.d.ts.map
-\ No newline at end of file
-+//# sourceMappingURL=gestures.d.ts.map/**
++/**
 + * Clear stale cross-view tap/scroll history (so the user's first input in a new
 + * view isn't held by lingering debounce). Preserves the post-rebuild textUpdate
 + * suppression window so phantom SCROLL events from the device are still ignored.
 + */
 +export declare function resetGestureState(): void;
+ //# sourceMappingURL=gestures.d.ts.map
 diff --git a/node_modules/even-toolkit/dist/glasses/gestures.js b/node_modules/even-toolkit/dist/glasses/gestures.js
-index 26724e2..3622e6e 100644
+index 26724e2..29620c9 100644
 --- a/node_modules/even-toolkit/dist/glasses/gestures.js
 +++ b/node_modules/even-toolkit/dist/glasses/gestures.js
 @@ -5,7 +5,7 @@ const SCROLL_SUPPRESS_AFTER_TAP_MS = 110;
