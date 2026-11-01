@@ -1,6 +1,6 @@
 {
   "name": "epub-reader-g2",
-  "version": "1.5.1",
+  "version": "1.6.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -14,13 +14,14 @@
     "qr": "node qr.mjs /",
     "qr:sim": "node qr.mjs '/?simulator=true'",
     "init:evenhub": "evenhub init --output app.json",
-    "pack": "npm run build && evenhub pack app.json ./dist --output epub-reader.ehpk",
-    "pack:check": "evenhub pack app.json ./dist --check",
-    "postinstall": "patch-package"
+    "pack": "node scripts/check-release.mjs && npm run build && evenhub pack app.json ./dist --output epub-reader.ehpk",
+    "pack:check": "node scripts/check-release.mjs && npm run build && evenhub pack app.json ./dist --check",
+    "postinstall": "patch-package",
+    "typecheck": "tsc --noEmit -p .",
+    "pack:dev": "npm run build && evenhub pack app.json ./dist --output epub-reader-dev.ehpk"
   },
   "dependencies": {
-    "@evenrealities/even_hub_sdk": "0.0.15",
-    "@evenrealities/evenhub-cli": "^0.1.13",
+    "@evenrealities/even_hub_sdk": "0.0.16",
     "even-toolkit": "1.7.7",
     "hyphenation.de": "^0.2.1",
     "hyphenation.en-us": "^0.2.1",
@@ -36,7 +37,9 @@
     "upng-js": "^2.1.0"
   },
   "devDependencies": {
-    "@evenrealities/evenhub-simulator": "^0.7.3",
+    "@evenrealities/evenhub-cli": "^0.2.0",
+    "@evenrealities/evenhub-simulator": "^0.9.5",
+    "linkedom": "^0.18.15",
     "patch-package": "^8.0.1",
     "typescript": "^6.0.3",
     "vite": "^8.0.9"

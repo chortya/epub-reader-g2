@@ -135,7 +135,7 @@ async function createCalibrationEpub() {
 </ncx>`);
 
     const content = await zip.generateAsync({ type: 'nodebuffer' });
-    fs.writeFileSync('calibration.epub', content);
+    fs.writeFileSync('samples/calibration.epub', content);
     console.log('Created calibration.epub');
 }
 
