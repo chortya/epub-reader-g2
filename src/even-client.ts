@@ -64,6 +64,13 @@ import {
 } from './lifecycle';
 import { KosyncError } from './kosync';
 import type { KosyncSession, ReaderLocation } from './kosync-session';
+
+/** Reading-time / finished tracking for a sync server that supports it (BookOrbit). */
+export interface ReadingTracker {
+  pageShown(page: number, totalPages: number): void;
+  pause(): void;
+  flush(keepalive?: boolean): Promise<void>;
+}
 import { sentenceStartBefore, nextSentenceStart } from './sentences';
 import { measureWidth, FOOTER_INNER_WIDTH } from './text-metrics';
 import { createSplashBridgeAdapter } from './splash-bridge';
@@ -223,6 +230,8 @@ export class EvenEpubClient {
   // only while the user is logged in to a sync server.
   private kosync: KosyncSession | null = null;
   public createKosyncSession?: (book: Book, filename: string | null) => KosyncSession | null;
+  private tracker: ReadingTracker | null = null;
+  public createReadingTracker?: (book: Book, filename: string | null) => ReadingTracker | null;
   // Short-lived footer message (sync results), shown instead of the info text.
   private footerNotice: { text: string; until: number } | null = null;
   // Pushes wait until the session's first pull has reconciled with the server,
@@ -303,6 +312,7 @@ export class EvenEpubClient {
     this.currentBookId = bookId ?? null;
     this.currentBookFilename = filename ?? null;
     this.kosync = this.createKosyncSession?.(book, this.currentBookFilename) ?? null;
+    this.tracker = this.createReadingTracker?.(book, this.currentBookFilename) ?? null;
     this.kosyncReconciled = false;
     this.kosyncDirty = false;
     this.pendingFlowAutoStart = false;
@@ -431,6 +441,7 @@ export class EvenEpubClient {
   public refreshKosyncSession(): void {
     this.flushKosync();
     this.kosync = this.book ? this.createKosyncSession?.(this.book, this.currentBookFilename) ?? null : null;
+    this.tracker = this.book ? this.createReadingTracker?.(this.book, this.currentBookFilename) ?? null : null;
     this.kosyncReconciled = false;
     this.kosyncDirty = false;
     // The reading menu lists "Sync progress" only with a session: re-declare it.
@@ -450,18 +461,44 @@ export class EvenEpubClient {
   private async flushBeforeExit(): Promise<void> {
     try { await this.persister.flush(); } catch { /* reported by the persister */ }
     const session = this.kosync;
-    if (!session) return;
+    const tracker = this.tracker;
+    tracker?.pause();
+    if (!session && !tracker) return;
     await Promise.race([
-      session.flush({ keepalive: true }).catch((e) => this.reportKosyncError(e, false)),
+      Promise.all([
+        session?.flush({ keepalive: true }).catch((e) => this.reportKosyncError(e, false)),
+        tracker?.flush(true),
+      ]),
       new Promise((resolve) => setTimeout(resolve, 1500)),
     ]);
   }
 
-  /** Push any pending position without blocking (book switch, backgrounding). */
+  /**
+   * Push any pending position and reading time without blocking (book
+   * switch, backgrounding, leaving the book).
+   */
   private flushKosync(): void {
+    const tracker = this.tracker;
+    if (tracker) {
+      tracker.pause();
+      void tracker.flush(true);
+    }
     const session = this.kosync;
     if (!session) return;
     session.flush({ keepalive: true }).catch((e) => this.reportKosyncError(e, false));
+  }
+
+  /** Report the reading page on screen (1-based across the book) to the tracker. */
+  private notePageShown(): void {
+    if (!this.tracker) return;
+    let before = 0;
+    let total = 0;
+    for (let i = 0; i < this.chapterPages.length; i++) {
+      const n = this.chapterPages[i]?.length ?? 0;
+      if (i < this.chapterIndex) before += n;
+      total += n;
+    }
+    this.tracker.pageShown(before + this.pageIndex + 1, total);
   }
 
   private currentLocation(): ReaderLocation {
@@ -515,7 +552,7 @@ export class EvenEpubClient {
         const pct = Math.round((result.remote?.percentage ?? 0) * 100);
         const from = result.remote?.device ? ` from ${result.remote.device}` : '';
         this.showFooterNotice(`Synced ${pct}%${from}`);
-        setStatus(`KOReader sync: moved to ${pct}%${from}`);
+        setStatus(`Sync: moved to ${pct}%${from}`);
         return { ok: true, message: `Moved to ${pct}%${from}.` };
       }
       if (interactive) {
@@ -526,7 +563,7 @@ export class EvenEpubClient {
         await session.push(this.currentLocation(), { force: true });
         const pct = Math.round(session.percentageAt(this.currentLocation()) * 100);
         this.showFooterNotice(`Sync sent ${pct}%`);
-        setStatus(`KOReader sync: progress sent (${pct}%)`);
+        setStatus(`Sync: progress sent (${pct}%)`);
         return { ok: true, message: `Progress sent (${pct}%).` };
       }
       return { ok: true, message: 'Up to date.' };
@@ -539,7 +576,7 @@ export class EvenEpubClient {
   private reportKosyncError(e: unknown, visibleOnGlasses: boolean): void {
     const message = e instanceof KosyncError ? e.message : 'Sync failed';
     console.warn('KOSync:', e);
-    setStatus(`KOReader sync: ${message}`);
+    setStatus(`Sync: ${message}`);
     if (visibleOnGlasses) this.showFooterNotice(e instanceof KosyncError && e.status === 401 ? 'Sync: log in again' : 'Sync failed');
   }
 
@@ -908,6 +945,7 @@ export class EvenEpubClient {
   private async showMainMenu(): Promise<void> {
     this.stopFlow();
     this.stopClockTicker();
+    this.tracker?.pause();
     this.view = 'mainMenu';
 
     // Three semantic choices: Continue, Library (N), Settings (per v1.4.0
@@ -1123,6 +1161,7 @@ export class EvenEpubClient {
     if (!this.book) return;
     this.stopFlow();
     this.stopClockTicker();
+    this.tracker?.pause();
     this.view = 'chapterList';
 
     const total = this.book.chapters.length;
@@ -1259,6 +1298,7 @@ export class EvenEpubClient {
     notifyTextUpdate();
 
     await this.savePagedPosition();
+    this.notePageShown();
     this.startClockTicker();
 
     setStatus(
@@ -1407,6 +1447,7 @@ export class EvenEpubClient {
     // chapter jumps, foreground-exit, and shutdown all still save in full.
     const persistToBridge = !this.isFlowRunning || this.flowWordIndex === 0;
     await this.saveFlowPosition(persistToBridge);
+    this.notePageShown();
     this.startClockTicker();
     setStatus(
       `Flow ${this.isFlowRunning ? 'running' : 'paused'} | Ch ${this.chapterIndex + 1}/${this.book.chapters.length} | Pg ${this.pageIndex + 1}/${chapterTotalPages} | Word ${this.flowWordIndex + 1}/${totalPageWords} | ${config.flowSpeedWpm} WPM`,
@@ -2156,6 +2197,7 @@ export class EvenEpubClient {
             this.stopFlow();
             this.flushKosync();
             this.kosync = null;
+            this.tracker = null;
             this.book = null;
           }
           await this.showMainMenu();

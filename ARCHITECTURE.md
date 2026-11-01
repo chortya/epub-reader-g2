@@ -663,3 +663,23 @@ It strips cookies, follows no redirects, caps bodies at 16 KB and stores
 nothing. Deploy and release steps are in `relay/README.md` and
 `docs/1.6.0-submission.md`.
 
+## 18. BookOrbit (unreleased)
+
+`bookorbit.ts` adds two pieces on top of the kosync stack:
+
+- **`BookOrbitClient`** extends `KosyncClient` and uses the same request helper and
+  `x-auth-*` login. It covers BookOrbit's KOReader-plugin routes: catalog books, book detail
+  and download, match-check, page-stats and read-status.
+- **`BookOrbitTracker`** is created per open book by the host (`createReadingTracker`) and works
+  like this:
+  - `EvenEpubClient` calls `pageShown(globalPage, totalPages)` after every paged or Flow render.
+  - It calls `pause()` on menus, chapter list, background and exit.
+  - Its flush runs together with the KOSync flush paths.
+  - The tracker turns page changes into KOReader-style page-stat events and marks the book read
+    on its last page.
+
+Settings carry `provider: 'kosync' | 'bookorbit'`. For BookOrbit, `server` is
+`<origin>/api/v1/koreader` and the checksum is always the binary partial MD5. BookOrbit is called
+directly, never through the relay, because personal builds whitelist it
+(`scripts/pack-personal.mjs`). Setup and the reverse-proxy CORS rule are in `docs/bookorbit.md`.
+

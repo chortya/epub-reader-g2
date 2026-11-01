@@ -19,14 +19,20 @@ import {
 import type { CachedBookMeta } from './types';
 import { matchesBookQuery } from './book-selection';
 import {
+  DEFAULT_KOSYNC_SERVER,
+  KOSYNC_DEVICE_NAME,
   KosyncClient,
   KosyncError,
+  bookOrbitAddress,
+  bookOrbitKosyncBase,
   isKosyncLoggedIn,
   loadKosyncSettings,
   normalizeServerUrl,
   saveKosyncSettings,
   type KosyncSettings,
+  type SyncProvider,
 } from './kosync';
+import { BookOrbitClient, BookOrbitTracker, type BookOrbitBook, type BookOrbitSort } from './bookorbit';
 import { KosyncSession } from './kosync-session';
 import { md5Hex } from './md5';
 import { RELAY_ORIGIN } from './relay';
@@ -90,6 +96,18 @@ async function main() {
       const s = kosyncSettings;
       if (!isKosyncLoggedIn(s)) return null;
       return new KosyncSession({ book, filename, settings: s, client: makeKosyncClient(s) });
+    };
+    // BookOrbit only: reading time (page stats) and "finished" status.
+    client.createReadingTracker = (book) => {
+      const s = kosyncSettings;
+      const bo = makeBookOrbitClient();
+      if (!s || !bo || !book.partialMd5) return null;
+      return new BookOrbitTracker({
+        client: bo,
+        hash: book.partialMd5,
+        device: { deviceId: s.deviceId, deviceModel: KOSYNC_DEVICE_NAME, pluginVersion: `g2-reader-${APP_VERSION}`.slice(0, 20) },
+        onError: (e) => console.warn('BookOrbit stats:', e),
+      });
     };
 
     // Register onLaunchSource BEFORE client.init() so runStartup's pickInitialView
@@ -265,6 +283,7 @@ async function main() {
 
   setupCollapsible('gut-toggle', 'gut-body');
   setupCollapsible('sync-toggle', 'sync-body');
+  const bookOrbitUi = setupBookOrbitLibrary(bridge);
   setupKosyncUi(bridge);
   setupCollapsible('settings-toggle', 'settings-body');
 
@@ -460,34 +479,81 @@ async function main() {
   }
 
   function makeKosyncClient(s: KosyncSettings, username = s.username, userkey = s.userkey): KosyncClient {
-    return new KosyncClient({ server: s.server, username, userkey, relayOrigin: RELAY_ORIGIN });
+    // BookOrbit is reached directly (its origin is whitelisted in personal
+    // builds, CORS added by its reverse proxy); the relay only forwards plain
+    // kosync calls.
+    const relayOrigin = s.provider === 'bookorbit' ? null : RELAY_ORIGIN;
+    return s.provider === 'bookorbit'
+      ? new BookOrbitClient({ server: s.server, username, userkey, relayOrigin })
+      : new KosyncClient({ server: s.server, username, userkey, relayOrigin });
+  }
+
+  function makeBookOrbitClient(): BookOrbitClient | null {
+    const s = kosyncSettings;
+    if (!isKosyncLoggedIn(s) || s.provider !== 'bookorbit') return null;
+    return makeKosyncClient(s) as BookOrbitClient;
   }
 
   function setupKosyncUi(storageBridge: any) {
-    const serverEl = document.getElementById('sync-server') as HTMLInputElement | null;
-    const userEl = document.getElementById('sync-username') as HTMLInputElement | null;
-    const passEl = document.getElementById('sync-password') as HTMLInputElement | null;
-    const checksumEl = document.getElementById('sync-checksum') as HTMLSelectElement | null;
-    const loginBtn = document.getElementById('sync-login-btn') as HTMLButtonElement | null;
-    const registerBtn = document.getElementById('sync-register-btn') as HTMLButtonElement | null;
-    const syncNowBtn = document.getElementById('sync-now-btn') as HTMLButtonElement | null;
-    const logoutBtn = document.getElementById('sync-logout-btn') as HTMLButtonElement | null;
-    const outActions = document.getElementById('sync-actions-out');
-    const inActions = document.getElementById('sync-actions-in');
-    const stateEl = document.getElementById('sync-state');
-    if (!serverEl || !userEl || !passEl || !checksumEl || !loginBtn || !registerBtn
-      || !syncNowBtn || !logoutBtn || !outActions || !inActions || !stateEl) return;
+    const el = <T extends HTMLElement>(id: string) => document.getElementById(id) as T | null;
+    const providerEl = el<HTMLSelectElement>('sync-provider');
+    const noteEl = el<HTMLElement>('sync-note');
+    const serverLabelEl = el<HTMLElement>('sync-server-label');
+    const serverEl = el<HTMLInputElement>('sync-server');
+    const userEl = el<HTMLInputElement>('sync-username');
+    const passEl = el<HTMLInputElement>('sync-password');
+    const checksumRow = el<HTMLElement>('sync-checksum-row');
+    const checksumEl = el<HTMLSelectElement>('sync-checksum');
+    const loginBtn = el<HTMLButtonElement>('sync-login-btn');
+    const registerBtn = el<HTMLButtonElement>('sync-register-btn');
+    const syncNowBtn = el<HTMLButtonElement>('sync-now-btn');
+    const logoutBtn = el<HTMLButtonElement>('sync-logout-btn');
+    const outActions = el<HTMLElement>('sync-actions-out');
+    const inActions = el<HTMLElement>('sync-actions-in');
+    const stateEl = el<HTMLElement>('sync-state');
+    if (!providerEl || !noteEl || !serverLabelEl || !serverEl || !userEl || !passEl || !checksumRow || !checksumEl
+      || !loginBtn || !registerBtn || !syncNowBtn || !logoutBtn || !outActions || !inActions || !stateEl) return;
 
-    const render = (message?: string) => {
+    const NOTES: Record<SyncProvider, string> = {
+      bookorbit: 'Sync your place, reading time and finished books with BookOrbit, and download books from your '
+        + 'BookOrbit library. Use the KOReader login from BookOrbit (Settings > KOReader). Only its MD5 key is stored.',
+      kosync: 'Keep your place in sync with KOReader and other apps that support its Progress sync server. '
+        + 'Use the same server and account as in KOReader. Only the MD5 key of your password is stored.',
+    };
+
+    // The provider being edited (may differ from the saved one until login).
+    // Not logged in yet: offer BookOrbit first (the setup this reader is built around).
+    let editingProvider: SyncProvider = kosyncSettings && isKosyncLoggedIn(kosyncSettings)
+      ? kosyncSettings.provider
+      : 'bookorbit';
+
+    const addressFor = (s: KosyncSettings) => (s.provider === 'bookorbit' ? bookOrbitAddress(s.server) : s.server);
+
+    // fillFields: copy saved values into the form (first show, login/logout,
+    // provider switch). Plain status updates must not wipe what the user typed.
+    const render = (message?: string, fillFields = false) => {
       const s = kosyncSettings;
       if (!s) {
         stateEl.textContent = 'Not available in this mode.';
         return;
       }
-      const loggedIn = isKosyncLoggedIn(s);
-      serverEl.value = s.server;
-      userEl.value = s.username;
+      // Boolean(): a plain flag, so the type guard doesn't narrow `s` to never below.
+      const loggedIn = Boolean(isKosyncLoggedIn(s));
+      if (loggedIn) editingProvider = s.provider;
+      const isBookOrbit = editingProvider === 'bookorbit';
+      providerEl.value = editingProvider;
+      providerEl.disabled = loggedIn;
+      noteEl.textContent = NOTES[editingProvider];
+      serverLabelEl.textContent = isBookOrbit ? 'BookOrbit address' : 'Server';
+      serverEl.placeholder = isBookOrbit ? 'https://bookorbit.example.org' : DEFAULT_KOSYNC_SERVER;
+      if (fillFields || loggedIn) {
+        serverEl.value = s.provider === editingProvider ? addressFor(s) : '';
+        userEl.value = s.username;
+      }
       checksumEl.value = s.checksum;
+      // BookOrbit matches books by file content; the file-name digest can't match its library.
+      checksumRow.style.display = isBookOrbit ? 'none' : '';
+      registerBtn.style.display = isBookOrbit ? 'none' : '';
       serverEl.disabled = loggedIn;
       userEl.disabled = loggedIn;
       const passRow = passEl.closest('.s-row') as HTMLElement | null;
@@ -495,23 +561,29 @@ async function main() {
       outActions.style.display = loggedIn ? 'none' : 'flex';
       inActions.style.display = loggedIn ? 'flex' : 'none';
       stateEl.textContent = message ?? (loggedIn
-        ? `Logged in as ${s.username}. Syncs when a book opens, while reading, and via "Sync progress" in the glasses menu.`
+        ? `Logged in to ${isBookOrbit ? 'BookOrbit' : 'the sync server'} as ${s.username}. Syncs when a book opens, `
+          + 'while reading, and via "Sync progress" in the glasses menu.'
         : 'Not logged in.');
+      bookOrbitUi.refresh();
     };
 
     const persist = async (next: KosyncSettings, message?: string) => {
       await saveKosyncSettings(next, storageBridge, window.localStorage);
       kosyncSettings = next;
       client?.refreshKosyncSession();
-      render(message);
+      render(message, true);
     };
 
     const readForm = (): { server: string; username: string; password: string } | null => {
-      const server = normalizeServerUrl(serverEl.value);
+      const server = editingProvider === 'bookorbit'
+        ? bookOrbitKosyncBase(serverEl.value)
+        : normalizeServerUrl(serverEl.value);
       const username = userEl.value.trim();
       const password = passEl.value;
       if (!server) {
-        render('Enter the server address, e.g. https://sync.koreader.rocks');
+        render(editingProvider === 'bookorbit'
+          ? 'Enter your BookOrbit address, e.g. https://bookorbit.example.org'
+          : 'Enter the server address, e.g. https://sync.koreader.rocks');
         return null;
       }
       if (!username || !password) {
@@ -533,19 +605,31 @@ async function main() {
       }
     };
 
+    providerEl.addEventListener('change', () => {
+      editingProvider = providerEl.value === 'kosync' ? 'kosync' : 'bookorbit';
+      render(undefined, true);
+    });
+
     loginBtn.addEventListener('click', () => busy(loginBtn, async () => {
       const s = kosyncSettings;
       const form = readForm();
       if (!s || !form) return;
       const userkey = md5Hex(form.password);
+      const candidate: KosyncSettings = {
+        ...s,
+        provider: editingProvider,
+        server: form.server,
+        // BookOrbit identifies books by file content only.
+        checksum: editingProvider === 'bookorbit' ? 'binary' : s.checksum,
+      };
       render('Logging in...');
-      const ok = await makeKosyncClient({ ...s, server: form.server }, form.username, userkey).authorize();
+      const ok = await makeKosyncClient(candidate, form.username, userkey).authorize();
       if (!ok) {
         render('Wrong username or password.');
         return;
       }
       passEl.value = '';
-      await persist({ ...s, server: form.server, username: form.username, userkey });
+      await persist({ ...candidate, username: form.username, userkey });
     }));
 
     registerBtn.addEventListener('click', () => busy(registerBtn, async () => {
@@ -553,13 +637,14 @@ async function main() {
       const form = readForm();
       if (!s || !form) return;
       render('Creating account...');
-      const created = await makeKosyncClient({ ...s, server: form.server }, '', '').register(form.username, form.password);
+      const candidate: KosyncSettings = { ...s, provider: 'kosync', server: form.server };
+      const created = await makeKosyncClient(candidate, '', '').register(form.username, form.password);
       if (!created) {
         render('That username is already taken on this server.');
         return;
       }
       passEl.value = '';
-      await persist({ ...s, server: form.server, username: form.username, userkey: md5Hex(form.password) });
+      await persist({ ...candidate, username: form.username, userkey: md5Hex(form.password) });
     }));
 
     logoutBtn.addEventListener('click', () => busy(logoutBtn, async () => {
@@ -581,7 +666,130 @@ async function main() {
       persist({ ...kosyncSettings, checksum }).catch((e) => render(String(e)));
     });
 
-    render();
+    render(undefined, true);
+  }
+
+  /** "BookOrbit library": browse, search and download books to the reader. */
+  function setupBookOrbitLibrary(storageBridge: any) {
+    const toggle = document.getElementById('bo-toggle');
+    const body = document.getElementById('bo-body');
+    const search = document.getElementById('bo-search') as HTMLInputElement | null;
+    const sort = document.getElementById('bo-sort') as HTMLSelectElement | null;
+    const list = document.getElementById('bo-list');
+    const more = document.getElementById('bo-more') as HTMLButtonElement | null;
+    const state = document.getElementById('bo-state');
+    if (!toggle || !body || !search || !sort || !list || !more || !state) return { refresh() {} };
+
+    let page = 1;
+    let loading = false;
+    let loadedOnce = false;
+    let query = '';
+    let searchTimer: number | null = null;
+
+    const formatMeta = (b: BookOrbitBook): string => {
+      const parts: string[] = [];
+      if (b.authors.length > 0) parts.push(b.authors.join(', '));
+      if (b.readStatus === 'read') parts.push('Finished');
+      else if (b.progressPercentage !== null && b.progressPercentage > 0) parts.push(`${Math.round(b.progressPercentage)}%`);
+      return parts.join(' · ');
+    };
+
+    const download = async (b: BookOrbitBook, button: HTMLButtonElement) => {
+      const bo = makeBookOrbitClient();
+      if (!bo) return;
+      button.disabled = true;
+      try {
+        setStatus(`Downloading from BookOrbit: ${b.title}...`);
+        const file = await bo.epubFile(b.id);
+        if (!file) {
+          setStatus(`No EPUB file for: ${b.title}`);
+          return;
+        }
+        const data = await bo.download(file.id);
+        setStatus(`Parsing: ${b.title}...`);
+        const filename = `${b.title}.epub`;
+        const book = await parseEpub(data, filename);
+        const stored = await saveEpubBufferToDB(data, filename, book.title, storageBridge);
+        if (client) {
+          // resume=true: the sync pull places the reader at BookOrbit's position.
+          await client.loadBook(book, true, stored.bookId, stored.filename);
+          await renderLibrary(client, storageBridge);
+        }
+        setStatus(`Loaded: ${book.title}`);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        setStatus(`BookOrbit download failed: ${msg}`);
+      } finally {
+        button.disabled = false;
+      }
+    };
+
+    const load = async (reset: boolean) => {
+      const bo = makeBookOrbitClient();
+      if (!bo || loading) return;
+      loading = true;
+      if (reset) {
+        page = 1;
+        list.innerHTML = '';
+      }
+      state.textContent = 'Loading...';
+      try {
+        const result = await bo.listBooks({ q: query, page, size: 20, sort: sort.value as BookOrbitSort });
+        for (const b of result.items) {
+          const row = document.createElement('div');
+          row.className = 'gut-item bo-item';
+          // textContent only: titles are remote content.
+          row.innerHTML = '<div><span class="bo-title"></span><div class="bo-meta"></div></div>'
+            + '<button class="btn btn-ghost btn-sm">Read</button>';
+          (row.querySelector('.bo-title') as HTMLElement).textContent = b.title;
+          (row.querySelector('.bo-meta') as HTMLElement).textContent = formatMeta(b);
+          const button = row.querySelector('button') as HTMLButtonElement;
+          button.addEventListener('click', () => { void download(b, button); });
+          list.appendChild(row);
+        }
+        page = result.page + 1;
+        more.style.display = result.hasNext ? '' : 'none';
+        state.textContent = result.total === 0
+          ? (query ? 'No EPUBs match your search.' : 'No EPUBs in your BookOrbit library.')
+          : `${list.childElementCount} of ${result.total} EPUBs`;
+        loadedOnce = true;
+      } catch (e) {
+        state.textContent = e instanceof Error ? e.message : String(e);
+      } finally {
+        loading = false;
+      }
+    };
+
+    toggle.addEventListener('click', () => {
+      toggle.classList.toggle('open');
+      body.classList.toggle('open');
+      if (body.classList.contains('open') && !loadedOnce) void load(true);
+    });
+    search.addEventListener('input', () => {
+      if (searchTimer !== null) window.clearTimeout(searchTimer);
+      searchTimer = window.setTimeout(() => {
+        query = search.value;
+        void load(true);
+      }, 350);
+    });
+    sort.addEventListener('change', () => { void load(true); });
+    more.addEventListener('click', () => { void load(false); });
+
+    return {
+      /** Show the section only while logged in to BookOrbit. */
+      refresh() {
+        const visible = makeBookOrbitClient() !== null;
+        toggle.style.display = visible ? '' : 'none';
+        if (!visible) {
+          body.classList.remove('open');
+          toggle.classList.remove('open');
+          list.innerHTML = '';
+          loadedOnce = false;
+        } else if (body.classList.contains('open')) {
+          void load(true);
+        }
+      },
+    };
   }
 
   function setupCollapsible(headerId: string, bodyId: string) {

@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased] - BookOrbit
+
+### Added
+- **BookOrbit integration** (see [docs/bookorbit.md](docs/bookorbit.md)). Choose "BookOrbit" as the
+  server type and log in with the KOReader login from BookOrbit (Settings → KOReader).
+  - **Progress sync** goes through BookOrbit's kosync API. Positions are shared with its web reader
+    and with KOReader devices.
+  - **BookOrbit library** on the phone: browse, search and sort your EPUBs, then tap Read to
+    download one. Downloads are byte-identical, so sync matches them automatically, and the book
+    opens at BookOrbit's position.
+  - **Reading time** appears in BookOrbit's statistics. Page events follow KOReader's defaults
+    (pages under 5 s are skipped, idle time is capped at 120 s).
+  - **Finished books:** reaching the last page marks the book read in BookOrbit.
+- `npm run pack:personal` builds a package for your own Private/Beta testing that whitelists your
+  servers (`PERSONAL_ORIGINS=…`). The committed app.json stays unchanged.
+
+### Changed
+- Sync status messages now say "Sync:" instead of "KOReader sync:".
+- The sync settings no longer reset the username you typed after a failed login.
+
 ## [v1.6.0] - 2026-11-01
 
 ### Added

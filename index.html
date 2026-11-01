@@ -256,6 +256,14 @@
     .sync-actions .btn { flex: 1; }
     .sync-note { font-size: 13px; color: var(--color-text-dim); margin-bottom: var(--gap); }
     .sync-state { font-size: 13px; margin-top: var(--gap-sm); color: var(--color-text-dim); }
+    .bo-search { display: flex; gap: 8px; align-items: center; }
+    .bo-search .library-search { flex: 1; margin: 0; }
+    .bo-search select {
+      background: var(--color-surface-light); color: var(--color-text);
+      border: 1px solid var(--color-border); border-radius: var(--radius);
+      padding: 8px; font-family: var(--font); font-size: 13px;
+    }
+    .bo-item .bo-meta { font-size: 12px; color: var(--color-text-dim); }
     .s-row input[type="number"]::-webkit-inner-spin-button,
     .s-row input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 
@@ -435,17 +443,20 @@
   </div>
 
   <div class="collapse-head" id="sync-toggle" style="margin-top:var(--gap-sm);">
-    <span>Progress sync (KOReader)</span>
+    <span>Sync server (BookOrbit / KOReader)</span>
     <span class="chev">&#9654;</span>
   </div>
   <div class="collapse-body" id="sync-body">
-    <p class="sync-note">
-      Keep your place in sync with KOReader and other apps that support its
-      Progress sync server. Use the same server and account as in KOReader.
-      Your password is not stored, only its MD5 key (as KOReader does).
-    </p>
+    <p class="sync-note" id="sync-note"></p>
     <div class="s-row">
-      <label for="sync-server">Server</label>
+      <label for="sync-provider">Server type</label>
+      <select id="sync-provider">
+        <option value="bookorbit">BookOrbit</option>
+        <option value="kosync">KOReader sync server</option>
+      </select>
+    </div>
+    <div class="s-row">
+      <label for="sync-server" id="sync-server-label">Server</label>
       <input type="url" id="sync-server" autocomplete="url" spellcheck="false" />
     </div>
     <div class="s-row">
@@ -456,7 +467,7 @@
       <label for="sync-password">Password</label>
       <input type="password" id="sync-password" autocomplete="current-password" />
     </div>
-    <div class="s-row">
+    <div class="s-row" id="sync-checksum-row">
       <label for="sync-checksum">Match books by</label>
       <select id="sync-checksum">
         <option value="binary">File content</option>
@@ -472,6 +483,25 @@
       <button id="sync-logout-btn" class="btn btn-ghost">Log out</button>
     </div>
     <div class="sync-state" id="sync-state"></div>
+  </div>
+
+  <div class="collapse-head" id="bo-toggle" style="margin-top:var(--gap-sm); display:none;">
+    <span>BookOrbit library</span>
+    <span class="chev">&#9654;</span>
+  </div>
+  <div class="collapse-body" id="bo-body">
+    <div class="bo-search">
+      <input class="library-search" id="bo-search" type="search" placeholder="Search your BookOrbit library" />
+      <select id="bo-sort">
+        <option value="recently_read">Recently read</option>
+        <option value="recently_added">Recently added</option>
+        <option value="title">Title</option>
+        <option value="author">Author</option>
+      </select>
+    </div>
+    <div id="bo-list" class="gut-list" style="display:block;"></div>
+    <button id="bo-more" class="btn btn-ghost" style="display:none;">Load more</button>
+    <div class="sync-state" id="bo-state"></div>
   </div>
 
   <div id="status"></div>

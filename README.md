@@ -54,6 +54,18 @@ small relay you deploy yourself ([relay/README.md](relay/README.md)). Even Hub
 only allows whitelisted, CORS-enabled origins, and neither service sends CORS
 headers.
 
+## BookOrbit
+
+If your books live in [BookOrbit](https://github.com/bookorbit/bookorbit), pick **BookOrbit** as the
+server type under Sync server and log in with the KOReader login from BookOrbit. You get:
+- progress sync with BookOrbit's web reader and your KOReader devices;
+- a **BookOrbit library** section to download EPUBs;
+- reading time in BookOrbit's statistics;
+- books marked read when you finish them.
+
+BookOrbit needs CORS headers on its KOReader API and a personal build that whitelists it. See
+[docs/bookorbit.md](docs/bookorbit.md).
+
 ## KOReader progress sync
 
 Open **Progress sync (KOReader)** on the phone. Enter the same server and

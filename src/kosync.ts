@@ -24,7 +24,19 @@ const ACCEPT = 'application/vnd.koreader.v1+json';
 
 export type KosyncChecksum = 'binary' | 'filename';
 
+/**
+ * Which kind of server `server` points at. A BookOrbit server speaks kosync
+ * under <origin>/api/v1/koreader and adds a library catalog, reading stats
+ * and read status on top (see bookorbit.ts).
+ */
+export type SyncProvider = 'kosync' | 'bookorbit';
+
+/** kosync base path of a BookOrbit server, relative to its origin. */
+export const BOOKORBIT_KOSYNC_PATH = '/api/v1/koreader';
+
 export type KosyncSettings = {
+  provider: SyncProvider;
+  /** kosync base URL (for BookOrbit: origin + BOOKORBIT_KOSYNC_PATH). */
   server: string;
   username: string;
   /** md5(password), as KOReader stores it. Empty = logged out. */
@@ -75,7 +87,14 @@ export function normalizeServerUrl(raw: string): string | null {
 }
 
 export function defaultKosyncSettings(): KosyncSettings {
-  return { server: DEFAULT_KOSYNC_SERVER, username: '', userkey: '', checksum: 'binary', deviceId: makeDeviceId() };
+  return {
+    provider: 'kosync',
+    server: DEFAULT_KOSYNC_SERVER,
+    username: '',
+    userkey: '',
+    checksum: 'binary',
+    deviceId: makeDeviceId(),
+  };
 }
 
 export function parseKosyncSettings(raw: string | null | undefined): KosyncSettings | null {
@@ -85,6 +104,7 @@ export function parseKosyncSettings(raw: string | null | undefined): KosyncSetti
     if (!v || typeof v !== 'object') return null;
     const base = defaultKosyncSettings();
     return {
+      provider: v.provider === 'bookorbit' ? 'bookorbit' : 'kosync',
       server: typeof v.server === 'string' && normalizeServerUrl(v.server) ? normalizeServerUrl(v.server)! : base.server,
       username: typeof v.username === 'string' ? v.username : '',
       userkey: typeof v.userkey === 'string' && /^[a-f0-9]{32}$/.test(v.userkey) ? v.userkey : '',
@@ -94,6 +114,21 @@ export function parseKosyncSettings(raw: string | null | undefined): KosyncSetti
   } catch {
     return null;
   }
+}
+
+/**
+ * kosync base for what the user typed as their BookOrbit address: accepts the
+ * site origin (https://books.example.org) or a URL already ending in the API path.
+ */
+export function bookOrbitKosyncBase(address: string): string | null {
+  const normalized = normalizeServerUrl(address);
+  if (!normalized) return null;
+  return normalized.endsWith(BOOKORBIT_KOSYNC_PATH) ? normalized : `${normalized}${BOOKORBIT_KOSYNC_PATH}`;
+}
+
+/** The BookOrbit site address for a stored kosync base (inverse of bookOrbitKosyncBase). */
+export function bookOrbitAddress(server: string): string {
+  return server.endsWith(BOOKORBIT_KOSYNC_PATH) ? server.slice(0, -BOOKORBIT_KOSYNC_PATH.length) : server;
 }
 
 export function isKosyncLoggedIn(s: KosyncSettings | null): s is KosyncSettings {
@@ -147,6 +182,15 @@ export class KosyncError extends Error {
   }
 }
 
+export type KosyncRequestOptions = {
+  body?: unknown;
+  auth?: boolean;
+  keepalive?: boolean;
+  /** Defaults to the kosync media type; BookOrbit's own routes take JSON. */
+  accept?: string;
+  timeoutMs?: number;
+};
+
 export type KosyncClientOptions = {
   server: string;
   username?: string;
@@ -157,7 +201,7 @@ export type KosyncClientOptions = {
 };
 
 export class KosyncClient {
-  private opts: KosyncClientOptions;
+  protected opts: KosyncClientOptions;
 
   constructor(opts: KosyncClientOptions) {
     this.opts = opts;
@@ -165,7 +209,7 @@ export class KosyncClient {
 
   /** Create an account. Resolves false when the username is taken (402). */
   async register(username: string, password: string): Promise<boolean> {
-    const res = await this.request('POST', '/users/create', { username, password: md5Hex(password) }, false);
+    const res = await this.request('POST', '/users/create', { body: { username, password: md5Hex(password) }, auth: false });
     if (res.status === 201) return true;
     if (res.status === 402) return false;
     throw await this.errorFrom(res, 'Registration failed');
@@ -198,24 +242,22 @@ export class KosyncClient {
 
   async updateProgress(update: ProgressUpdate, deviceId: string, keepalive = false): Promise<void> {
     const res = await this.request('PUT', '/syncs/progress', {
-      document: update.document,
-      progress: update.progress,
-      percentage: update.percentage,
-      device: KOSYNC_DEVICE_NAME,
-      device_id: deviceId,
-    }, true, keepalive);
+      body: {
+        document: update.document,
+        progress: update.progress,
+        percentage: update.percentage,
+        device: KOSYNC_DEVICE_NAME,
+        device_id: deviceId,
+      },
+      keepalive,
+    });
     if (res.status === 401) throw new KosyncError('Not authorized', 401);
     if (!res.ok) throw await this.errorFrom(res, 'Pushing progress failed');
   }
 
-  private async request(
-    method: string,
-    path: string,
-    body?: unknown,
-    auth = true,
-    keepalive = false,
-  ): Promise<Response> {
-    const headers: Record<string, string> = { Accept: ACCEPT };
+  protected async request(method: string, path: string, opts: KosyncRequestOptions = {}): Promise<Response> {
+    const { body, auth = true, keepalive = false } = opts;
+    const headers: Record<string, string> = { Accept: opts.accept ?? ACCEPT };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (auth) {
       headers['x-auth-user'] = this.opts.username ?? '';
@@ -229,7 +271,7 @@ export class KosyncClient {
       url = `${this.opts.server}${path}`;
     }
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.opts.timeoutMs ?? 10_000);
+    const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? this.opts.timeoutMs ?? 10_000);
     try {
       const fetchImpl = this.opts.fetchImpl ?? fetch;
       return await fetchImpl(url, {
@@ -247,7 +289,7 @@ export class KosyncClient {
     }
   }
 
-  private async errorFrom(res: Response, fallback: string): Promise<KosyncError> {
+  protected async errorFrom(res: Response, fallback: string): Promise<KosyncError> {
     let message = `${fallback} (HTTP ${res.status})`;
     try {
       const body = await res.json();

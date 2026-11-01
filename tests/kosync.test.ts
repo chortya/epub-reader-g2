@@ -15,6 +15,8 @@ import {
   roundPercentage,
   saveKosyncSettings,
   KOSYNC_STORAGE_KEY,
+  bookOrbitAddress,
+  bookOrbitKosyncBase,
   type KosyncSettings,
 } from '../src/kosync.ts';
 import { KosyncSession, PUSH_DEBOUNCE_MS, PUSH_MAX_WAIT_MS } from '../src/kosync-session.ts';
@@ -40,6 +42,7 @@ function fakeFetch(responder: (call: Call) => { status: number; body?: unknown }
 }
 
 const SETTINGS: KosyncSettings = {
+  provider: 'kosync',
   server: 'https://sync.example.com',
   username: 'reader',
   userkey: '5f4dcc3b5aa765d61d8327deb882cf99',
@@ -108,6 +111,15 @@ test('settings parse defensively and round-trip through storage', async () => {
   assert.ok(store.has(KOSYNC_STORAGE_KEY));
   assert.deepEqual(await loadKosyncSettings(bridge), SETTINGS);
   await assert.rejects(saveKosyncSettings(SETTINGS, { ...bridge, setLocalStorage: async () => false }));
+});
+
+test('BookOrbit address <-> kosync base', () => {
+  assert.equal(bookOrbitKosyncBase('https://bookorbit.home.example.org/'), 'https://bookorbit.home.example.org/api/v1/koreader');
+  assert.equal(bookOrbitKosyncBase('https://b.example.org/api/v1/koreader'), 'https://b.example.org/api/v1/koreader');
+  assert.equal(bookOrbitKosyncBase('nonsense'), null);
+  assert.equal(bookOrbitAddress('https://b.example.org/api/v1/koreader'), 'https://b.example.org');
+  assert.equal(parseKosyncSettings(JSON.stringify({ provider: 'bookorbit' }))!.provider, 'bookorbit');
+  assert.equal(parseKosyncSettings(JSON.stringify({ provider: 'other' }))!.provider, 'kosync');
 });
 
 test('normalizeServerUrl accepts http(s) bases with paths only', () => {
