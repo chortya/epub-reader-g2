@@ -13,6 +13,7 @@ Read EPUB books directly on your Even Realities G2 smart glasses. Upload an EPUB
 - **Reading progress** — visual progress indicators and automatic position saving across sessions
 - **Local-first storage** — books and positions are cached on-device; no network or account needed once a book is loaded
 - **Chapter browser** — paginated chapter list for quick navigation
+- **KOReader progress sync** — keep your place in step with KOReader and other kosync-compatible apps (optional; see below)
 - **Browser testing mode** — develop and test in a web browser without glasses connected
 
 ## Getting Started
@@ -43,9 +44,31 @@ npm run dev:sim
 ```bash
 npm run build       # Build to ./dist
 npm run test        # Run regression tests
-npm run pack        # Build + package as epub-reader.ehpk
-npm run pack:check  # Validate package without output
+npm run typecheck   # tsc --noEmit
+npm run pack:dev    # Package for sideloading (no relay required)
+VITE_RELAY_ORIGIN=https://<relay> npm run pack   # Release package (see docs/1.6.0-submission.md)
 ```
+
+Packaged builds reach Project Gutenberg and KOReader sync servers through a
+small relay you deploy yourself ([relay/README.md](relay/README.md)). Even Hub
+only allows whitelisted, CORS-enabled origins, and neither service sends CORS
+headers.
+
+## KOReader progress sync
+
+Open **Progress sync (KOReader)** on the phone. Enter the same server and
+account as in KOReader (Settings → Progress sync), then log in or create an
+account.
+
+Syncing happens at these points:
+- **When a book opens:** a newer position from another device is applied.
+- **While you read:** about 15 s after your last page turn.
+- **When the app goes to the background or exits.**
+- **On request:** with **Sync progress** in the glasses' hold menu.
+
+Books are matched the way KOReader matches them by default: a partial MD5
+of the file, or the file name if you switch "Match books by". Positions
+are exchanged at paragraph precision.
 
 ### QR Code (manual)
 
@@ -80,7 +103,7 @@ Optimized for the Even G2 display: **576×288 px**, using native text rendering.
 
 ## Startup Screen
 
-Displays "G2 ePUB Reader" using native text widgets for reliable rendering on the glasses.
+Displays "ePub Reader" using native text widgets for reliable rendering on the glasses.
 
 ## Tech Stack
 
@@ -91,10 +114,16 @@ Displays "G2 ePUB Reader" using native text widgets for reliable rendering on th
 - Hypher (hyphenation)
 - UPNG.js (splash tile encoding)
 
+## Privacy
+
+See [PRIVACY.md](PRIVACY.md). The reader is local-first, and the only optional
+remote state is KOReader progress sync.
+
 ## Verification
 
 - `npm run build`
 - `npm run test`
+- `npm run typecheck`
 - `npm run dev`
 - `npm run dev:sim`
 

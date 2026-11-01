@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Even G2 ePub Reader (v1.5.0) — a web app for reading EPUB books on Even Realities G2 smart glasses. Built with TypeScript, Vite, Even Hub SDK (v0.0.15), and even-toolkit. Renders paginated text to a 576x288px monochrome display.
+Even G2 ePub Reader (v1.6.0, app name "ePub Reader") — a web app for reading EPUB books on Even Realities G2 smart glasses. Built with TypeScript, Vite, Even Hub SDK (v0.0.16), and even-toolkit. Renders paginated text to a 576x288px monochrome display.
 
 ## Commands
 
@@ -14,11 +14,12 @@ npm run dev:sim      # Start dev server + open browser simulator
 npm run build        # Production build (also used as validation — must pass)
 npm run test         # Run regression tests via Node's native test runner
 npm run preview      # Preview production build locally
-npm run pack         # Build + package as .ehpk for Even Hub distribution
-npm run pack:check   # Validate package structure against app.json schema
+npm run typecheck    # tsc --noEmit (must pass)
+npm run pack:dev     # Build + package for sideloading (no relay)
+npm run pack         # Release: needs VITE_RELAY_ORIGIN (whitelisted + in PRIVACY.md), then build + .ehpk
 ```
 
-Tests live in `tests/*.test.ts` and run via Node's native `--test` with `--experimental-strip-types` (no Jest/Vitest). Current suites: `app-json.test.ts` (enforces `app.json.version === package.json.version` and SDK alignment), `paginator.test.ts`, `settings-persistence.test.ts`, `review-regressions.test.ts`. Run a single file with `node --experimental-strip-types --test tests/app-json.test.ts`. Test imports of local TS modules must include the `.ts` extension. Additional ad-hoc integration scripts exist at the root (`test-gutenberg.mjs`, `test-proxy.mjs`, `test-scraper.mjs`, `proxy-test.mjs`) — run with `node <script>.mjs`. Validate changes with `npm run build` and `npm run test`.
+Tests live in `tests/*.test.ts` and run via Node's native `--test` with `--experimental-strip-types` (no Jest/Vitest). Suites include `app-json.test.ts` (version/SDK sync, whitelist shape, listing limits, one app name everywhere), `kosync*.test.ts` (DOM via `linkedom`), `relay.test.ts`, plus paginator/settings/position/lifecycle suites. Run a single file with `node --experimental-strip-types --test tests/app-json.test.ts`. Test imports of local TS modules must include the `.ts` extension. Validate changes with `npm run typecheck`, `npm run build` and `npm run test`.
 
 ## Architecture
 
@@ -30,7 +31,9 @@ index.html → main.ts (bootstrap, UI wiring, file upload, settings panel, keep-
                │     Uses notifyTextUpdate()/armImmediateScroll() for gesture debouncing
                ├── parseEpub (epub-parser.ts) — EPUB ZIP → Chapter[] via JSZip + DOM parsing + cleanForG2()
                ├── paginateText (paginator.ts) — word-wrap with language-aware hyphenation
-               ├── gutenberg.ts — fetch/download Project Gutenberg books via CORS proxy
+               ├── gutenberg.ts — fetch/download Project Gutenberg books via the relay (relay.ts)
+               ├── kosync.ts / kosync-session.ts / kosync-locator.ts — KOReader progress sync
+               │     (protocol client, per-book push/pull pacing, XPointer <-> offset mapping)
                ├── splash-bridge.ts — SplashBridge adapter for raw SDK bridge
                ├── db.ts — content-addressed IndexedDB library + bridge fallback (no silent eviction)
                ├── mock-bridge.ts — browser simulator fallback (renders to canvas)
@@ -48,9 +51,9 @@ index.html → main.ts (bootstrap, UI wiring, file upload, settings panel, keep-
 
 **even-toolkit integration:** Uses glasses-side modules only (no React). Event mapping via `action-map`, gesture debouncing via `gestures`, text safety via `text-clean`, WebView keep-alive via `keep-alive`. Does NOT use `EvenHubBridge` from toolkit — the app uses the raw SDK bridge directly for custom container layouts (status bars, chapter grid).
 
-**Persistence:** Reading positions saved to bridge localStorage per book identity/title + browser localStorage as fallback. Config (hyphenation, status bar, reading mode, flow speed, text height) written to BOTH bridge localStorage (via `saveSettingsToBridge`, persists across device app restarts) AND browser localStorage (fast warm-start on simulator). Book files use a content-addressed IndexedDB library with a base64 bridge fallback; there is no silent three-book eviction, and same-named EPUBs stay isolated. "Continue Reading" on the mainMenu resolves from three bridge keys written together on every save: `epub-book-title`, `epub-last-book-id`, `epub-last-book-filename`. No cloud storage.
+**Persistence:** Reading positions saved to bridge localStorage per book identity/title + browser localStorage as fallback. Config (hyphenation, status bar, reading mode, flow speed, text height) written to BOTH bridge localStorage (via `saveSettingsToBridge`, persists across device app restarts) AND browser localStorage (fast warm-start on simulator). Book files use a content-addressed IndexedDB library with a base64 bridge fallback; there is no silent three-book eviction, and same-named EPUBs stay isolated. "Continue Reading" on the mainMenu resolves from three bridge keys written together on every save: `epub-book-title`, `epub-last-book-id`, `epub-last-book-filename`. No cloud storage of books; the only remote state is the optional KOReader progress sync (`epub-kosync` settings key).
 
-**Entry points:** `index.html` is the main reader app. `gutenberg.html` is a standalone page for browsing/downloading Project Gutenberg books.
+**Entry point:** `index.html` is the whole app. `relay/` is a separate Cloudflare Worker (Gutenberg + kosync forwarding with CORS) the developer deploys; packaged builds require it (Even Hub whitelist + WebView CORS).
 
 **Glasses-side views:** `mainMenu` (Continue / Library (N) / Settings) → `bookPicker` → `library` (chapter list) → `reading` / `flowReading`. Also `settings` (5-item list) and `settingEditor` (per-setting value picker) reachable from `mainMenu`. Splash screen on startup via even-toolkit `createSplash`; after splash, `pickInitialView` (in `src/launch.ts`) decides between direct-resume (when launched from `glassesMenu` with a resolvable last book) and `mainMenu`.
 
@@ -70,7 +73,7 @@ index.html → main.ts (bootstrap, UI wiring, file upload, settings panel, keep-
 
 ## Key Dependencies
 
-- `@evenrealities/even_hub_sdk` (0.0.10) — G2 glasses SDK bridge
+- `@evenrealities/even_hub_sdk` (0.0.16) — G2 glasses SDK bridge
 - `even-toolkit` (1.7.x) — glasses gesture/event/text/splash modules + CSS design tokens (no React)
 - `jszip` — EPUB ZIP parsing
 - `hypher` + `hyphenation.*` — language-aware word hyphenation (en, de, es, fr, nl, pl, pt, ru, uk)

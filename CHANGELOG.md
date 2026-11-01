@@ -2,7 +2,66 @@
 
 All notable changes to this project will be documented in this file.
 
-## [v1.5.1] - 2026-09-13 (portal upload pending)
+## [v1.6.0] - 2026-11-01
+
+### Added
+- **KOReader progress sync (KOSync)** (#1). Log in to a KOReader sync server
+  (`sync.koreader.rocks` or your own) from the new companion-UI section, and the
+  reader keeps your place in step with KOReader and other kosync apps:
+  - It pulls when a book opens. A newer position from another device is
+    applied with a "Synced 71% from Kobo" footer notice.
+  - It pushes while you read (15 s after the last page turn, at most every
+    60 s in Flow) and when the app goes to the background or exits.
+  - "Sync progress" in the reading menu pulls the remote position, or sends
+    yours if the server has nothing newer.
+  - Books are matched by KOReader's partial-MD5 digest (or by file name).
+  - Positions are exchanged as KOReader XPointers at paragraph precision, with
+    the percentage as fallback.
+- **`relay/`**: a small Cloudflare Worker the developer runs. It serves
+  Project Gutenberg and forwards the four kosync calls with CORS headers. Even
+  Hub only allows whitelisted origins and the WebView enforces CORS, which
+  neither Gutenberg nor stock kosync servers support.
+- **`npm run typecheck`**, `npm run pack:dev`, and a release check on
+  `npm run pack`: the relay must be set, it must be the only whitelisted
+  origin, and it must be named in `PRIVACY.md`.
+- **Chapter titles come from the book's table of contents** (EPUB3 nav or
+  EPUB2 NCX). Before this, Gutenberg and calibre books showed the book title
+  on every chapter ("Alice's Adventures in Wonderland by Lewis Carr…").
+  Now they show "III. A Caucus-Race and a Long Tale". A file `<title>` that
+  only repeats the book title falls back to "Chapter N".
+- `PRIVACY.md`, store icon `store/icon.png` (24×24, 2×2 blocks), simulator
+  screenshots in `store/screenshots/`, and the submission kit
+  `docs/1.6.0-submission.md`.
+- Dev-only `?demo=<sample>` URL parameter. It preloads `samples/<sample>.epub`
+  for simulator automation and is compiled out of production builds.
+
+### Changed
+- **One app name, "ePub Reader"**, in app.json, on the glasses and in the
+  companion UI. Before this it was "epub-reader", "G2 ePUB Reader" and
+  "ePub Reader".
+- **Gutenberg goes through the relay** instead of the public `api.codetabs.com`
+  proxy, which was down on 2026-11-01 and which Even's docs advise against.
+  Downloads prefer the smaller no-images EPUB.
+- **SDK 0.0.16** (fixes `setTimeout`/`setInterval` callbacks running
+  repeatedly). `app.json` now has `min_sdk_version` 0.0.16 and
+  `min_app_version` 2.2.10; before this, CLI 0.1.13 stamped 0.1.0, which
+  isn't submittable.
+- **evenhub-cli 0.2.0** (moved to devDependencies) and **simulator 0.9.5**,
+  which renders the native menu and text brightness. `.npmrc` sets
+  `legacy-peer-deps`.
+- The unused `evenhub.evenrealities.com` whitelist entry was removed.
+
+### Fixed
+- `tsc` could not typecheck the project. The even-toolkit patch broke
+  `gestures.d.ts`, and two latent type errors were hidden behind it.
+- The Flow chapter time-left disappeared from the footer on each clock tick.
+- 886 kB of unused sample EPUBs no longer ship inside the package.
+
+### Removed
+- The scraped `gutenberg.html` snapshot, the CORS-proxy probe scripts and
+  the unused `src/logo.ts`.
+
+## [v1.5.1] - 2026-09-13 (superseded by 1.6.0; never uploaded)
 
 ### Changed
 - **Redesigned splash screen** per the official Even Realities design guidelines: flat filled open-book mark (no hairline outlines), bold wordmark, thin rule, and dim version line using 4-bit greyscale depth tiers. Canvas doubled to 200×200 (two vertical image tiles, centered) instead of a single 200×100 tile.

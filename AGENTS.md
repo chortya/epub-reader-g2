@@ -14,8 +14,9 @@ npm run dev:sim        # Vite + opens evenhub-simulator
 npm run dev:serve:sim  # Vite opened at /?simulator=true (browser simulator, no native sim binary)
 npm run build          # production build to dist/ — also used as validation, must pass
 npm run test           # Node native test runner (NOT Jest/Vitest)
-npm run pack           # build + package to epub-reader.ehpk
-npm run pack:check     # validate packaging config without writing output
+npm run typecheck      # tsc --noEmit
+npm run pack:dev       # build + package for sideloading (no relay)
+npm run pack           # release package: requires VITE_RELAY_ORIGIN (see docs/1.6.0-submission.md)
 npm run qr / qr:sim    # print QR for the device / simulator path
 ```
 
@@ -24,23 +25,25 @@ Run a single test file:
 node --experimental-strip-types --test tests/app-json.test.ts
 ```
 
-Verify any change with `npm run build` then `npm run test`. For integration areas you touched, also run the ad-hoc root scripts (`test-gutenberg.mjs`, `test-proxy.mjs`, `test-scraper.mjs`, `proxy-test.mjs`) via `node <script>.mjs`. UI/gesture changes need manual checks in both `npm run dev` (device) and `npm run dev:sim` (simulator).
+Verify any change with `npm run typecheck`, `npm run build` and `npm run test`. UI/gesture changes need manual checks in both `npm run dev` (device) and `npm run dev:sim` (simulator).
 
 ## Testing quirks
 - Node 22+ required (`--experimental-strip-types`).
 - Tests import local `.ts` modules **with the `.ts` extension** (Bundler module resolution).
 - `tests/app-json.test.ts` enforces both `app.json.version === package.json.version` AND that `app.json.min_sdk_version` matches the installed Even Hub SDK — bump either and the other must follow.
-- Test files (11): `app-json`, `paginator`, `settings-persistence`, `settings-editor`, `continue-reading`, `l3-save-invariant`, `launch-intent`, `gestures-reset`, `layout`, `format-status-line`, `review-regressions`.
+- DOM-dependent tests use `linkedom` (dev dependency); there is still no jsdom/Vitest.
+- `.npmrc` sets `legacy-peer-deps=true` (evenhub-cli/even-toolkit peer ranges).
 
 ## Architecture
 `ARCHITECTURE.md` holds the full module map and runtime stack — read it before non-trivial changes. Facts not obvious from filenames:
 
-- **Two entry points** ship in the build: `index.html` (main reader) and `gutenberg.html` (standalone Project Gutenberg browser).
+- **One entry point** ships: `index.html`. `relay/` is a Cloudflare Worker (not bundled) that packaged builds use for Gutenberg and KOReader sync (Even Hub whitelist + CORS).
 - **Bridge usage is split.** The app talks to the raw Even Hub SDK bridge directly (for custom container layouts: status bars, chapter grid) and does **not** use `EvenHubBridge` from even-toolkit. even-toolkit is used only for glasses-side modules — `action-map` (`mapGlassEvent`), `gestures` (`notifyTextUpdate`, `resetGestureState`), `splash`, `keep-alive`, `text-clean`. No React anywhere.
 - **Text pipeline:** raw HTML -> plain-text extraction (epub-parser) -> `cleanForG2()` per line -> language detection -> word-wrap with hyphenation (hypher, 9 languages) -> page splitting (paginator) -> render.
 - **Two reading modes:** Paged (swipe nav) and Flow (word-by-word, 120-600 WPM).
 - **Glasses-side view flow:** splash -> `pickInitialView()` (launch.ts) -> mainMenu -> bookPicker/library -> reading/flowReading; `settings` + `settingEditor` are reachable from mainMenu.
-- **Gutenberg fetch** routes through the `api.codetabs.com` CORS proxy (whitelisted in `app.json` `permissions` alongside `gutenberg.org` and `evenhub.evenrealities.com`).
+- **Gutenberg fetch** routes through the relay when `VITE_RELAY_ORIGIN` is set at build time; dev builds without it fall back to `api.codetabs.com`. The app.json whitelist must be exactly the relay origin for release (`scripts/check-release.mjs`).
+- **KOReader sync** (`kosync*.ts`): chapters carry `spineIndex` (= KOReader DocFragment - 1); `Book.partialMd5` is KOReader's document id; positions carry `savedAt` so pulls know which side is newer. See ARCHITECTURE.md §17.
 - **`view='library'` is overloaded.** Both the welcome screen (`showWelcome()`) and the chapter list (`showChapterList()`) set `view='library'`; the distinction is `this.book` being null vs. set. Gesture routing checks `this.book` to disambiguate (even-client.ts:1276).
 
 ## G2 platform constraints
@@ -58,7 +61,7 @@ Verify any change with `npm run build` then `npm run test`. For integration area
 - "Continue Reading" resolves by **bookId, never by title alone**. Every save writes three bridge keys together: `epub-book-title`, `epub-last-book-id`, `epub-last-book-filename`. No cloud storage — everything is local-first.
 
 ## Gotchas
-- `postinstall` runs `patch-package`; `patches/even-toolkit+1.7.2.patch` is applied on install. Upgrading `even-toolkit` may require regenerating the patch.
+- `postinstall` runs `patch-package`; `patches/even-toolkit+1.7.7.patch` is applied on install (keep a trailing newline in patched files — a missing one once broke `gestures.d.ts`). Upgrading `even-toolkit` may require regenerating the patch.
 - Vite is pinned to port 5173 (`strictPort: true`) with `base: './'`; the QR and pack flows assume 5173.
 - `app.json` is the Even Hub packaging manifest — regenerate with `npm run init:evenhub` if its schema/permissions change, then re-sync version + `min_sdk_version`.
 - `npm run dev`, `qr`, `qr:sim`, and `dev:sim` shell out to the `evenhub` / `evenhub-simulator` CLIs (`@evenrealities/evenhub-cli` / `@evenrealities/evenhub-simulator`). On a machine without Even Hub tooling, use `npm run dev:serve` (plain Vite, no external CLIs).

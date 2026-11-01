@@ -1,7 +1,7 @@
 # Architecture
 
 This document describes how the **Even G2 ePub Reader** is put together as of
-**v1.5.0**. It is meant for contributors touching the codebase; user-facing
+**v1.6.0**. It is meant for contributors touching the codebase; user-facing
 docs live in `README.md` / `CHANGELOG.md` and high-level conventions live in
 `CLAUDE.md`.
 
@@ -12,12 +12,9 @@ renders EPUB books onto the Even Realities G2 smart-glasses display
 (576 × 288 px, 16-level greyscale). The same build also runs in a desktop
 browser with a mocked bridge for development.
 
-Two entry points ship in the built bundle:
-
-| Path              | Purpose                                                           |
-|-------------------|-------------------------------------------------------------------|
-| `index.html`      | Main reader (library, upload, settings, on-glasses viewer)        |
-| `gutenberg.html`  | Standalone Project Gutenberg browser                              |
+One entry point ships in the built bundle: `index.html` (library, upload,
+Gutenberg, settings, KOReader sync, on-glasses viewer). `relay/` holds a
+separate Cloudflare Worker the developer deploys (see §17).
 
 ## 2. Runtime stack
 
@@ -61,7 +58,17 @@ db.ts                Local book library: SHA-256 content identity, IndexedDB pri
 mock-bridge.ts       Browser-simulator bridge: intercepts SDK methods and renders containers into
                      a DOM canvas; provides Prev/Next/Tap/DblTap buttons.
 splash-bridge.ts     Adapter exposing an even-toolkit SplashBridge interface on top of the raw SDK.
-gutenberg.ts         Fetches the Gutenberg Top 100 and downloads individual EPUBs via a CORS proxy.
+gutenberg.ts         Fetches the Gutenberg Top 100 and downloads individual EPUBs via the relay
+                     (dev builds without VITE_RELAY_ORIGIN fall back to a public CORS proxy).
+relay.ts             RELAY_ORIGIN from VITE_RELAY_ORIGIN (build time), or null.
+md5.ts               Incremental MD5 (kosync digests and user key; WebCrypto has no MD5).
+text-normalize.ts    cleanForG2 + typographic substitutions shared by the extractor and the locator.
+kosync.ts            KOReader sync protocol client, settings (bridge + browser storage),
+                     document digest (partial MD5 / filename), decidePull policy.
+kosync-locator.ts    KOReader XPointer <-> chapter offset mapping (ChapterLocator anchors block
+                     elements to the cleaned text), whole-book percentage, partial-MD5 sampling.
+kosync-session.ts    Per-book sync: progress conversion with a lazy locator cache, pull, push,
+                     debounced schedulePush (15 s trailing, 60 s max), flush, markSynced.
 book-id.ts           Book identity: SHA-256 content IDs (makeContentBookId) plus the legacy
                      filename+title hash (makeBookId); resolveLastBook() for the mainMenu's
                      Continue Reading resolver (bookId → filename+title).
@@ -87,7 +94,6 @@ chapter-title.ts     Picks the best-looking chapter title from spine / heading /
                      candidates (generic "Chapter N" labels deprioritized).
 launch.ts            pickInitialView(intent, lastBook, readingMode) — pure post-splash view
                      decision. glassesMenu + resolvable → reading/flowReading; else mainMenu.
-logo.ts              Embedded logo byte data used on the upload page.
 ```
 
 ## 4. High-level component diagram
@@ -508,11 +514,19 @@ Tests are pure: they import `src/*.ts` directly (using explicit `.ts`
 extensions — Node's native TS mode requires them) and exercise side-effect
 free functions. There is no jsdom / Vitest / Jest.
 
-Current suites (v1.5.0 → 173 tests):
+Current suites (v1.6.0 → 199 tests; `npm run typecheck` runs tsc as well):
 
 - `app-json.test.ts` — manifest / package version alignment, SDK version
-  consistency, `supported_languages` matches hyphenation set, network
-  whitelist covers hard-coded hosts.
+  consistency, `supported_languages` matches hyphenation set, whitelist
+  entries are bare https origins, listing limits, and the same app name on
+  glasses, companion UI and manifest.
+- `kosync-locator.test.ts` — MD5 vs node:crypto, KOReader partial-MD5
+  sampling, XPointer parsing, block anchoring and offset round trips (DOM via
+  `linkedom`, a dev dependency).
+- `kosync.test.ts` — client headers/status mapping/relay rewrite, settings
+  round trip, decidePull policy, session push/pull mapping, push debounce.
+- `relay.test.ts` — Worker routing, kosync target filtering, header
+  stripping, Gutenberg candidates.
 - `paginator.test.ts` — default line counts, text-height crop math,
   `getTextLayout` invariants (full-height container, `maxLines +
   topBlankLines = displayLines`).
@@ -550,17 +564,16 @@ The app-json test enforces a number of release invariants, so simply
 forgetting to bump `app.json` version alongside `package.json` is caught
 automatically at `npm test`.
 
-The app-json test enforces a number of release invariants, so simply
-forgetting to bump `app.json` version alongside `package.json` is caught
-automatically at `npm test`.
-
 ## 15. Build, release, and packaging
 
 ```
 npm run build      Vite production build into dist/
 npm run test       run the Node native test suite
-npm run pack       build + package dist/ as epub-reader.ehpk for Even Hub
-npm run pack:check validate packaging against app.json schema
+npm run pack       release check (VITE_RELAY_ORIGIN set, whitelisted, in PRIVACY.md)
+                   + build + package dist/ as epub-reader.ehpk for Even Hub
+npm run pack:check same checks, then `evenhub pack --check` (CLI 0.2.0 needs login)
+npm run pack:dev   unchecked package for sideloading (no relay required)
+npm run typecheck  tsc --noEmit
 npm run dev        Vite + QR code for device pairing
 npm run dev:sim    Vite + native Even Hub simulator
 ```
@@ -572,20 +585,73 @@ Release sequence when cutting a new version:
 2. Update `index.html` header badge (`v1.x.y`) and `CLAUDE.md` project line.
 3. Add a `CHANGELOG.md` entry dated with today's date.
 4. `npm run build && npm run test` — must be green.
-5. `npm run pack` — writes `epub-reader.ehpk` at repo root.
-6. Commit with an imperative message; Claude-authored commits include the
-   `Co-Authored-By: Claude Opus 4.7 (1M context)` trailer.
-7. Upload the `.ehpk` to the Even Hub Dev Portal
-   (https://preview.evenhub.evenrealities.com) for marketplace review.
+5. `VITE_RELAY_ORIGIN=<relay> npm run pack` — writes `epub-reader.ehpk`.
+6. Commit with an imperative message.
+7. `npx evenhub upload epub-reader.ehpk -m "<changelog>"` (or the portal),
+   then complete the listing and submit — see `docs/1.6.0-submission.md`.
 
 ## 16. Non-goals
 
 - **Rich text rendering**: G2 is monochrome and font-fixed; we deliberately
   discard HTML styling, images, tables, and RTL special casing.
-- **Cloud sync**: books and positions stay on the device plus the local
-  browser. No remote storage, no accounts.
+- **Cloud storage of books**: books and positions stay on the device. The
+  only remote state is the optional KOReader progress sync, against a
+  server the user chooses.
 - **Multiple simultaneous books open**: the client holds exactly one
   `Book` at a time; switching flushes state and loads fresh.
 - **Arbitrary pixel drawing in reading views**: text containers only.
   Pixel output is reserved for the splash screen (at startup only, via
   `updateImageRawData`).
+
+## 17. KOReader progress sync (v1.6.0)
+
+- **Identity.** KOReader's default document id is `util.partialMD5`: MD5 over
+  1 KiB samples at `1024 << 2i`, i = -1..10 (i = -1 wraps to offset 0). It is
+  computed once in `parseEpub` (`Book.partialMd5`). The "file name" option is
+  `md5(basename)`.
+- **Positions.** In KOReader (crengine) a reflowable position is an XPointer
+  like `/body/DocFragment[N]/body/div/p[3]/text().42`. `DocFragment[N]` is
+  the N-th OPF spine item (all items, crengine DOM ≥ 20240114), which is why
+  `Chapter.spineIndex` records the spine position. `ChapterLocator` lazily
+  re-parses a chapter's XHTML (`Book.loadChapterXhtml`). It anchors every
+  text-bearing block to an offset in the cleaned chapter text, matching
+  non-whitespace characters so it doesn't depend on the extractor's
+  newline and indent handling.
+  - Push sends the containing block's element path, at paragraph precision.
+  - Pull resolves the path as deep as it exists and refines with
+    `text()[k].N`. If the fragment produced no chapter, it moves to the next
+    chapter. If the progress string isn't an XPointer, it falls back to the
+    percentage.
+- **Policy** (`decidePull`, mirroring KOReader's defaults):
+  - The device's own pushes are ignored (`device_id`).
+  - A newer remote position (server `timestamp` vs local `savedAt`) is
+    applied with a footer notice; an older one is ignored.
+  - The menu's "Sync progress" always applies the remote position, or pushes
+    the local one if the server has nothing newer.
+  - An automatic pull on book open never moves a reader who already turned a
+    page.
+  - An adopted position is marked as synced, so it isn't echoed back.
+- **Pacing.**
+  - `schedulePush` runs on every position save, with a 15 s trailing delay
+    and at most 60 s between pushes during Flow.
+  - Background, exit and book switch flush the pending push (`keepalive`
+    fetch, not awaited).
+- **Transport.**
+  - Packaged builds call `<relay>/kosync/...` with `X-Kosync-Server`. The
+    relay is needed because Even Hub requires whitelisted, CORS-enabled
+    origins, and stock kosync servers send no CORS headers.
+  - Dev builds without a relay call the server directly.
+- **Storage.** The setting `epub-kosync` lives in bridge storage and browser
+  localStorage. It holds the server, username, `userkey` (md5 of the
+  password), the checksum method and the device id.
+
+### 17.1 Relay (`relay/`)
+
+A Cloudflare Worker the developer operates. It serves:
+- Gutenberg's top list and EPUBs, from fixed URLs, with edge caching;
+- the four kosync calls, forwarded to a public https server with a DNS name.
+
+It strips cookies, follows no redirects, caps bodies at 16 KB and stores
+nothing. Deploy and release steps are in `relay/README.md` and
+`docs/1.6.0-submission.md`.
+
