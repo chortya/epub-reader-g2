@@ -18,6 +18,8 @@ export type BookOrbitCacheEntry = {
   /** Local library id (content SHA-256), see makeContentBookId. */
   localBookId: string;
   title: string;
+  /** For listing downloaded books while BookOrbit is unreachable. */
+  authors?: string[];
   /** BookOrbit's updatedAt when downloaded; a newer one means "update available". */
   remoteUpdatedAt: string | null;
   sizeBytes: number;
@@ -43,7 +45,8 @@ export function parseCacheIndex(raw: string | null | undefined): BookOrbitCacheE
       e && typeof e.account === 'string' && typeof e.bookOrbitId === 'number'
       && typeof e.fileId === 'number' && typeof e.localBookId === 'string'
       && typeof e.title === 'string' && typeof e.sizeBytes === 'number' && typeof e.downloadedAt === 'number'
-      && (e.remoteUpdatedAt === null || typeof e.remoteUpdatedAt === 'string'));
+      && (e.remoteUpdatedAt === null || typeof e.remoteUpdatedAt === 'string')
+      && (e.authors === undefined || (Array.isArray(e.authors) && e.authors.every((a: unknown) => typeof a === 'string'))));
   } catch {
     return [];
   }
@@ -59,6 +62,24 @@ export function upsertCacheEntry(entries: BookOrbitCacheEntry[], entry: BookOrbi
 /** Drop entries whose local copy is gone (deleted from the library or lost). */
 export function pruneCacheIndex(entries: BookOrbitCacheEntry[], localBookIds: Set<string>): BookOrbitCacheEntry[] {
   return entries.filter((e) => localBookIds.has(e.localBookId));
+}
+
+/**
+ * Downloaded books of an account that still have a local copy, newest first,
+ * optionally filtered by a search text (title/author): the BookOrbit list's
+ * content while the server is slow or unreachable.
+ */
+export function cachedBooks(
+  entries: BookOrbitCacheEntry[],
+  account: string,
+  localBookIds: Set<string>,
+  query = '',
+): BookOrbitCacheEntry[] {
+  const q = query.trim().toLowerCase();
+  return entries
+    .filter((e) => e.account === account && localBookIds.has(e.localBookId))
+    .filter((e) => !q || e.title.toLowerCase().includes(q) || (e.authors ?? []).some((a) => a.toLowerCase().includes(q)))
+    .sort((a, b) => b.downloadedAt - a.downloadedAt);
 }
 
 export function cacheStatus(

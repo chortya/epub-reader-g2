@@ -4,7 +4,14 @@ import { setStatus, withTimeout } from './utils';
 import { parseEpub } from './epub-parser';
 import { EvenEpubClient } from './even-client';
 import { fetchTopGutenbergBooks, downloadGutenbergEpub } from './gutenberg';
-import { getRecentBooksFromDB, saveEpubBufferToDB, deleteFromDB, type StoredBook } from './db';
+import {
+  getRecentBooksFromDB,
+  getLocalBookSummaries,
+  getStoredBook,
+  saveEpubBufferToDB,
+  deleteFromDB,
+  type StoredBook,
+} from './db';
 import {
   config,
   FLOW_MAX_WPM,
@@ -16,7 +23,7 @@ import {
   TEXT_HEIGHT_MIN_PERCENT,
   TEXT_HEIGHT_STEP_PERCENT,
 } from './constants';
-import type { CachedBookMeta } from './types';
+import type { Book, CachedBookMeta } from './types';
 import { matchesBookQuery } from './book-selection';
 import { createSerialExecutor } from './operation-queue';
 import { migrateLegacyPositionKeys } from './position-store';
@@ -37,6 +44,7 @@ import {
 import { BookOrbitClient, BookOrbitTracker, BOOKORBIT_STATS_KEY, type BookOrbitBook, type BookOrbitSort } from './bookorbit';
 import {
   cacheStatus,
+  cachedBooks,
   loadCacheIndex,
   pruneCacheIndex,
   saveCacheIndex,
@@ -124,10 +132,16 @@ async function main() {
       return new BookOrbitTracker({
         client: bo,
         hash: book.partialMd5,
-        device: { deviceId: s.deviceId, deviceModel: KOSYNC_DEVICE_NAME, pluginVersion: `g2-reader-${APP_VERSION}`.slice(0, 20) },
+        device: bookOrbitDevice(s),
         onError: (e) => console.warn('BookOrbit stats:', e),
       });
     };
+    // Reading time left unsent by an earlier run goes out now (in the
+    // background; offline it simply stays queued).
+    {
+      const bo = makeBookOrbitClient();
+      if (bo && kosyncSettings) void BookOrbitTracker.drain(bo, bookOrbitDevice(kosyncSettings));
+    }
 
     // Register onLaunchSource BEFORE client.init() so runStartup's pickInitialView
     // decision can consult the launch intent (per Codex #1 / design §3.1a).
@@ -168,6 +182,14 @@ async function main() {
     } catch (e) {
       console.warn('Failed to preload local book list:', e);
     }
+
+    // Browser-level lifecycle as a second line behind the Even app's events.
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') void client?.onPageHidden();
+      else client?.onPageVisibleOrOnline();
+    });
+    window.addEventListener('pagehide', () => { void client?.onPageHidden(); });
+    window.addEventListener('online', () => client?.onPageVisibleOrOnline());
 
     await client.init();
     if (bridge instanceof MockBridge) {
@@ -508,6 +530,10 @@ async function main() {
       : new KosyncClient({ server: s.server, username, userkey, relayOrigin });
   }
 
+  function bookOrbitDevice(s: KosyncSettings) {
+    return { deviceId: s.deviceId, deviceModel: KOSYNC_DEVICE_NAME, pluginVersion: `g2-reader-${APP_VERSION}`.slice(0, 20) };
+  }
+
   function makeBookOrbitClient(): BookOrbitClient | null {
     const s = kosyncSettings;
     if (!isKosyncLoggedIn(s) || s.provider !== 'bookorbit') return null;
@@ -691,8 +717,9 @@ async function main() {
 
   /**
    * "BookOrbit library": browse/search the catalog, download EPUBs into the
-   * local library (offline reading), open local copies without the network,
-   * and offer updates when a book changed in BookOrbit.
+   * local library, and read them - local copies first: they open without the
+   * network, are listed straight away (and while BookOrbit is unreachable),
+   * and an update is only offered, never forced.
    */
   function setupBookOrbitLibrary(storageBridge: any) {
     const toggle = document.getElementById('bo-toggle');
@@ -713,29 +740,38 @@ async function main() {
     let loadedOnce = false;
     let query = '';
     let searchTimer: number | null = null;
+    let showingCached = false;
     const rows = new Map<number, { book: BookOrbitBook; render: () => void }>();
     // Keyed by account + book id: the same numeric id on two servers or logins
     // is a different book.
-    const inFlight = new Map<string, Promise<StoredBook | null>>();
+    const inFlight = new Map<string, Promise<Downloaded | null>>();
     const jobKey = (account: string, bookId: number) => `${account}#${bookId}`;
     const currentAccount = () => makeBookOrbitClient()?.accountKey ?? null;
+    type Downloaded = { stored: StoredBook; parsed: Book };
 
-    // Local library ids + the BookOrbit download index, refreshed per list load.
+    // What is on the device (ids + titles, no book bytes) and the download index.
     let localIds = new Set<string>();
+    let localTitles = new Map<string, string>(); // lower-case title -> local book id
     let index: BookOrbitCacheEntry[] = [];
     let listTotal = 0;
     const updateSummary = () => {
-      const bo = makeBookOrbitClient();
-      if (!bo || listTotal === 0) return;
-      const onDevice = index.filter((e) => e.account === bo.accountKey && localIds.has(e.localBookId)).length;
-      state.textContent = `${list.childElementCount} of ${listTotal} EPUBs · ${onDevice} on this device`;
+      const account = currentAccount();
+      if (!account) return;
+      const onDevice = cachedBooks(index, account, localIds).length;
+      if (showingCached) {
+        state.textContent = onDevice === 0 ? '' : `${onDevice} downloaded ${onDevice === 1 ? 'book' : 'books'} on this device`;
+      } else if (listTotal > 0) {
+        state.textContent = `${list.childElementCount} of ${listTotal} EPUBs · ${onDevice} on this device`;
+      }
     };
+
     // Every read-modify-write of the library snapshot + download index runs
     // through one queue, so a refresh can't prune an entry a download just added.
     const indexOps = createSerialExecutor();
     const refreshLocalState = () => indexOps(async () => {
-      const local = await getRecentBooksFromDB(storageBridge).catch(() => [] as StoredBook[]);
+      const local = await getLocalBookSummaries(storageBridge).catch(() => []);
       localIds = new Set(local.map((b) => b.bookId));
+      localTitles = new Map(local.filter((b) => b.title).map((b) => [b.title.toLowerCase(), b.bookId]));
       const loaded = await loadCacheIndex(storageBridge, window.localStorage);
       index = pruneCacheIndex(loaded, localIds);
       if (index.length !== loaded.length) await saveCacheIndex(index, storageBridge, window.localStorage).catch(() => {});
@@ -752,13 +788,13 @@ async function main() {
     };
 
     /** Download (or re-download) a book into the local library. */
-    const download = (b: BookOrbitBook, onProgress: (text: string) => void): Promise<StoredBook | null> => {
+    const download = (b: BookOrbitBook, onProgress: (text: string) => void): Promise<Downloaded | null> => {
       const account = currentAccount();
       if (!account) return Promise.resolve(null);
       const key = jobKey(account, b.id);
       const running = inFlight.get(key);
       if (running) return running;
-      const job = (async () => {
+      const job = (async (): Promise<Downloaded | null> => {
         const bo = makeBookOrbitClient();
         if (!bo || bo.accountKey !== account) return null;
         const file = await bo.epubFile(b.id);
@@ -769,10 +805,11 @@ async function main() {
         });
         onProgress('Saving...');
         const filename = `${b.title}.epub`;
-        const parsed = await parseEpub(data, filename); // validate before storing
+        const parsed = await parseEpub(data, filename); // validates; reused when opening
         const stored = await indexOps(async () => {
           const saved = await saveEpubBufferToDB(data, filename, parsed.title, storageBridge);
           localIds.add(saved.bookId);
+          localTitles.set(saved.title.toLowerCase(), saved.bookId);
           if (saved.durable === false) {
             // Only IndexedDB has it: don't call it "on device" (it may not
             // survive an app restart); the row keeps offering Download.
@@ -796,6 +833,7 @@ async function main() {
             fileId: file.id,
             localBookId: saved.bookId,
             title: b.title,
+            authors: b.authors,
             remoteUpdatedAt: b.updatedAt,
             sizeBytes: data.byteLength,
             downloadedAt: Date.now(),
@@ -805,7 +843,7 @@ async function main() {
         });
         updateSummary();
         if (client) await renderLibrary(client, storageBridge); // also refreshes the glasses' book list
-        return stored;
+        return { stored, parsed };
       })();
       inFlight.set(key, job);
       job.finally(() => {
@@ -815,29 +853,46 @@ async function main() {
       return job;
     };
 
-    /** Open the local copy (offline), downloading it first if needed. */
+    /**
+     * Open a book: the local copy if there is one (no network at all), else
+     * download it. If BookOrbit can't be reached, fall back to a local book
+     * with the same title (e.g. uploaded by hand) rather than failing.
+     */
     const read = async (b: BookOrbitBook, onProgress: (text: string) => void) => {
       const bo = makeBookOrbitClient();
       if (!bo || !client) return;
       const account = bo.accountKey;
-      const status = cacheStatus(index, bo.accountKey, b, localIds);
-      let stored: StoredBook | null = null;
-      if (status.kind !== 'none') {
-        const local = await getRecentBooksFromDB(storageBridge);
-        stored = local.find((x) => x.bookId === status.entry.localBookId) ?? null;
-      }
+      const status = cacheStatus(index, account, b, localIds);
+      let stored: StoredBook | null = status.kind !== 'none'
+        ? await getStoredBook(status.entry.localBookId, storageBridge)
+        : null;
+      let parsed: Book | null = null;
       if (!stored) {
         setStatus(`Downloading from BookOrbit: ${b.title}...`);
-        stored = await download(b, onProgress);
+        try {
+          const done = await download(b, onProgress);
+          if (done) ({ stored, parsed } = done);
+        } catch (e) {
+          const sameTitle = localTitles.get(b.title.toLowerCase());
+          const offline = e instanceof KosyncError && e.status === null;
+          if (!offline || !sameTitle) throw e;
+          stored = await getStoredBook(sameTitle, storageBridge);
+          if (!stored) throw e;
+          setStatus(`BookOrbit is not reachable - opening your local copy of "${b.title}".`);
+        }
       }
       if (!stored) return;
-      // Logged out / switched account while downloading: don't open the book
-      // (its sync would run under the new login).
+      // Logged out / switched account meanwhile: don't open the book (its sync
+      // would run under the new login).
       if (currentAccount() !== account) {
         setStatus(`Not opening "${b.title}": the BookOrbit login changed.`);
         return;
       }
-      const book = await parseEpub(stored.buffer, stored.filename);
+      const book = parsed ?? await parseEpub(stored.buffer, stored.filename);
+      if (currentAccount() !== account) {
+        setStatus(`Not opening "${b.title}": the BookOrbit login changed.`);
+        return;
+      }
       // resume=true: the sync pull places the reader at BookOrbit's position.
       await client.loadBook(book, true, stored.bookId, stored.filename);
       await renderLibrary(client, storageBridge);
@@ -859,10 +914,9 @@ async function main() {
       const readBtn = row.querySelector('.bo-read') as HTMLButtonElement;
 
       const render = () => {
-        const bo = makeBookOrbitClient();
-        const status = bo ? cacheStatus(index, bo.accountKey, b, localIds) : { kind: 'none' as const };
-        meta.textContent = formatMeta(b, status);
         const account = currentAccount();
+        const status = account ? cacheStatus(index, account, b, localIds) : { kind: 'none' as const };
+        meta.textContent = formatMeta(b, status);
         const busy = account !== null && inFlight.has(jobKey(account, b.id));
         dl.disabled = busy || status.kind === 'onDevice';
         dl.textContent = busy ? 'Downloading...'
@@ -876,15 +930,18 @@ async function main() {
         try {
           await work();
         } catch (e) {
-          setStatus(`BookOrbit: ${e instanceof Error ? e.message : String(e)}`);
+          const offline = e instanceof KosyncError && e.status === null;
+          setStatus(offline
+            ? 'BookOrbit is not reachable (offline or away from home/Tailscale). Downloaded books still open.'
+            : `BookOrbit: ${e instanceof Error ? e.message : String(e)}`);
         } finally {
           render();
         }
       };
       dl.addEventListener('click', () => run(async () => {
-        const stored = await download(b, progress);
-        if (!stored) return;
-        setStatus(stored.durable === false
+        const done = await download(b, progress);
+        if (!done) return;
+        setStatus(done.stored.durable === false
           ? `"${b.title}" is only kept for this session: device storage is full. Delete some books, then Download again.`
           : `Downloaded for offline reading: ${b.title}`);
       }));
@@ -894,6 +951,29 @@ async function main() {
       list.appendChild(row);
     };
 
+    /** Downloaded books as list rows (shown first, and alone while offline). */
+    const showCached = () => {
+      const account = currentAccount();
+      if (!account) return;
+      list.innerHTML = '';
+      rows.clear();
+      for (const e of cachedBooks(index, account, localIds, query)) {
+        addRow({
+          id: e.bookOrbitId,
+          title: e.title,
+          authors: e.authors ?? [],
+          seriesName: null,
+          progressPercentage: null,
+          readStatus: null,
+          formats: ['epub'],
+          lastReadAt: null,
+          updatedAt: e.remoteUpdatedAt,
+        });
+      }
+      showingCached = true;
+      more.style.display = 'none';
+    };
+
     const load = async (reset: boolean) => {
       const bo = makeBookOrbitClient();
       if (!bo || (loading && !reset)) return; // "Load more" waits; a new search supersedes
@@ -901,15 +981,20 @@ async function main() {
       loading = true;
       if (reset) {
         page = 1;
-        list.innerHTML = '';
-        rows.clear();
-        more.style.display = 'none';
+        await refreshLocalState();
+        if (mine !== generation) return;
+        showCached(); // local books right away; the server list replaces them
+        updateSummary();
+        if (list.childElementCount === 0) state.textContent = 'Loading...';
       }
-      state.textContent = 'Loading...';
       try {
-        if (reset) await refreshLocalState();
         const result = await bo.listBooks({ q: query, page, size: 20, sort: sort.value as BookOrbitSort });
         if (mine !== generation) return; // a newer search started meanwhile
+        if (reset || showingCached) {
+          list.innerHTML = '';
+          rows.clear();
+        }
+        showingCached = false;
         for (const b of result.items) addRow(b);
         page = result.page + 1;
         more.style.display = result.hasNext ? '' : 'none';
@@ -919,13 +1004,17 @@ async function main() {
         loadedOnce = true;
       } catch (e) {
         if (mine === generation) {
-          // Offline: say so, and point at the books that are already local.
-          const onDevice = index.filter((x) => x.account === bo.accountKey && localIds.has(x.localBookId)).length;
           const offline = e instanceof KosyncError && e.status === null;
-          state.textContent = (offline ? 'BookOrbit is not reachable (offline or away from home/Tailscale).' : String(e instanceof Error ? e.message : e))
+          const onDevice = cachedBooks(index, bo.accountKey, localIds).length;
+          state.textContent = (offline
+            ? 'BookOrbit is not reachable (offline or away from home/Tailscale).'
+            : String(e instanceof Error ? e.message : e))
             + (onDevice > 0
-              ? ` ${onDevice === 1 ? 'Your downloaded book is' : `Your ${onDevice} downloaded books are`} in the Library above and read offline.`
+              ? (onDevice === 1
+                ? ' Showing your downloaded book; it opens offline.'
+                : ` Showing your ${onDevice} downloaded books; they open offline.`)
               : '');
+          loadedOnce = true; // the cached rows stay; reopening the section retries
         }
       } finally {
         if (mine === generation) loading = false;
@@ -935,7 +1024,7 @@ async function main() {
     toggle.addEventListener('click', () => {
       toggle.classList.toggle('open');
       body.classList.toggle('open');
-      if (body.classList.contains('open') && !loadedOnce) void load(true);
+      if (body.classList.contains('open')) void load(true);
     });
     search.addEventListener('input', () => {
       if (searchTimer !== null) window.clearTimeout(searchTimer);

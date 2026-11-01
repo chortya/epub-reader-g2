@@ -312,3 +312,16 @@ test('pixel wrapping: a 4,000-character unbroken token paginates quickly and fit
   for (const line of lines) assert.ok(getTextWidth(line) <= READING_LINE_LIMIT_PX, line);
   assert.equal(lines.join('').replace(/-/g, '').replace(/\s/g, ''), `id${token}end`);
 });
+
+test('pixel wrapping: a 4,000-letter token with hyphenation on stays fast', async () => {
+  const { paginateText, setHyphenator, READING_LINE_LIMIT_PX } = await import('../src/paginator.ts');
+  const { getTextWidth } = await import('../src/text-metrics.ts');
+  const Hypher = (await import('hypher')).default;
+  const en = (await import('hyphenation.en-us')).default;
+  setHyphenator(new Hypher(en));
+  const token = 'acgt'.repeat(1000);
+  const t0 = performance.now();
+  const lines = paginateText(`dna ${token} end`, undefined, 9).flatMap((p) => p.split('\n'));
+  assert.ok(performance.now() - t0 < 1500, `took ${(performance.now() - t0).toFixed(0)} ms`);
+  for (const line of lines) assert.ok(getTextWidth(line) <= READING_LINE_LIMIT_PX);
+});

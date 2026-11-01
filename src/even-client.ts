@@ -62,7 +62,7 @@ import {
   withSyncItem,
   type LifecycleState,
 } from './lifecycle';
-import { KosyncError } from './kosync';
+import { KosyncError, isBookOrbitReset } from './kosync';
 import type { KosyncSession, ReaderLocation } from './kosync-session';
 
 /** Reading-time / finished tracking for a sync server that supports it (BookOrbit). */
@@ -341,16 +341,20 @@ export class EvenEpubClient {
     const restoredPaged = await this.restorePagedPosition(book.title);
     const restoredFlow = await this.restoreFlowPosition(book.title);
 
-    const restoredActive = config.readingMode === 'flow' && restoredFlow ? restoredFlow : restoredPaged;
+    // Paged and Flow keep separate positions; use whichever was saved last
+    // (reading in one mode, or a sync jump, only updates that mode's key).
+    const flowNewer = !!restoredFlow && (!restoredPaged || (restoredFlow.savedAt ?? 0) > (restoredPaged.savedAt ?? 0));
+    const restoredActive = restoredFlow && (config.readingMode === 'flow' ? (flowNewer || !restoredPaged) : flowNewer)
+      ? restoredFlow
+      : restoredPaged ?? restoredFlow;
 
-    if (config.readingMode === 'flow' && restoredFlow) {
-      this.chapterIndex = restoredFlow.chapterIndex;
-      this.pageIndex = restoredFlow.pageIndex;
-      this.flowWordIndex = restoredFlow.wordIndex ?? 0;
-    } else if (restoredPaged) {
-      this.chapterIndex = restoredPaged.chapterIndex;
-      this.pageIndex = restoredPaged.pageIndex;
-      this.flowWordIndex = 0;
+    if (restoredActive) {
+      this.chapterIndex = restoredActive.chapterIndex;
+      this.pageIndex = restoredActive.pageIndex;
+      // A word index only means something in Flow, and only for a Flow position.
+      this.flowWordIndex = config.readingMode === 'flow' && restoredActive === restoredFlow
+        ? restoredActive.wordIndex ?? 0
+        : 0;
     } else {
       this.chapterIndex = 0;
       this.pageIndex = 0;
@@ -403,7 +407,7 @@ export class EvenEpubClient {
     if (!session || this.reconcilingSession === session) return;
     this.reconcilingSession = session;
     this.lastReconcileAttempt = Date.now();
-    let outcome: { ok: boolean; localNewer?: boolean } = { ok: false };
+    let outcome: { ok: boolean; localNewer?: boolean; remoteNewerSkipped?: boolean } = { ok: false };
     try {
       outcome = await this.pullKosync(false, hadLocal ? this.locationChangedAt : undefined);
     } finally {
@@ -421,8 +425,12 @@ export class EvenEpubClient {
           this.kosyncReconciled = true;
           const reading = this.view === 'reading' || this.view === 'flowReading';
           // Moves made while the pull ran, a push that failed earlier, or a
-          // local position newer than the server's: upload it now.
-          if (reading && (this.kosyncDirty || outcome.localNewer || session.hasUnsentPosition)) {
+          // local position newer than the server's: upload it now - unless a
+          // newer remote position was only skipped because the user was busy
+          // (the footer says so; the next move pushes as usual).
+          if (outcome.remoteNewerSkipped) {
+            this.kosyncDirty = false;
+          } else if (reading && (this.kosyncDirty || outcome.localNewer || session.hasUnsentPosition)) {
             this.kosyncDirty = false;
             session.schedulePush(this.currentLocation(), (e) => this.reportKosyncError(e, false));
           }
@@ -440,6 +448,28 @@ export class EvenEpubClient {
 
   public hasKosyncSession(): boolean {
     return this.kosync !== null;
+  }
+
+  /**
+   * The WebView was hidden (phone locked, app switched) - a second signal
+   * besides the Even app's FOREGROUND_EXIT, which may not arrive before the
+   * WebView is suspended or killed. Land the exact position (incl. the Flow
+   * word) in bridge storage and flush pending sync/stats.
+   */
+  public async onPageHidden(): Promise<void> {
+    this.pendingFlowAutoStart = false;
+    if (this.view === 'flowReading') await this.saveFlowPosition(true, true);
+    else if (this.view === 'reading') await this.savePagedPosition(true);
+    try { await this.persister.flush(); } catch { /* reported by the persister */ }
+    this.flushKosync();
+  }
+
+  /** Visible again or back online: other devices may have moved on - pull before pushing. */
+  public onPageVisibleOrOnline(): void {
+    if (!this.kosync || this.lifecycleState !== 'active') return;
+    if (this.reconcilingSession === this.kosync) return;
+    this.kosyncReconciled = false;
+    void this.reconcileKosync(true);
   }
 
   /** Companion-UI "Sync now": same as the glasses menu item. Returns the outcome. */
@@ -531,7 +561,10 @@ export class EvenEpubClient {
    *
    * @param localSavedAt undefined = no local position (always adopt remote).
    */
-  private async pullKosync(interactive: boolean, localSavedAt?: number | null): Promise<{ ok: boolean; message: string; localNewer?: boolean }> {
+  private async pullKosync(
+    interactive: boolean,
+    localSavedAt?: number | null,
+  ): Promise<{ ok: boolean; message: string; localNewer?: boolean; remoteNewerSkipped?: boolean }> {
     const session = this.kosync;
     const book = this.book;
     if (!session || !book) return { ok: false, message: 'Open a book to sync its progress.' };
@@ -562,16 +595,33 @@ export class EvenEpubClient {
           } finally {
             this.adoptingRemoteAt = null;
           }
-          await session.markSynced(this.currentLocation());
+          if (result.remote && isBookOrbitReset(result.remote)) {
+            // BookOrbit holds our pushes until we report the book start.
+            await session.acknowledgeReset().catch((e) => this.reportKosyncError(e, false));
+          } else {
+            await session.markSynced(this.currentLocation());
+          }
           this.kosyncDirty = false;
           return true;
         });
-        if (!applied) return { ok: true, message: 'Skipped: you were already reading.' };
         const pct = Math.round((result.remote?.percentage ?? 0) * 100);
         const from = result.remote?.device ? ` from ${result.remote.device}` : '';
-        this.showFooterNotice(`Synced ${pct}%${from}`);
-        setStatus(`Sync: moved to ${pct}%${from}`);
-        return { ok: true, message: `Moved to ${pct}%${from}.` };
+        if (!applied) {
+          // A newer position exists elsewhere but the reader was already moving:
+          // don't jump under them, don't overwrite it right away, and say so.
+          this.showFooterNotice(`Newer: ${pct}%${from} - hold > Sync`, 6000);
+          setStatus(`Sync: a newer position (${pct}%${from}) is on the server; use "Sync progress" to go there.`);
+          return { ok: true, message: `Skipped: you were already reading (newer position ${pct}%${from}).`, remoteNewerSkipped: true };
+        }
+        const isReset = result.remote ? isBookOrbitReset(result.remote) : false;
+        this.showFooterNotice(isReset ? 'Progress reset in BookOrbit' : `Synced ${pct}%${from}`);
+        setStatus(isReset ? 'Sync: progress was reset in BookOrbit; back to the start.' : `Sync: moved to ${pct}%${from}`);
+        return { ok: true, message: isReset ? 'Progress reset in BookOrbit.' : `Moved to ${pct}%${from}.` };
+      }
+      if (result.decision === 'same' && result.remote && isBookOrbitReset(result.remote)) {
+        // Already at the start: still tell BookOrbit, or it keeps holding our pushes.
+        await session.acknowledgeReset();
+        return { ok: true, message: 'Up to date.' };
       }
       if (interactive) {
         if (this.kosync === session) {
@@ -584,9 +634,16 @@ export class EvenEpubClient {
         setStatus(`Sync: progress sent (${pct}%)`);
         return { ok: true, message: `Progress sent (${pct}%).` };
       }
-      // Automatic pull: ours is the newer position (e.g. read offline, or a
-      // push failed earlier) -> the caller uploads it.
-      return { ok: true, message: 'Up to date.', localNewer: result.decision === 'older' || result.decision === 'none' };
+      // Automatic pull: ours is the newer position (read offline, a push that
+      // failed, a book never synced, or the server only has an older position
+      // from this very device) -> the caller uploads it.
+      const ownOlder = result.decision === 'ownDevice' && result.remote !== null
+        && Math.abs(result.remote.percentage - session.percentageAt(this.currentLocation())) >= 0.0001;
+      return {
+        ok: true,
+        message: 'Up to date.',
+        localNewer: result.decision === 'older' || result.decision === 'none' || ownOlder,
+      };
     } catch (e) {
       this.reportKosyncError(e, interactive);
       return { ok: false, message: `Sync failed: ${e instanceof KosyncError ? e.message : String(e)}` };
@@ -2022,12 +2079,14 @@ export class EvenEpubClient {
       return;
     }
     if (sysEvent?.eventType === OsEventTypeList.FOREGROUND_ENTER_EVENT) {
+      const wasBackgrounded = this.lifecycleState === 'backgrounded';
       const r = reduceLifecycle(this.lifecycleState, this.pendingMenuAction, { kind: 'foregroundEnter' });
       this.lifecycleState = r.state;
       if (r.effects.restoreView) {
-        // Other devices may have moved on while we were away: pull again
-        // before any push (forward-only, never under a user who moved).
-        if (this.kosync) {
+        // Back from the background: other devices may have moved on. Pull
+        // again before any push (forward-only, never under a user who moved).
+        // An ENTER while active is the hold menu opening - no network for that.
+        if (this.kosync && wasBackgrounded) {
           this.kosyncReconciled = false;
           void this.reconcileKosync(true);
         }
@@ -2452,6 +2511,7 @@ export class EvenEpubClient {
     // re-arming, which also kept resetting its 10 s phase. A single guarded
     // interval can never leak (§12.1 risk list, mitigation).
     if (this.clockTickerId !== null) return;
+    // The render that starts the ticker already shows the current minute.
     this.lastMinuteString = this.formatHHMM(new Date());
     this.clockTickerId = window.setInterval(() => {
       this.tickClock().catch((e) => console.warn('clock tick failed:', e));

@@ -246,7 +246,22 @@ export class KosyncClient {
    * compare the server's timestamps with local save times fairly when the
    * phone's clock is off.
    */
-  clockOffsetMs: number | null = null;
+  /** Identifies server + login, so cached/queued state never crosses accounts. */
+  get accountKey(): string {
+    return `${this.opts.server}|${this.opts.username ?? ''}`;
+  }
+
+  get clockOffsetMs(): number | null {
+    return KosyncClient.clockOffsets.get(this.opts.server) ?? null;
+  }
+
+  set clockOffsetMs(value: number | null) {
+    if (value === null) KosyncClient.clockOffsets.delete(this.opts.server);
+    else KosyncClient.clockOffsets.set(this.opts.server, value);
+  }
+
+  /** Per server, shared by every client instance (a new one is made per book). */
+  private static clockOffsets = new Map<string, number>();
 
   async updateProgress(update: ProgressUpdate, deviceId: string, keepalive = false): Promise<void> {
     const sentAt = Date.now();
@@ -262,7 +277,7 @@ export class KosyncClient {
     });
     if (res.status === 401) throw new KosyncError('Not authorized', 401);
     if (!res.ok) throw await this.errorFrom(res, 'Pushing progress failed');
-    const body = await this.readJson(res);
+    const body = await this.readJson(res).catch(() => null); // the PUT itself succeeded
     if (body && typeof body.timestamp === 'number' && Number.isFinite(body.timestamp)) {
       const local = (sentAt + Date.now()) / 2; // midpoint of the round trip
       this.clockOffsetMs = body.timestamp * 1000 - local;
@@ -272,18 +287,26 @@ export class KosyncClient {
   /**
    * JSON body with its own timeout: request()'s timer stops once headers
    * arrive, and a body that stalls afterwards must not hang the caller.
-   * Resolves null on a bad body or timeout.
+   * Throws on a timeout or an unparsable body: neither may be mistaken for
+   * "the server has no progress" (that would push over the real one).
+   * An empty body resolves to null.
    */
   protected async readJson(res: Response, timeoutMs = this.opts.timeoutMs ?? 10_000): Promise<any> {
     let timer: ReturnType<typeof setTimeout> | null = null;
-    const timeout = new Promise<null>((resolve) => {
+    const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
         res.body?.cancel().catch(() => {});
-        resolve(null);
+        reject(new KosyncError('Sync server response timed out', null));
       }, timeoutMs);
     });
     try {
-      return await Promise.race([res.json().catch(() => null), timeout]);
+      const text = await Promise.race([res.text(), timeout]);
+      if (text.trim() === '') return null;
+      try {
+        return JSON.parse(text);
+      } catch {
+        throw new KosyncError('Sync server sent an invalid response', res.status);
+      }
     } finally {
       if (timer !== null) clearTimeout(timer);
     }
@@ -325,8 +348,8 @@ export class KosyncClient {
 
   protected async errorFrom(res: Response, fallback: string): Promise<KosyncError> {
     let message = `${fallback} (HTTP ${res.status})`;
-    const body = await this.readJson(res, 3000);
-    if (body && typeof body.message === 'string') message = `${fallback}: ${body.message}`;
+    const body = await this.readJson(res, 3000).catch(() => null);
+    if (body && typeof body.message === 'string') message = `${fallback}: ${body.message.slice(0, 200)}`;
     return new KosyncError(message, res.status);
   }
 }
@@ -335,8 +358,26 @@ export type PullDecision = 'apply' | 'none' | 'same' | 'ownDevice' | 'older';
 
 /** Order of two save times this close is uncertain (device clocks drift). */
 export const CLOCK_SKEW_WINDOW_MS = 5 * 60_000;
-/** ...once the server-vs-phone offset is measured, only latency/rounding remains. */
-export const CLOCK_SKEW_WINDOW_KNOWN_MS = 15_000;
+/**
+ * ...once the server-vs-phone offset is measured. Kept at a minute: the
+ * remote timestamp may come from another device's own (skewed) clock.
+ */
+export const CLOCK_SKEW_WINDOW_KNOWN_MS = 60_000;
+
+/** BookOrbit's reset marker and the position a device sends to accept it. */
+export const RESET_PROGRESS = '/body/DocFragment[1]/body';
+const RESET_PERCENTAGE = 0.01;
+
+/**
+ * BookOrbit answers a pull with this after "reset progress" in its UI, and
+ * holds the device's later pushes until the device reports the book start
+ * (DocFragment[1], <= 1 %) - see KosyncSession.acknowledgeReset.
+ */
+export function isBookOrbitReset(remote: RemoteProgress): boolean {
+  return remote.device_id === 'bookorbit-web'
+    && remote.percentage <= RESET_PERCENTAGE
+    && /^\/body\/DocFragment\[1\](\/|$)/.test(remote.progress.trim());
+}
 
 /**
  * Whether a remote position should replace the local one. Mirrors KOReader's
@@ -352,22 +393,22 @@ export function decidePull(
   clockOffsetMs: number | null = null,
 ): PullDecision {
   if (!remote || typeof remote.percentage !== 'number') return 'none';
+  // A reset made in BookOrbit is a deliberate "start over"; it always wins.
+  if (isBookOrbitReset(remote)) return local && local.percentage <= RESET_PERCENTAGE ? 'same' : 'apply';
   if (remote.device_id === deviceId) return 'ownDevice';
   if (local && Math.abs(remote.percentage - local.percentage) < 0.0001) return 'same';
   if (!local) return 'apply';
   // Both sides know when they moved: the newer position wins, also for an
   // explicit sync (whose caller then pushes ours instead). Local save times
   // are moved onto the server's clock when the offset is known; within the
-  // remaining uncertainty the order is unknown, so an explicit sync adopts the
-  // remote position (as KOReader's manual pull does) and an automatic one only
-  // moves forward.
+  // remaining uncertainty the order is unknown, so both kinds of sync only
+  // move forward (never throw away pages just read on either device).
   if (typeof remote.timestamp === 'number' && local.savedAtMs !== null) {
     const localOnServerClock = local.savedAtMs + (clockOffsetMs ?? 0);
     const window = clockOffsetMs === null ? CLOCK_SKEW_WINDOW_MS : CLOCK_SKEW_WINDOW_KNOWN_MS;
     const delta = remote.timestamp * 1000 - localOnServerClock;
     if (delta > window) return 'apply';
     if (delta < -window) return 'older';
-    if (interactive) return 'apply';
     return remote.percentage > local.percentage ? 'apply' : 'older';
   }
   if (interactive) return 'apply';

@@ -7,6 +7,7 @@ import {
   KosyncError,
   decidePull,
   documentDigest,
+  isBookOrbitReset,
   isKosyncLoggedIn,
   loadKosyncSettings,
   makeDeviceId,
@@ -355,13 +356,16 @@ test('markSynced drops a push that was still preparing (locator await)', async (
 test('decidePull: clock skew window and measured offset', () => {
   const remote = { document: 'd', progress: 'p', percentage: 0.6, device_id: 'KOBO', timestamp: 43_260 }; // 12:01 server
   const local = { percentage: 0.4, savedAtMs: 43_380_000 }; // phone says 12:03, 3 min fast
-  // Unknown offset: 2 min apart is within the 5 min window -> explicit sync adopts remote.
+  // Unknown offset: 2 min apart is within the 5 min window -> order unknown,
+  // so even an explicit sync only moves forward (never discards pages read).
   assert.equal(decidePull(remote, local, 'ME', true), 'apply');
+  assert.equal(decidePull({ ...remote, percentage: 0.2 }, local, 'ME', true), 'older');
   // Automatic: inside the window, only forward.
   assert.equal(decidePull(remote, local, 'ME', false), 'apply');
   assert.equal(decidePull({ ...remote, percentage: 0.2 }, local, 'ME', false), 'older');
-  // Offset measured (phone 3 min fast): local is really 12:00 -> remote newer.
-  assert.equal(decidePull({ ...remote, percentage: 0.2 }, local, 'ME', false, -180_000), 'apply');
+  // Offset measured (phone 3 min fast): local is really 12:00; a remote save at
+  // 12:02 is clearly newer even though the phone's clock says otherwise.
+  assert.equal(decidePull({ ...remote, percentage: 0.2, timestamp: 43_320 }, local, 'ME', false, -180_000), 'apply');
   // Far apart: plain ordering.
   assert.equal(decidePull({ ...remote, timestamp: 40_000 }, local, 'ME', true), 'older');
 });
@@ -373,10 +377,13 @@ test('updateProgress learns the server clock offset; stalled JSON bodies time ou
   await c.updateProgress({ document: 'd', progress: 'p', percentage: 0.1 }, 'X');
   assert.ok(Math.abs(c.clockOffsetMs! - 600_000) < 2_000, String(c.clockOffsetMs));
   const stalled = (async () => new Response(new ReadableStream({ start(ctrl) { ctrl.enqueue(new TextEncoder().encode('{"perc')); } }), { status: 200 })) as unknown as typeof fetch;
-  const slow = new KosyncClient({ server: SETTINGS.server, fetchImpl: stalled, timeoutMs: 50 });
+  const slow = new KosyncClient({ server: 'https://other.example.com', fetchImpl: stalled, timeoutMs: 50 });
   const t0 = Date.now();
-  assert.equal(await slow.getProgress('d'), null);
+  // A stalled body is an error, never "no progress" (which would push over it).
+  await assert.rejects(slow.getProgress('d'), /timed out/);
   assert.ok(Date.now() - t0 < 2_000);
+  const garbage = new KosyncClient({ server: 'https://other.example.com', fetchImpl: (async () => new Response('<html>', { status: 200 })) as unknown as typeof fetch });
+  await assert.rejects(garbage.getProgress('d'), /invalid response/);
 });
 
 test('pull: an exact remote position pages away in the same paragraph is not "same"', async () => {
@@ -408,4 +415,23 @@ test('a failed push is kept and retried by the next flush', async () => {
   await session.flush();
   assert.equal(session.hasUnsentPosition, false);
   assert.equal(calls.filter((c) => c.method === 'PUT').length, 2);
+});
+
+test('BookOrbit reset marker always wins and is recognised strictly', () => {
+  const reset = { document: 'd', progress: '/body/DocFragment[1]/body', percentage: 0, device: 'web', device_id: 'bookorbit-web', timestamp: 1 };
+  assert.equal(isBookOrbitReset(reset), true);
+  assert.equal(isBookOrbitReset({ ...reset, device_id: 'KOBO' }), false);
+  assert.equal(isBookOrbitReset({ ...reset, progress: '/body/DocFragment[12]/body' }), false);
+  assert.equal(isBookOrbitReset({ ...reset, percentage: 0.4 }), false);
+  // Old timestamp, local far ahead and newer: the reset still applies.
+  assert.equal(decidePull(reset, { percentage: 0.8, savedAtMs: 9_999_999_999 }, 'ME', false), 'apply');
+  assert.equal(decidePull(reset, { percentage: 0.005, savedAtMs: 1 }, 'ME', false), 'same');
+});
+
+test('acknowledgeReset reports DocFragment[1] at 0% even when the first chapter is a later fragment', async () => {
+  const { impl, calls } = fakeFetch(() => ({ status: 200, body: {} }));
+  const session = new KosyncSession({ book: book(), filename: null, settings: SETTINGS, client: new KosyncClient({ server: 'https://reset.example.com', fetchImpl: impl }), parseBody });
+  assert.equal(book().chapters[0].spineIndex, 1, 'fixture: chapter 0 is DocFragment[2]');
+  await session.acknowledgeReset();
+  assert.deepEqual([calls[0].body.progress, calls[0].body.percentage], ['/body/DocFragment[1]/body', 0]);
 });

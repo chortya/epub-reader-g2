@@ -6,6 +6,7 @@
 import type { Book } from './types.ts';
 import {
   KosyncClient,
+  RESET_PROGRESS,
   decidePull,
   documentDigest,
   isKosyncLoggedIn,
@@ -217,7 +218,10 @@ export class KosyncSession {
    */
   private async landsOnSamePlace(remote: RemoteProgress, target: ReaderLocation, local: ReaderLocation): Promise<boolean> {
     if (target.chapterIndex !== local.chapterIndex) return false;
-    const precise = parseXPointer(remote.progress)?.point != null;
+    // Exact only when it names a character in a text node (an element point
+    // like p[3].2 is a child index, not a character offset).
+    const xp = parseXPointer(remote.progress);
+    const precise = xp !== null && xp.point !== null && xp.steps.at(-1)?.kind === 'text';
     if (precise) return Math.abs(target.offset - local.offset) <= SAME_PLACE_CHARS;
     return await this.xpointerAt(target) === await this.xpointerAt(local);
   }
@@ -230,17 +234,18 @@ export class KosyncSession {
     // after (and overwrite) a newer position.
     const document = this.document;
     if (!document) return false;
-    const seq = KosyncSession.bumpSeq(document);
+    const seqKey = this.seqKey(document);
+    const seq = KosyncSession.bumpSeq(seqKey);
     const run = KosyncSession.uploads.then(async () => {
-      if (!KosyncSession.isCurrent(document, seq)) return false;
+      if (!KosyncSession.isCurrent(seqKey, seq)) return false;
       const progress = await this.xpointerAt(loc);
       // Re-check after the await: markSynced or a newer push may have landed.
-      if (!progress || !KosyncSession.isCurrent(document, seq)) return false;
+      if (!progress || !KosyncSession.isCurrent(seqKey, seq)) return false;
       const percentage = this.percentageAt(loc);
       const key = `${progress}|${percentage}`;
       if (!opts.force && key === this.lastPushed) return false;
       await this.client.updateProgress({ document, progress, percentage }, this.settings.deviceId, opts.keepalive);
-      if (KosyncSession.isCurrent(document, seq)) this.lastPushed = key;
+      if (KosyncSession.isCurrent(seqKey, seq)) this.lastPushed = key;
       return true;
     });
     KosyncSession.uploads = run.catch(() => false);
@@ -254,10 +259,37 @@ export class KosyncSession {
   async markSynced(loc: ReaderLocation): Promise<void> {
     this.cancelScheduledPush();
     const document = this.document;
-    if (document) KosyncSession.bumpSeq(document); // drop uploads queued before the jump
+    if (document) KosyncSession.bumpSeq(this.seqKey(document)); // drop uploads queued before the jump
     this.unacknowledged = null; // the remote position wins; nothing of ours to resend
     const progress = await this.xpointerAt(loc);
     if (progress) this.lastPushed = `${progress}|${this.percentageAt(loc)}`;
+  }
+
+  /** Upload ordering/supersession is per account and document. */
+  private seqKey(document: string): string {
+    return `${this.client.accountKey}|${document}`;
+  }
+
+  /**
+   * Accept a BookOrbit reset: report exactly the start position BookOrbit
+   * waits for (DocFragment[1], 0 %), whatever our first chapter's fragment
+   * is (books often start with a cover page we skip). Until a device does
+   * this, BookOrbit holds its pushes.
+   */
+  async acknowledgeReset(): Promise<void> {
+    const document = this.document;
+    if (!document) return;
+    const seqKey = this.seqKey(document);
+    const seq = KosyncSession.bumpSeq(seqKey);
+    this.cancelScheduledPush();
+    this.unacknowledged = null;
+    const run = KosyncSession.uploads.then(async () => {
+      if (!KosyncSession.isCurrent(seqKey, seq)) return;
+      await this.client.updateProgress({ document, progress: RESET_PROGRESS, percentage: 0 }, this.settings.deviceId);
+      this.lastPushed = `${RESET_PROGRESS}|0`;
+    });
+    KosyncSession.uploads = run.catch(() => undefined);
+    await run;
   }
 
   /** Trailing-debounced push with a max wait, for page turns and Flow ticks. */

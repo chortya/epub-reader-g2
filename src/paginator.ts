@@ -144,6 +144,14 @@ function wordWrapWithOffsets(text: string, measure: LineMeasure): WrappedLine[] 
   return lines;
 }
 
+/**
+ * No glyph is narrower than ~2 px, so a 560 px line never holds more than
+ * this many characters; longer tokens are cut without measuring their tail.
+ */
+const MAX_LINE_CHARS = 300;
+/** Real words are shorter; hyphenating a 4,000-letter token is quadratic work. */
+const MAX_HYPHENATE_CHARS = 60;
+
 /** Approximate widths within this many px of the limit are measured exactly. */
 const FAST_SLACK_PX = 16;
 /**
@@ -220,7 +228,7 @@ function wrapParagraphWithOffsets(
     }
 
     // Word doesn't fit. Try hyphenation on current line.
-    if (config.hyphenation && hyphenator && word.length >= 5) {
+    if (config.hyphenation && hyphenator && word.length >= 5 && word.length <= MAX_HYPHENATE_CHARS) {
       const prefix = currentLine;
       const hyphenated = tryHyphenate(word, (head) => fits(prefix + head + '-'));
       if (hyphenated) {
@@ -247,8 +255,9 @@ function wrapParagraphWithOffsets(
       let rest = word;
       let restStart = cursor;
       currentLineStart = cursor;
-      while (!fits(rest)) {
-        if (config.hyphenation && hyphenator) {
+      // A token far longer than any line can't fit: skip measuring all of it.
+      while (rest.length > MAX_LINE_CHARS || !fits(rest)) {
+        if (config.hyphenation && hyphenator && rest.length <= MAX_HYPHENATE_CHARS) {
           const hyp = tryHyphenate(rest, (head) => fits(head + '-'));
           if (hyp) {
             lines.push({ text: hyp.head + '-', start: restStart });
@@ -262,7 +271,7 @@ function wrapParagraphWithOffsets(
         // grows with length, so binary search (a backwards scan from the whole
         // token made a 2,000-char URL take seconds).
         let lo = 1;
-        let hi = Math.max(1, rest.length - 1);
+        let hi = Math.max(1, Math.min(rest.length - 1, MAX_LINE_CHARS));
         while (lo < hi) {
           const mid = (lo + hi + 1) >> 1;
           if (fits(rest.slice(0, mid) + '-')) lo = mid;

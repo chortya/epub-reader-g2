@@ -274,6 +274,55 @@ export async function getRecentBooksFromDB(bridge?: BridgeLike): Promise<StoredB
   return [];
 }
 
+/**
+ * Which books are on this device, without loading their bytes: IndexedDB
+ * keys plus the bridge index (the copy that survives app restarts).
+ */
+export async function getLocalBookSummaries(bridge?: BridgeLike): Promise<BookIndexEntry[]> {
+  const byId = new Map<string, BookIndexEntry>();
+  if (bridge) {
+    try {
+      for (const e of await readBookIndex(bridge)) byId.set(e.bookId, e);
+    } catch { /* bridge unavailable */ }
+  }
+  try {
+    const db = await getDB();
+    const keys = await new Promise<IDBValidKey[]>((resolve, reject) => {
+      const request = db.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).getAllKeys();
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    for (const key of keys) {
+      if (typeof key === 'string' && !byId.has(key)) byId.set(key, { bookId: key, filename: '', title: '', timestamp: 0 });
+    }
+  } catch { /* IndexedDB unavailable */ }
+  return [...byId.values()];
+}
+
+/** One book's bytes: IndexedDB first, the bridge copy as fallback. */
+export async function getStoredBook(bookId: string, bridge?: BridgeLike): Promise<StoredBook | null> {
+  try {
+    const db = await getDB();
+    const book = await new Promise<StoredBook | undefined>((resolve, reject) => {
+      const request = db.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).get(bookId);
+      request.onsuccess = () => resolve(request.result as StoredBook | undefined);
+      request.onerror = () => reject(request.error);
+    });
+    if (book) return book;
+  } catch { /* fall back to the bridge */ }
+  if (!bridge) return null;
+  try {
+    const entry = (await readBookIndex(bridge)).find((e) => e.bookId === bookId);
+    const base64 = await bridge.getLocalStorage(`${BRIDGE_BOOK_DATA_PREFIX}${bookId}`);
+    if (!entry || !base64) return null;
+    const book: StoredBook = { ...entry, buffer: base64ToArrayBuffer(base64) };
+    backfillIndexedDB([book]).catch(() => {});
+    return book;
+  } catch {
+    return null;
+  }
+}
+
 async function backfillIndexedDB(books: StoredBook[]): Promise<void> {
   const db = await getDB();
   await new Promise<void>((resolve, reject) => {

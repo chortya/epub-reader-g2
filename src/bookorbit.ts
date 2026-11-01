@@ -156,17 +156,12 @@ export class BookOrbitClient extends KosyncClient {
   async matchCheck(hashes: string[], device: DeviceInfo): Promise<Map<string, number>> {
     const res = await this.request('POST', '/plugin/match-check', { body: { ...device, hashes }, accept: JSON_ACCEPT });
     if (!res.ok) throw await this.errorFrom(res, 'Matching the book failed');
-    const body = await res.json().catch(() => null);
+    const body = await this.readJson(res);
     const out = new Map<string, number>();
     for (const m of Array.isArray(body?.matches) ? body.matches : []) {
       if (typeof m?.hash === 'string' && typeof m?.bookId === 'number') out.set(m.hash, m.bookId);
     }
     return out;
-  }
-
-  /** Identifies server + login, so cached state never crosses accounts. */
-  get accountKey(): string {
-    return `${this.opts.server}|${this.opts.username ?? ''}`;
   }
 
   async uploadPageStats(device: DeviceInfo, books: { hash: string; events: PageStatEvent[] }[], keepalive = false): Promise<void> {
@@ -190,7 +185,7 @@ export class BookOrbitClient extends KosyncClient {
     const res = await this.request('GET', path, { accept: JSON_ACCEPT });
     if (res.status === 401 || res.status === 403) throw new KosyncError('BookOrbit rejected the login', res.status);
     if (!res.ok) throw await this.errorFrom(res, fallback);
-    return res.json().catch(() => null);
+    return this.readJson(res);
   }
 }
 
@@ -345,6 +340,49 @@ export class BookOrbitTracker {
     } catch { /* corrupt: start empty */ }
   }
 
+  static hasPending(account: string): boolean {
+    for (const events of BookOrbitTracker.outboxes.get(account)?.values() ?? []) {
+      if (events.length > 0) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Upload an account's pending events in batches (BookOrbit takes at most
+   * 500 per request). Events stay in the outbox - and in persisted storage -
+   * until BookOrbit acknowledged them, so a WebView killed mid-upload loses
+   * nothing (BookOrbit dedupes a resend).
+   */
+  static async drain(client: BookOrbitClient, device: DeviceInfo, keepalive = false, onError: (e: unknown) => void = () => {}): Promise<void> {
+    const box = BookOrbitTracker.outboxes.get(client.accountKey);
+    if (!box) return;
+    for (let round = 0; round < 10; round++) {
+      const books: { hash: string; events: PageStatEvent[] }[] = [];
+      let budget = 400;
+      for (const [hash, events] of box) {
+        if (events.length === 0 || budget === 0) continue;
+        const take = events.slice(0, budget);
+        budget -= take.length;
+        books.push({ hash, events: take });
+      }
+      if (books.length === 0) return;
+      try {
+        await client.uploadPageStats(device, books, keepalive);
+      } catch (e) {
+        onError(e);
+        return;
+      }
+      for (const b of books) {
+        const q = box.get(b.hash);
+        if (!q) continue;
+        // Remove exactly what was sent (new events were appended at the end).
+        const sent = new Set(b.events);
+        box.set(b.hash, q.filter((e) => !sent.has(e)));
+      }
+      void BookOrbitTracker.persist();
+    }
+  }
+
   /** Write the outbox soon (debounced), or right away before the app may die. */
   static persist(immediate = false): Promise<void> {
     const storage = BookOrbitTracker.storage;
@@ -421,32 +459,8 @@ export class BookOrbitTracker {
     this.uploading = this.uploading.then(async () => {
       // Drain in batches within BookOrbit's 500-events-per-request limit,
       // covering every book with pending events in this account.
-      for (let round = 0; round < 10; round++) {
-        const books: { hash: string; events: PageStatEvent[] }[] = [];
-        let budget = 400;
-        for (const [hash, events] of this.outbox) {
-          if (events.length === 0 || budget === 0) continue;
-          const take = events.splice(0, budget);
-          budget -= take.length;
-          books.push({ hash, events: take });
-        }
-        if (books.length === 0) return;
-        try {
-          await this.client.uploadPageStats(this.device, books, keepalive);
-        } catch (e) {
-          for (const b of books) {
-            const q = this.outbox.get(b.hash) ?? [];
-            // Bounded retry buffer per book; BookOrbit dedupes resent events.
-            this.outbox.set(b.hash, [...b.events, ...q].slice(-MAX_PENDING_PER_BOOK));
-          }
-          this.onError(e);
-          void BookOrbitTracker.persist();
-          this.scheduleFlush(); // try again later
-          return;
-        }
-        void BookOrbitTracker.persist(); // drop what was acknowledged
-      }
-      this.scheduleFlush(); // still more after 10 rounds: continue later
+      await BookOrbitTracker.drain(this.client, this.device, keepalive, this.onError);
+      if (BookOrbitTracker.hasPending(this.client.accountKey)) this.scheduleFlush(); // retry later
     });
     return this.uploading;
   }
@@ -478,6 +492,7 @@ export class BookOrbitTracker {
       durationSeconds: Math.min(seconds, MAX_PAGE_SECONDS),
       totalPages: c.totalPages,
     });
+    if (this.queue.length > MAX_PENDING_PER_BOOK) this.queue.splice(0, this.queue.length - MAX_PENDING_PER_BOOK);
     BookOrbitTracker.persist();
     this.scheduleFlush();
   }

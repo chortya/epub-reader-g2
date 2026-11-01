@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   BOOKORBIT_CACHE_KEY,
   cacheStatus,
+  cachedBooks,
   loadCacheIndex,
   parseCacheIndex,
   pruneCacheIndex,
@@ -57,4 +58,18 @@ test('index round-trips through bridge storage and ignores junk', async () => {
   assert.ok(store.has(BOOKORBIT_CACHE_KEY));
   assert.deepEqual(await loadCacheIndex(bridge), [entry()]);
   await assert.rejects(saveCacheIndex([entry()], { ...bridge, setLocalStorage: async () => false }));
+});
+
+test('cachedBooks: this account, still on the device, newest first, searchable offline', () => {
+  const acct = 'https://bo/api/v1/koreader|u';
+  const index = [
+    entry({ bookOrbitId: 1, localBookId: 'a', title: 'Alice', authors: ['Lewis Carroll'], downloadedAt: 1 }),
+    entry({ bookOrbitId: 2, localBookId: 'b', title: 'Dracula', authors: ['Bram Stoker'], downloadedAt: 3 }),
+    entry({ bookOrbitId: 3, localBookId: 'gone', title: 'Emma', downloadedAt: 2 }),
+    entry({ account: 'other|u', bookOrbitId: 4, localBookId: 'c', title: 'Other' }),
+  ];
+  const local = new Set(['a', 'b', 'c']);
+  assert.deepEqual(cachedBooks(index, acct, local).map((e) => e.title), ['Dracula', 'Alice']);
+  assert.deepEqual(cachedBooks(index, acct, local, 'carroll').map((e) => e.title), ['Alice']);
+  assert.deepEqual(cachedBooks(index, acct, local, 'DRAC').map((e) => e.title), ['Dracula']);
 });

@@ -117,7 +117,9 @@ function leadingText(el: Element): string {
         const child = n as Element;
         const name = localName(child);
         if (name === 'script' || name === 'style') continue;
-        if (isBlock(child)) {
+        // A <br> breaks the line but not the block: keep going, so a block
+        // split by line breaks is matched (and consumed) as one text.
+        if (isBlock(child) && name !== 'br') {
           stop = true;
           return;
         }
@@ -127,22 +129,6 @@ function leadingText(el: Element): string {
   };
   walk(el);
   return out;
-}
-
-/** Normalized, whitespace-free text of a subtree (scripts/styles skipped). */
-function compactSubtree(el: Element): string {
-  let out = '';
-  const walk = (node: Node): void => {
-    for (let n = node.firstChild; n; n = n.nextSibling) {
-      if (n.nodeType === 3) out += n.textContent ?? '';
-      else if (n.nodeType === 1) {
-        const name = localName(n as Element);
-        if (name !== 'script' && name !== 'style') walk(n);
-      }
-    }
-  };
-  walk(el);
-  return compact(out);
 }
 
 /** Non-whitespace characters of `el`'s text that precede `target` (a descendant). */
@@ -233,11 +219,7 @@ export class ChapterLocator {
             }
           }
         }
-        const own = this.byElement.get(child);
         visit(child, childPath);
-        // Past the block's whole text (e.g. after a <br> that ended its
-        // leading text), so later blocks can't match inside it.
-        if (own) cursor = Math.max(cursor, own.compactIndex + compactSubtree(child).length);
       }
     };
     visit(this.body, '');
