@@ -10,6 +10,9 @@
 // phone. The key is passed to Vite through the environment only; it ends up
 // in the private package, never in git. Its server is whitelisted too.
 //
+// Optional PERSONAL_VERSION=1.6.1: version of the personal package (Even Hub
+// wants a higher version for each new upload of the same app).
+//
 // Writes build/app.personal.json (app.json + your origins) and packs
 // epub-reader-personal.ehpk. The committed app.json is left untouched, and
 // the public release check (npm run pack) does not apply. If VITE_RELAY_ORIGIN
@@ -80,6 +83,15 @@ network.whitelist = [...new Set(origins)];
 // Even Hub limits the description to 300 characters.
 const desc = 'Syncs reading progress and downloads books from your own servers: ' + network.whitelist.join(', ');
 network.desc = desc.length <= 300 ? desc : 'Syncs reading progress and downloads books from your own servers (see the whitelist).';
+const personalVersion = process.env.PERSONAL_VERSION?.trim();
+if (personalVersion) {
+  if (!/^\d+\.\d+\.\d+$/.test(personalVersion)) {
+    console.error(`PERSONAL_VERSION must look like 1.6.1, got: ${personalVersion}`);
+    process.exit(1);
+  }
+  app.version = personalVersion;
+}
+
 mkdirSync(new URL('build/', root), { recursive: true });
 const manifest = new URL('build/app.personal.json', root);
 writeFileSync(manifest, JSON.stringify({ ...app, entrypoint: app.entrypoint }, null, 2) + '\n');
