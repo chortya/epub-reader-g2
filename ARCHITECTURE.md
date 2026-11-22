@@ -1,7 +1,7 @@
 # Architecture
 
 This document describes how the **Even G2 ePub Reader** is put together as of
-**v1.6.0**. It is meant for contributors touching the codebase; user-facing
+**v1.7.0**. It is meant for contributors touching the codebase; user-facing
 docs live in `README.md` / `CHANGELOG.md` and high-level conventions live in
 `CLAUDE.md`.
 
@@ -534,7 +534,7 @@ Tests are pure: they import `src/*.ts` directly (using explicit `.ts`
 extensions — Node's native TS mode requires them) and exercise side-effect
 free functions. There is no jsdom / Vitest / Jest.
 
-Current suites (v1.6.0 → 199 tests; `npm run typecheck` runs tsc as well):
+Current suites (v1.7.0 → 270 tests; `npm run typecheck` runs tsc as well):
 
 - `app-json.test.ts` — manifest / package version alignment, SDK version
   consistency, `supported_languages` matches hyphenation set, whitelist
@@ -608,7 +608,7 @@ Release sequence when cutting a new version:
 5. `VITE_RELAY_ORIGIN=<relay> npm run pack` — writes `epub-reader.ehpk`.
 6. Commit with an imperative message.
 7. `npx evenhub upload epub-reader.ehpk -m "<changelog>"` (or the portal),
-   then complete the listing and submit — see `docs/1.6.0-submission.md`.
+   then complete the listing and submit — see `docs/1.7.0-submission.md`.
 
 ## 16. Non-goals
 
@@ -673,9 +673,9 @@ A Cloudflare Worker the developer operates. It serves:
 
 It strips cookies, follows no redirects, caps bodies at 16 KB and stores
 nothing. Deploy and release steps are in `relay/README.md` and
-`docs/1.6.0-submission.md`.
+`docs/1.7.0-submission.md`.
 
-## 18. BookOrbit (unreleased)
+## 18. BookOrbit (v1.7.0, optional; personal builds only)
 
 `bookorbit.ts` adds two pieces on top of the kosync stack:
 

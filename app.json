@@ -2,11 +2,11 @@
   "package_id": "me.proton.evendev.epubreader",
   "edition": "202601",
   "name": "ePub Reader",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "min_app_version": "2.2.10",
   "min_sdk_version": "0.0.16",
   "tagline": "Read EPUB books on your Even G2 glasses",
-  "description": "Read EPUB books directly on your Even Realities G2 smart glasses. Upload books from your phone or browse the Project Gutenberg Top 100 catalog, then read hands-free on the glasses.\n\nFeatures:\n- Local library: books cached on-device for offline reading (searchable companion UI)\n- Two reading modes: Paged (swipe to turn pages) and Flow (word-by-word speed reading, 120-600 WPM)\n- Native contextual menu on glasses: Contents, mode switch, bookmarks, flow speed\n- KOReader progress sync: keep your place in step with KOReader and other kosync-compatible apps\n- Interruption recovery: sentence rewind during Flow, auto-rewind on resume, chapter time-left\n- Flicker-free page turns and configurable text brightness\n- Automatic hyphenation in 9 languages: English, German, Spanish, French, Dutch, Polish, Portuguese, Russian, Ukrainian\n- Configurable status bar with clock and reading progress\n- Automatic position saving across app restarts\n- Project Gutenberg integration\n\nControls:\n- Swipe down/up: Next/previous page, or sentence navigation in running Flow\n- Tap: Hide/show reading info in paged mode; play/pause in Flow\n- Double tap: Back one level\n- Hold: Contextual menu (Contents, mode, bookmark, speed, sync)",
+  "description": "Read EPUB books directly on your Even Realities G2 smart glasses. Upload books from your phone or browse the Project Gutenberg Top 100 catalog, then read hands-free on the glasses.\n\nFeatures:\n- Local library: books cached on-device for offline reading (searchable companion UI)\n- Two reading modes: Paged (swipe to turn pages) and Flow (word-by-word speed reading, 120-600 WPM)\n- Native contextual menu on glasses: Contents, mode switch, bookmarks, flow speed\n- Optional KOReader progress sync: keep your place in step with KOReader and other kosync-compatible apps\n- Optional BookOrbit sync and library in personal builds: progress sync, EPUB downloads, reading time and finished status\n- Interruption recovery: sentence rewind during Flow, auto-rewind on resume, chapter time-left\n- Flicker-free page turns and configurable text brightness\n- Automatic hyphenation in 9 languages: English, German, Spanish, French, Dutch, Polish, Portuguese, Russian, Ukrainian\n- Configurable status bar with clock and reading progress\n- Automatic position saving across app restarts\n- Project Gutenberg integration\n\nControls:\n- Swipe down/up: Next/previous page, or sentence navigation in running Flow\n- Tap: Hide/show reading info in paged mode; play/pause in Flow\n- Double tap: Back one level\n- Hold: Contextual menu (Contents, mode, bookmark, speed, sync)",
   "author": "Andriy <evendev@proton.me>",
   "entrypoint": "index.html",
   "supported_languages": [
@@ -18,9 +18,9 @@
   "permissions": [
     {
       "name": "network",
-      "desc": "Downloads Project Gutenberg books and syncs reading progress with your KOReader sync server, both through the developer's relay.",
+      "desc": "Downloads Project Gutenberg books and syncs reading progress with your sync server, through the developer's relay (BookOrbit in personal builds is reached directly).",
       "whitelist": [
-        "https://api.codetabs.com"
+        "https://epub-reader-relay.rigorous-coneflower.workers.dev"
       ]
     }
   ]

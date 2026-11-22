@@ -566,6 +566,7 @@ async function main() {
   function setupKosyncUi(storageBridge: any) {
     const el = <T extends HTMLElement>(id: string) => document.getElementById(id) as T | null;
     const providerEl = el<HTMLSelectElement>('sync-provider');
+    const toggleLabelEl = el<HTMLElement>('sync-toggle-label');
     const noteEl = el<HTMLElement>('sync-note');
     const serverLabelEl = el<HTMLElement>('sync-server-label');
     const serverEl = el<HTMLInputElement>('sync-server');
@@ -584,14 +585,19 @@ async function main() {
       || !loginBtn || !registerBtn || !syncNowBtn || !logoutBtn || !outActions || !inActions || !stateEl) return;
 
     const NOTES: Record<SyncProvider, string> = {
-      bookorbit: 'Sync your place, reading time and finished books with BookOrbit, and download books from your '
-        + 'BookOrbit library. Use the KOReader login from BookOrbit (Settings > KOReader). Only its MD5 key is stored.',
-      kosync: 'Keep your place in sync with KOReader and other apps that support its Progress sync server. '
+      bookorbit: 'Optional: sync your place, reading time and finished books with BookOrbit, and download books '
+        + 'from your BookOrbit library. Use the KOReader login from BookOrbit (Settings > KOReader). Only its MD5 key is stored.',
+      kosync: 'Optional: keep your place in sync with KOReader and other apps that support its Progress sync server. '
         + 'Use the same server and account as in KOReader. Only the MD5 key of your password is stored.',
     };
 
     // The provider being edited (may differ from the saved one until login).
     if (!BOOKORBIT_AVAILABLE) providerEl.querySelector('option[value="bookorbit"]')?.remove();
+    if (toggleLabelEl) {
+      toggleLabelEl.textContent = BOOKORBIT_AVAILABLE
+        ? 'Sync server (optional: BookOrbit / KOReader)'
+        : 'Sync server (optional: KOReader)';
+    }
     // Not logged in yet: offer BookOrbit first (the setup this reader is built
     // around) where this build can reach it.
     let editingProvider: SyncProvider = kosyncSettings && isKosyncLoggedIn(kosyncSettings)
@@ -634,7 +640,7 @@ async function main() {
       stateEl.textContent = message ?? (loggedIn
         ? `Logged in to ${isBookOrbit ? 'BookOrbit' : 'the sync server'} as ${s.username}. Syncs when a book opens, `
           + 'while reading, and via "Sync progress" in the glasses menu.'
-        : 'Not logged in.');
+        : 'Not logged in — sync is optional.');
       bookOrbitUi.refresh();
     };
 

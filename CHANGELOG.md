@@ -2,11 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased] - BookOrbit
+## [v1.7.0] - 2026-11-22
 
 ### Added
-- **BookOrbit integration** (see [docs/bookorbit.md](docs/bookorbit.md)). Choose "BookOrbit" as the
-  server type and log in with the KOReader login from BookOrbit (Settings → KOReader).
+- **BookOrbit integration (optional; personal builds only)** (see [docs/bookorbit.md](docs/bookorbit.md)).
+  The BookOrbit login is optional: without it the reader works as before. The public relay build
+  keeps BookOrbit out of the way because each user's BookOrbit origin can't be whitelisted there
+  (no extra proxy). In a personal build, choose "BookOrbit" as the server type and log in with the
+  KOReader login from BookOrbit (Settings → KOReader).
   - **Progress sync** goes through BookOrbit's kosync API. Positions are shared with its web reader
     and with KOReader devices.
   - **BookOrbit library** on the phone: browse, search and sort your EPUBs, then tap Read to
@@ -69,6 +72,7 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - Sync status messages now say "Sync:" instead of "KOReader sync:".
 - The sync settings no longer reset the username you typed after a failed login.
+- The sync section is labelled optional, and BookOrbit is marked optional where the build offers it.
 
 ## [v1.6.0] - 2026-11-01
 

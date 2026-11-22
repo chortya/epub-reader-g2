@@ -1,6 +1,6 @@
 # Privacy Policy: ePub Reader for Even Realities G2
 
-Last updated: 2026-11-01
+Last updated: 2026-11-22
 
 ePub Reader is local-first. It has no accounts of its own, no analytics and
 no advertising.
@@ -37,7 +37,8 @@ when you start them:
    background, and when you choose "Sync progress". It also reads back the
    last position stored for that book.
 
-Both kinds of request go through the developer's relay at **RELAY_ORIGIN**.
+Both kinds of request go through the developer's relay at
+**https://epub-reader-relay.rigorous-coneflower.workers.dev**.
 The relay exists because Even Hub apps can only contact approved addresses
 that support CORS (see `relay/README.md`). It forwards the request and
 returns the response. It does not store or log the contents, and it is

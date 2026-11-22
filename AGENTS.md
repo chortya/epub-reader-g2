@@ -16,7 +16,7 @@ npm run build          # production build to dist/ — also used as validation, 
 npm run test           # Node native test runner (NOT Jest/Vitest)
 npm run typecheck      # tsc --noEmit
 npm run pack:dev       # build + package for sideloading (no relay)
-npm run pack           # release package: requires VITE_RELAY_ORIGIN (see docs/1.6.0-submission.md)
+npm run pack           # release package: requires VITE_RELAY_ORIGIN (see docs/1.7.0-submission.md)
 npm run qr / qr:sim    # print QR for the device / simulator path
 ```
 

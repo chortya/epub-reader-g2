@@ -14,6 +14,7 @@ Read EPUB books directly on your Even Realities G2 smart glasses. Upload an EPUB
 - **Local-first storage** — books and positions are cached on-device; no network or account needed once a book is loaded
 - **Chapter browser** — paginated chapter list for quick navigation
 - **KOReader progress sync** — keep your place in step with KOReader and other kosync-compatible apps (optional; see below)
+- **BookOrbit (optional, personal builds)** — sync progress, download your library, record reading time and mark books finished
 - **Browser testing mode** — develop and test in a web browser without glasses connected
 
 ## Getting Started
@@ -46,7 +47,7 @@ npm run build       # Build to ./dist
 npm run test        # Run regression tests
 npm run typecheck   # tsc --noEmit
 npm run pack:dev    # Package for sideloading (no relay required)
-VITE_RELAY_ORIGIN=https://<relay> npm run pack   # Release package (see docs/1.6.0-submission.md)
+VITE_RELAY_ORIGIN=https://<relay> npm run pack   # Release package (see docs/1.7.0-submission.md)
 ```
 
 Packaged builds reach Project Gutenberg and KOReader sync servers through a
@@ -54,17 +55,20 @@ small relay you deploy yourself ([relay/README.md](relay/README.md)). Even Hub
 only allows whitelisted, CORS-enabled origins, and neither service sends CORS
 headers.
 
-## BookOrbit
+## BookOrbit (optional, personal builds)
 
-If your books live in [BookOrbit](https://github.com/bookorbit/bookorbit), pick **BookOrbit** as the
-server type under Sync server and log in with the KOReader login from BookOrbit. You get:
+The BookOrbit login is optional. Without it the reader works as before; the public relay build
+offers plain KOReader sync. If your books live in [BookOrbit](https://github.com/bookorbit/bookorbit)
+and you install a personal build, pick **BookOrbit** as the server type under Sync server and log in
+with the KOReader login from BookOrbit. You get:
 - progress sync with BookOrbit's web reader and your KOReader devices;
 - a **BookOrbit library** section to download EPUBs;
 - reading time in BookOrbit's statistics;
 - books marked read when you finish them.
 
-BookOrbit needs CORS headers on its KOReader API and a personal build that whitelists it. See
-[docs/bookorbit.md](docs/bookorbit.md).
+BookOrbit needs CORS headers on its KOReader API and a personal build that whitelists it, because
+Even Hub can only reach origins fixed at build time. The public build therefore keeps BookOrbit
+optional and out of the way (no proxy). See [docs/bookorbit.md](docs/bookorbit.md).
 
 ## KOReader progress sync
 
